@@ -1,0 +1,63 @@
+# 守护进程交叉编译 Makefile
+# BY ZF
+
+# 交叉编译配置（从环境变量获取）
+CXX = $(CROSS_COMPILE)g++
+CXXFLAGS = -pipe -std=c++0x -O2 -D_REENTRANT -w
+LIBS = -lpthread
+
+# 包含路径
+INCLUDES = -I../base -I../interfaces -I../../libv2gshm/libcshm
+
+# 目标文件
+DAEMON_TARGET = tcu_daemon
+TEST_TARGET = test_process
+
+# 源文件
+DAEMON_SOURCES = main.cpp daemon_process.cpp
+BASE_SOURCES = ../base/common/config_manager_lite.cpp ../base/common/message_queue.cpp
+TEST_SOURCES = test_process.cpp
+
+# 对象文件
+DAEMON_OBJECTS = $(DAEMON_SOURCES:.cpp=.o) $(BASE_SOURCES:.cpp=.o)
+TEST_OBJECTS = $(TEST_SOURCES:.cpp=.o) ../base/common/message_queue.o
+
+# 默认目标
+all: $(DAEMON_TARGET) $(TEST_TARGET)
+
+# 编译守护进程
+$(DAEMON_TARGET): $(DAEMON_OBJECTS)
+	$(CXX) $(DAEMON_OBJECTS) -o $(DAEMON_TARGET) $(LIBS)
+	@echo "Build completed: $(DAEMON_TARGET)"
+
+# 编译测试进程
+$(TEST_TARGET): $(TEST_OBJECTS)
+	$(CXX) $(TEST_OBJECTS) -o $(TEST_TARGET) $(LIBS)
+	@echo "Build completed: $(TEST_TARGET)"
+
+# 编译源文件
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# 清理
+clean:
+	rm -f $(DAEMON_OBJECTS) $(TEST_OBJECTS) $(DAEMON_TARGET) $(TEST_TARGET)
+	@echo "Clean completed"
+
+# 安装到目标设备
+install: $(DAEMON_TARGET) $(TEST_TARGET)
+	@echo "Installing to /usr/app/tcu/"
+	@mkdir -p /usr/app/tcu
+	@cp $(DAEMON_TARGET) /usr/app/tcu/
+	@cp $(TEST_TARGET) /usr/app/tcu/
+	@echo "Installation completed"
+
+# 显示编译信息
+info:
+	@echo "Cross-compiler: $(CXX)"
+	@echo "Flags: $(CXXFLAGS)"
+	@echo "Includes: $(INCLUDES)"
+	@echo "Libraries: $(LIBS)"
+	@echo "CROSS_COMPILE: $(CROSS_COMPILE)"
+
+.PHONY: all clean install cross-compile info

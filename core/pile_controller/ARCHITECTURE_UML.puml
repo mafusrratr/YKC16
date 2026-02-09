@@ -1,0 +1,268 @@
+@startuml PileController Architecture
+
+!define LAYER_COLOR #E1F5FF
+!define INTERFACE_COLOR #FFF4E1
+!define DATA_COLOR #E8F5E9
+
+package "应用层 (Controller Layer)" LAYER_COLOR {
+    
+    interface IPileController INTERFACE_COLOR {
+        +initialize(commType: const char*, config: const char*): bool
+        +cleanup(): void
+        +startCharge(): int
+        +stopCharge(): int
+        +getStatus(gunNo: uint8_t, status: PileStatus*): int
+    }
+
+    
+    class CANPileController {
+        -m_canComm: unique_ptr<CANCommunication>
+        -m_protocol: unique_ptr<CAN2CCUProtocol>
+        -m_gunNo: uint8_t
+        -m_devicePath: string
+        -m_baudrate: uint32_t
+        -m_bcuAddr: uint8_t
+        -m_cdzAddr: uint8_t
+        -m_packetTimeout: int
+        -m_retryCount: int
+        -m_initialized: bool
+        -m_running: atomic<bool>
+        -m_receiveThread: thread
+        -m_cachedStatus: PileStatus
+        -m_statusValid: atomic<bool>
+        --
+        +initialize(commType: const char*, config: const char*): bool
+        +cleanup(): void
+        +startCharge(): int
+        +stopCharge(): int
+        +getStatus(gunNo: uint8_t, status: PileStatus*): int
+        +setStartChargeData(cmd: TCU2CCU_CmdStartChargeData*): int
+        +setStopChargeData(cmd: TCU2CCU_CmdStopChargeData*): int
+        +setVersionCheckData(cmd: TCU2CCU_CmdVersionCheckData*): int
+        +setChargeParamData(cmd: TCU2CCU_CmdChargeParamData*): int
+        +getStartChargeResponse(out: TCU2CCU_StartChargeResponseData*): int
+        +getStopChargeResponse(out: TCU2CCU_StopChargeResponseData*): int
+        +getStartCompleteData(out: TCU2CCU_StatusStartCompleteData*): int
+        +getStopCompleteData(out: TCU2CCU_StatusStopCompleteData*): int
+        +getYC20Data(out: TCU2CCU_DataYC20*): int
+        +getYX22Data(out: TCU2CCU_DataYX22*): int
+        +getYX23Data(out: TCU2CCU_DataYX23*): int
+        +setChargeParams(gunNo: uint8_t, voltage: uint16_t, current: uint16_t): int
+        +getFaultCode(gunNo: uint8_t, faultCode: uint16_t*): int
+        +clearFault(gunNo: uint8_t): int
+        +heartbeat(): bool
+        --
+        -receiveThread(): void
+        -buildProtocolConfig(bcuAddr: uint8_t, cdzAddr: uint8_t, gunNo: uint8_t, ...): string
+        -sendCallbackWrapper(canId: uint32_t, data: const uint8_t*, dataLen: uint8_t): int
+        -{static} s_currentInstance: CANPileController*
+    }
+    
+    IPileController <|.. CANPileController
+}
+
+package "MQTT 通信层" LAYER_COLOR {
+    class MqttClient {
+        +init(clientId: string, cleanSession: bool): bool
+        +connect(host: string, port: int, keepalive: int): bool
+        +disconnect(): void
+        +subscribe(topic: string, qos: int): bool
+        +publish(topic: string, payload: string, qos: int, retain: bool): bool
+        +loopStart(): bool
+        +loopStop(force: bool): void
+    }
+}
+
+package "规约层 (Protocol Layer)" LAYER_COLOR {
+    
+    class CAN2CCUProtocol {
+        -m_sendCallback: SendCallback
+        -m_gunNo: uint8_t
+        -m_bcuAddr: uint8_t
+        -m_cdzAddr: uint8_t
+        -m_packetTimeout: int
+        -m_retryCount: int
+        -m_cmdStartChargeData: TCU2CCU_CmdStartChargeData
+        -m_cmdStopChargeData: TCU2CCU_CmdStopChargeData
+        -m_startCompleteData: TCU2CCU_StatusStartCompleteData
+        -m_stopCompleteData: TCU2CCU_StatusStopCompleteData
+        -m_yc20Data: TCU2CCU_DataYC20
+        -m_yc21Data: TCU2CCU_DataYC21
+        -m_yx22Data: TCU2CCU_DataYX22
+        -m_yx23Data: TCU2CCU_DataYX23
+        -m_startCompleteDataValid: bool
+        -m_stopCompleteDataValid: bool
+        -m_yc20DataValid: bool
+        -m_yc21DataValid: bool
+        -m_yx22DataValid: bool
+        -m_yx23DataValid: bool
+        -m_longFrameContexts: LongFrameContext[2]
+        --
+        +initialize(config: const char*): bool
+        +cleanup(): void
+        +setSendCallback(callback: SendCallback): void
+        +encodeStartCharge(): int
+        +encodeStopCharge(): int
+        +encodeSetChargeParams(gunNo: uint8_t, voltage: uint16_t, current: uint16_t): int
+        +encodeGetStatus(gunNo: uint8_t): int
+        +encodeClearFault(gunNo: uint8_t): int
+        +encodeHeartbeat(): int
+        +decodeHeartbeat(data: const uint8_t*, dataLen: size_t): bool
+        +calculateCANId(priority: uint8_t, pgn: uint8_t, srcAddr: uint8_t, dstAddr: uint8_t): uint32_t
+        +parseCANId(canId: uint32_t, ...): void
+        +decodeFrame(canId: uint32_t, data: const uint8_t*, dataLen: size_t): int
+        +getAggregatedStatus(outStatus: PileStatus*): int
+        +setStartChargeData(cmd: TCU2CCU_CmdStartChargeData*): int
+        +setStopChargeData(cmd: TCU2CCU_CmdStopChargeData*): int
+        +setVersionCheckData(cmd: TCU2CCU_CmdVersionCheckData*): int
+        +setChargeParamData(cmd: TCU2CCU_CmdChargeParamData*): int
+        +getStartChargeResponseData(outData: TCU2CCU_StartChargeResponseData*): int
+        +getStopChargeResponseData(outData: TCU2CCU_StopChargeResponseData*): int
+        +getStartCompleteData(outData: TCU2CCU_StatusStartCompleteData*): int
+        +getStopCompleteData(outData: TCU2CCU_StatusStopCompleteData*): int
+        +getYC20Data(outData: TCU2CCU_DataYC20*): int
+        +getYX22Data(outData: TCU2CCU_DataYX22*): int
+        +getYX23Data(outData: TCU2CCU_DataYX23*): int
+        --
+        -sendSingleFrame(priority: uint8_t, pgn: uint8_t, data: const uint8_t*, dataLen: size_t): int
+        -sendMultiFrame(priority: uint8_t, pgn: uint8_t, data: const uint8_t*, dataLen: size_t): int
+        -processLongFrame(canId: uint32_t, data: const uint8_t*, dataLen: size_t): int
+        -calculateChecksum(data: const uint8_t*, len: size_t): uint16_t
+        -verifyChecksum(data: const uint8_t*, len: size_t, checksum: uint16_t): bool
+        -getLongFrameContext(pgn: uint8_t): LongFrameContext*
+        -resetLongFrameContext(pgn: uint8_t): void
+    }
+    
+    note right of CAN2CCUProtocol
+        协议层职责：
+        1. 编码：业务数据 → CAN帧格式
+        2. 解码：CAN帧格式 → 业务数据
+        3. 多帧处理：长数据分帧/组装
+        4. 校验和计算/验证
+        5. 通过回调直接调用通信层发送
+    end note
+}
+
+package "通信基类层 (Communication Layer)" LAYER_COLOR {
+    
+    class CANCommunication {
+        -m_socket: int
+        -m_deviceName: string
+        -m_baudrate: uint32_t
+        -m_isOpen: bool
+        -m_addr: sockaddr_can
+        --
+        +open(deviceName: const string&, baudrate: uint32_t): bool
+        +close(): void
+        +isOpen(): bool
+        +send(canId: uint32_t, data: const uint8_t*, dataLen: uint8_t): int
+        +receive(canId: uint32_t&, data: uint8_t*, dataLen: uint8_t&): int
+        +setFilter(canId: uint32_t, mask: uint32_t): int
+    }
+    
+    note right of CANCommunication
+        通信层职责：
+        1. SocketCAN封装
+        2. CAN帧发送/接收
+        3. 非阻塞接收模式
+        4. 无业务语义，纯数据传输
+    end note
+}
+
+package "业务数据结构 (Data Structures)" DATA_COLOR {
+
+    class PileStatus {
+        +gunNo: uint8_t
+        +outputVoltage: uint16_t
+        +outputCurrent: uint16_t
+        +outputPower: uint32_t
+        +cumulativeEnergy: uint32_t
+        +workStatus: uint8_t
+        +faultCode: uint16_t
+        +soc: uint8_t
+        +temperature: uint16_t
+    }
+    
+    class TCU2CCU_CmdStartChargeData {
+        +loadControlSwitch: uint8_t
+        +plugAndChargeFlag: uint8_t
+        +auxPowerVoltage: uint8_t
+    }
+    
+    class TCU2CCU_StatusStartCompleteData {
+        +startResult: uint8_t
+        +startFailReason: uint8_t
+        +pileState: uint8_t
+        +outputVoltage: uint16_t
+        +outputCurrent: uint16_t
+        +outputPower: uint32_t
+        +cumulativeEnergy: uint32_t
+    }
+    
+    class TCU2CCU_DataYC20 {
+        +outputVoltage: uint16_t
+        +outputCurrent: uint16_t
+        +outputPower: uint32_t
+        +cumulativeEnergy: uint32_t
+        +workStatus: uint8_t
+        +faultCode: uint16_t
+        +soc: uint8_t
+        +temperature: uint16_t
+    }
+    
+    class TCU2CCU_DataYX22 {
+        +pileState: uint8_t
+        +gunState: uint8_t
+        +lockState: uint8_t
+        +emergencyStopState: uint8_t
+    }
+    
+    class LongFrameContext {
+        +pgn: uint8_t
+        +totalFrames: uint8_t
+        +currentFrame: uint8_t
+        +dataLength: uint16_t
+        +buffer: uint8_t[512]
+        +isComplete: bool
+        +lastFrameTime: uint32_t
+    }
+}
+
+' 关系定义
+CANPileController *-- CANCommunication : 组合
+CANPileController *-- CAN2CCUProtocol : 组合
+
+PileControllerProcess *-- MqttClient : 组合
+CAN2CCUProtocol ..> CANCommunication : 通过回调调用
+CAN2CCUProtocol ..> SendCallback : 使用
+
+' 数据流关系
+CANPileController ..> PileStatus : 使用
+CAN2CCUProtocol ..> TCU2CCU_CmdStartChargeData : 管理
+CAN2CCUProtocol ..> TCU2CCU_StatusStartCompleteData : 管理
+CAN2CCUProtocol ..> TCU2CCU_DataYC20 : 管理
+CAN2CCUProtocol ..> TCU2CCU_DataYX22 : 管理
+CAN2CCUProtocol ..> LongFrameContext : 管理
+
+' 接口实现关系
+IPileController <|.. CANPileController : implements
+
+' 数据流标注
+note top of CANPileController
+    发送流程：
+    startCharge() →
+    encodeStartCharge() →
+    sendSingleFrame/sendMultiFrame() →
+    sendCallbackWrapper() →
+    CANCommunication::send()
+end note
+
+note bottom of CANPileController
+    接收流程：
+    receiveThread() →
+    CANCommunication::receive() →
+    decodeFrame() →
+    onStatusChanged()
+end note
+
+@enduml

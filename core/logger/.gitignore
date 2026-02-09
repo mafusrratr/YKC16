@@ -1,0 +1,19 @@
+# 编译产物
+obj/
+release/
+*.o
+*.so
+*.a
+
+# 可执行文件
+tcu_logger
+test_logger
+test_all_logs
+estimate_storage
+test_buffer_protection
+test_rotate
+
+# 数据库文件（测试用）
+*.db
+*.db-journal
+

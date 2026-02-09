@@ -1,0 +1,136 @@
+# 日志系统交叉编译 Makefile
+# BY ZF
+
+# 交叉编译配置（从环境变量获取）
+CXX = $(CROSS_COMPILE)g++
+CXXFLAGS = -pipe -std=c++0x -O2 -D_REENTRANT -w
+# BY ZF: 工具链库路径（可通过环境变量 TOOLCHAIN_LIB_PATH 指定，用于解决 libstdc++ 版本问题）
+TOOLCHAIN_LIB_PATH ?= $(shell dirname $(shell which $(CXX) 2>/dev/null || echo /usr/bin/g++))/../lib
+# BY ZF: 是否静态链接 libstdc++（可通过环境变量 STATIC_STDCPP=1 启用，解决版本不匹配问题）
+STATIC_STDCPP ?= 0
+
+# BY ZF: 外部库路径配置（可通过环境变量 EXTRA_LIB_PATH 覆盖）
+EXTRA_LIB_PATH ?= $(shell cd ../.. && pwd)/extraLib
+# BY ZF: 平台特定库路径（可通过环境变量 PLATFORM 指定，如 jzq/nuc980/imx6ul）
+PLATFORM ?= 
+PLATFORM_LIB_PATH = $(if $(PLATFORM),$(EXTRA_LIB_PATH)/$(PLATFORM),$(EXTRA_LIB_PATH))
+# BY ZF: 共享内存库路径
+SHM_LIB_PATH = ../../libv2gshm/cshm/bin/Release
+LIBDIRS = -L$(PLATFORM_LIB_PATH) -L$(EXTRA_LIB_PATH) -L$(SHM_LIB_PATH)
+# BY ZF: 运行时库搜索路径（rpath），确保运行时能找到共享库
+RPATH = -Wl,-rpath,$(PLATFORM_LIB_PATH):$(EXTRA_LIB_PATH):$(SHM_LIB_PATH):$(TOOLCHAIN_LIB_PATH):/usr/lib:/lib
+# BY ZF: 链接库（添加 -ldl 因为 sqlite3 需要 dlopen/dlsym）
+LIBS = -lpthread -lsqlite3 -levsshm -ldl
+# BY ZF: 如果启用静态链接 libstdc++，解决版本不匹配问题（会增加文件大小）
+ifeq ($(STATIC_STDCPP),1)
+    LIBS += -static-libstdc++
+    CXXFLAGS += -static-libstdc++
+endif
+
+# 包含路径
+INCLUDES = -I../base -I../interfaces -I../../libv2gshm/libcshm -Isql
+
+# 目录设置
+OBJ_DIR = obj
+RELEASE_DIR = release
+DOC_DIR = doc
+
+# 目标文件
+TARGET = $(RELEASE_DIR)/tcu_logger
+TEST_LOGGER = $(RELEASE_DIR)/test_logger
+TEST_ALL = $(RELEASE_DIR)/test_all_logs
+
+# 源文件
+SOURCES = main.cpp logger_process.cpp database_manager.cpp
+TEST_SOURCES = test_logger.cpp test_all_logs.cpp
+BASE_SOURCES = ../base/common/config_manager_lite.cpp ../base/common/message_queue.cpp ../base/logger/log_sender.cpp
+
+# 对象文件（放到 obj/ 目录）
+OBJECTS = $(addprefix $(OBJ_DIR)/, $(SOURCES:.cpp=.o)) $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
+TEST_LOGGER_OBJECTS = $(OBJ_DIR)/test_logger.o $(OBJ_DIR)/database_manager.o $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
+TEST_ALL_OBJECTS = $(OBJ_DIR)/test_all_logs.o $(OBJ_DIR)/logger_process.o $(OBJ_DIR)/database_manager.o $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
+
+# 默认目标
+all: directories $(TARGET) $(TEST_LOGGER) $(TEST_ALL)
+
+# 创建目录
+directories:
+	@mkdir -p $(OBJ_DIR) $(RELEASE_DIR) $(DOC_DIR)
+
+# 编译主程序
+$(TARGET): $(OBJECTS)
+	$(CXX) $(OBJECTS) -o $(TARGET) $(LIBDIRS) $(RPATH) $(LIBS)
+	@echo "Build completed: $(TARGET)"
+
+# 编译测试程序
+$(TEST_LOGGER): $(TEST_LOGGER_OBJECTS)
+	$(CXX) $(TEST_LOGGER_OBJECTS) -o $(TEST_LOGGER) $(LIBDIRS) $(RPATH) $(LIBS)
+	@echo "Build completed: $(TEST_LOGGER)"
+
+$(TEST_ALL): $(TEST_ALL_OBJECTS)
+	$(CXX) $(TEST_ALL_OBJECTS) -o $(TEST_ALL) $(LIBDIRS) $(RPATH) $(LIBS)
+	@echo "Build completed: $(TEST_ALL)"
+
+# 编译源文件（logger目录）
+$(OBJ_DIR)/%.o: %.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# 编译基础类源文件
+$(OBJ_DIR)/config_manager_lite.o: ../base/common/config_manager_lite.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/message_queue.o: ../base/common/message_queue.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/log_sender.o: ../base/logger/log_sender.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# 清理
+clean:
+	rm -rf $(OBJ_DIR) $(RELEASE_DIR)
+	@echo "Clean completed"
+
+# 安装到目标设备
+install: all
+	@echo "Installing to /usr/app/tcu/"
+	@mkdir -p /usr/app/tcu
+	@cp $(RELEASE_DIR)/* /usr/app/tcu/
+	@echo "Installation completed"
+
+# 整理文档到 doc 目录
+docs:
+	@mkdir -p $(DOC_DIR)
+	@cp README.md $(DOC_DIR)/ 2>/dev/null || true
+	@cp BUILD.md $(DOC_DIR)/ 2>/dev/null || true
+	@cp PROJECT_STRUCTURE.md $(DOC_DIR)/ 2>/dev/null || true
+	@cp DATABASE_TABLES.md $(DOC_DIR)/ 2>/dev/null || true
+	@cp CHANGELOG.md $(DOC_DIR)/ 2>/dev/null || true
+	@echo "✅ Documentation organized in $(DOC_DIR)/"
+	@ls -lh $(DOC_DIR)/
+
+# 显示编译信息
+info:
+	@echo "Cross-compiler: $(CXX)"
+	@echo "Flags: $(CXXFLAGS)"
+	@echo "Includes: $(INCLUDES)"
+	@echo "Library directories: $(LIBDIRS)"
+	@echo "Runtime paths (rpath): $(RPATH)"
+	@echo "Libraries: $(LIBS)"
+	@echo "CROSS_COMPILE: $(CROSS_COMPILE)"
+	@echo "EXTRA_LIB_PATH: $(EXTRA_LIB_PATH)"
+	@echo "PLATFORM: $(PLATFORM)"
+	@echo "PLATFORM_LIB_PATH: $(PLATFORM_LIB_PATH)"
+	@echo "SHM_LIB_PATH: $(SHM_LIB_PATH)"
+	@echo "TOOLCHAIN_LIB_PATH: $(TOOLCHAIN_LIB_PATH)"
+	@echo "STATIC_STDCPP: $(STATIC_STDCPP)"
+	@echo "Output directories:"
+	@echo "  Objects: $(OBJ_DIR)/"
+	@echo "  Binaries: $(RELEASE_DIR)/"
+	@echo "  Documents: $(DOC_DIR)/"
+
+.PHONY: all directories clean install docs info
+

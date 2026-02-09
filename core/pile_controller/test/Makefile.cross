@@ -1,0 +1,130 @@
+# 测试程序交叉编译 Makefile (iMX6UL)
+# BY ZF
+
+# 交叉编译器设置
+CROSS_COMPILE = arm-linux-gnueabihf-
+CXX = $(CROSS_COMPILE)g++
+CXXFLAGS = -Wall -O2 -std=c++11
+INCLUDES = -I.. -I../base -I../interfaces -I../../libv2gshm/libcshm
+
+# 目录设置
+OBJ_DIR = obj
+RELEASE_DIR = release
+
+# 测试目标
+TEST_TARGETS = $(RELEASE_DIR)/test_can_controller \
+               $(RELEASE_DIR)/test_protocol \
+               $(RELEASE_DIR)/test_can_communication \
+               $(RELEASE_DIR)/test_start_stop_charge
+
+# 源文件
+TEST_CAN_CONTROLLER_SOURCES = test_can_controller.cpp \
+                              ../controllers/can_pile_controller.cpp \
+                              ../protocol/can2ccu_protocol.cpp
+
+TEST_PROTOCOL_SOURCES = test_protocol.cpp \
+                        ../protocol/can2ccu_protocol.cpp
+
+TEST_CAN_COMMUNICATION_SOURCES = test_can_communication.cpp
+
+TEST_START_STOP_CHARGE_SOURCES = test_start_stop_charge.cpp \
+                                 ../controllers/can_pile_controller.cpp \
+                                 ../protocol/can2ccu_protocol.cpp
+
+# Base源文件（共享）
+BASE_SOURCES = ../../base/common/config_manager_lite.cpp \
+               ../../base/common/message_queue.cpp \
+               ../../base/logger/log_sender.cpp \
+               ../../base/communication/can_communication.cpp \
+               ../../base/communication/network_communication.cpp \
+               ../../base/communication/serial_communication.cpp \
+               ../../base/process/base_process.cpp
+
+# 对象文件
+TEST_CAN_CONTROLLER_OBJECTS = $(addprefix $(OBJ_DIR)/, $(notdir $(TEST_CAN_CONTROLLER_SOURCES:.cpp=.o))) \
+                              $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
+
+TEST_PROTOCOL_OBJECTS = $(addprefix $(OBJ_DIR)/, $(notdir $(TEST_PROTOCOL_SOURCES:.cpp=.o)))
+
+TEST_CAN_COMMUNICATION_OBJECTS = $(addprefix $(OBJ_DIR)/, $(notdir $(TEST_CAN_COMMUNICATION_SOURCES:.cpp=.o))) \
+                                  $(OBJ_DIR)/can_communication.o
+
+TEST_START_STOP_CHARGE_OBJECTS = $(addprefix $(OBJ_DIR)/, $(notdir $(TEST_START_STOP_CHARGE_SOURCES:.cpp=.o))) \
+                                  $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
+
+# 共享内存库路径
+SHM_LIB_PATH = ../../libv2gshm/cshm/bin/Release
+
+# 依赖库
+LIBDIRS = -L$(SHM_LIB_PATH) -L/workspace/projects/01_TCU_Program/2510_RefactorProject/extraLib
+LIBS = -lpthread -levsshm
+
+# 默认目标
+all: directories $(TEST_TARGETS)
+
+# 创建目录
+directories:
+	@mkdir -p $(OBJ_DIR) $(RELEASE_DIR)
+
+# 编译测试程序
+$(RELEASE_DIR)/test_can_controller: $(TEST_CAN_CONTROLLER_OBJECTS)
+	$(CXX) $(TEST_CAN_CONTROLLER_OBJECTS) -o $@ $(LIBDIRS) $(LIBS) -s
+	@echo "Build completed: $@"
+
+$(RELEASE_DIR)/test_protocol: $(TEST_PROTOCOL_OBJECTS)
+	$(CXX) $(TEST_PROTOCOL_OBJECTS) -o $@ $(LIBDIRS) $(LIBS) -s
+	@echo "Build completed: $@"
+
+$(RELEASE_DIR)/test_can_communication: $(TEST_CAN_COMMUNICATION_OBJECTS)
+	$(CXX) $(TEST_CAN_COMMUNICATION_OBJECTS) -o $@ $(LIBDIRS) $(LIBS) -s
+	@echo "Build completed: $@"
+
+$(RELEASE_DIR)/test_start_stop_charge: $(TEST_START_STOP_CHARGE_OBJECTS)
+	$(CXX) $(TEST_START_STOP_CHARGE_OBJECTS) -o $@ $(LIBDIRS) $(LIBS) -s
+	@echo "Build completed: $@"
+
+# 编译规则：测试源文件
+$(OBJ_DIR)/test_%.o: test_%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# 编译规则：控制器和协议源文件
+$(OBJ_DIR)/can_pile_controller.o: ../controllers/can_pile_controller.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/can2ccu_protocol.o: ../protocol/can2ccu_protocol.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# Base目录源文件编译规则（必须在具体规则之前）
+$(OBJ_DIR)/config_manager_lite.o: ../../base/common/config_manager_lite.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/message_queue.o: ../../base/common/message_queue.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/log_sender.o: ../../base/logger/log_sender.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/can_communication.o: ../../base/communication/can_communication.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/network_communication.o: ../../base/communication/network_communication.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/serial_communication.o: ../../base/communication/serial_communication.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/base_process.o: ../../base/process/base_process.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# 清理
+clean:
+	rm -rf $(OBJ_DIR) $(RELEASE_DIR)
+
+# 显示编译信息
+info:
+	@echo "Cross Compiler: $(CXX)"
+	@echo "Targets: $(TEST_TARGETS)"
+	@echo "SHM Library Path: $(SHM_LIB_PATH)"
+
+.PHONY: all clean directories info
+

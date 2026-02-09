@@ -1,0 +1,37 @@
+# Build artifacts
+build/
+bin/
+obj/
+out/
+release/
+*.o
+*.a
+*.so
+*.so.*
+*.d
+*.dSYM/
+*.elf
+*.map
+
+# Logs and runtime files
+*.log
+*.pid
+*.tmp
+*.swp
+*.swo
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Coverage
+*.gcda
+*.gcno
+*.gcov
