@@ -60,6 +60,10 @@ public:
     bool isStartCompleteDataValid() const;
     int getStopCompleteData(TCU2CCU_StatusStopCompleteData* out) const;
     bool isStopCompleteDataValid() const;
+    void clearStartChargeResponseValid();
+    void clearStopChargeResponseValid();
+    void clearStartCompleteValid();
+    void clearStopCompleteValid();
 
     int getYC20Data(TCU2CCU_DataYC20* out) const;
     bool isYC20DataValid() const;
@@ -72,7 +76,6 @@ public:
     uint8_t getHeartbeatCommStatus() const;
     
     // CAN 特有功能（不在基类）
-    int setChargeParams(uint8_t gunNo, uint16_t voltage, uint16_t current);
     int getFaultCode(uint8_t gunNo, uint16_t* faultCode);
     int clearFault(uint8_t gunNo);
     bool heartbeat();

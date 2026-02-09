@@ -14,15 +14,15 @@
 ### 3.1 命令通道
 - `tcu/pile/{gun}/cmd`
 
-### 3.2 命令请求通道（由 pile_controller 主动发起）
-- `tcu/pile/{gun}/cmdreq`
+### 3.2 上送命令通道（由 pile_controller 主动发起）
+- `tcu/pile/{gun}/cmdupset`
 
 ### 3.2 数据通道
 - `tcu/pile/{gun}/data`
 
 **说明**：
 - `{gun}`：`0` / `1` / `all`
-- `cmd`、`cmdreq` 与 `data` 必须区分，避免处理混淆。
+- `cmd`、`cmdupset` 与 `data` 必须区分，避免处理混淆。
 - **上下行方向不固定**：根据业务角色决定发布/订阅方向（例如：charge_logic 可发布 cmd，pile_controller 可发布 data；也可在某些场景反向）。
 
 ## 4. Payload 通用字段
@@ -79,7 +79,6 @@ Topic：`tcu/pile/{gun}/cmd`
 ### 5.1 cmd 字段建议值
 - `start_charge`
 - `stop_charge`
-- `set_charge_params`
 - `clear_fault`
 
 ### 5.2 start_charge 参数
@@ -109,11 +108,16 @@ Topic：`tcu/pile/{gun}/data`
 ### 6.1 type 分类建议
 - `yc`：遥测
 - `yx`：遥信
+- `error`：故障/异常
+
+## 6.2 上送命令消息（cmdupset）
+Topic：`tcu/pile/{gun}/cmdupset`
+
+用于上送命令/流程事件：
 - `start_response`：启动应答
 - `stop_response`：停止应答
 - `start_complete`：启动完成
 - `stop_complete`：停止完成
-- `error`：故障/异常
 
 ## 7. QoS 与 Retain 建议
 - 状态/数据类：QoS 0（低延迟）

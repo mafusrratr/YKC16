@@ -15,6 +15,7 @@ struct mosquitto_message;
 class MqttClient {
 public:
     typedef std::function<void(const std::string& topic, const std::string& payload)> MessageHandler;
+    typedef std::function<void(int rc)> ConnectHandler;
 
     MqttClient();
     ~MqttClient();
@@ -30,15 +31,18 @@ public:
     void loopStop(bool force = false);
 
     void setMessageHandler(const MessageHandler& handler);
+    void setConnectHandler(const ConnectHandler& handler);
     bool setWill(const std::string& topic, const std::string& payload, int qos = 0, bool retain = false);
     bool setUsernamePassword(const std::string& username, const std::string& password);
 
 private:
     static void onMessage(struct mosquitto* mosq, void* userdata, const struct mosquitto_message* message);
+    static void onConnect(struct mosquitto* mosq, void* userdata, int rc);
 
 private:
     struct mosquitto* m_mosq;
     MessageHandler m_onMessage;
+    ConnectHandler m_onConnect;
 };
 
 #endif // MQTT_CLIENT_H

@@ -9,7 +9,6 @@
 | **启动充电** | `ChargeStartParams`: gunNo, chargeMode, targetVoltage, targetCurrent, targetEnergy, timeLimit | `TCU2CCU_CmdStartChargeData`: loadControlSwitch, plugAndChargeFlag, auxPowerVoltage | 接口参数被忽略，协议层用硬编码默认值 |
 | **停止充电** | `ChargeStopParams`: gunNo, stopReason | `TCU2CCU_CmdStopChargeData`: stopReason, tcuStopCode | 仅用 stopReason=0x01，未使用 params |
 | **状态查询** | `getStatus(gunNo, PileStatus*)`，单一体 PileStatus（电压/电流/功率/电量/工作状态/故障码/SOC/温度） | YC20（遥测）、YX22/YX23（遥信位）、StartComplete/StopComplete 等 | getAggregatedStatus 仅从 YC20 填部分字段，YX22 等未纳入 |
-| **设置充电参数** | `setChargeParams(gunNo, voltage, current)` | `TCU2CCU_CmdSetParamsData`: voltage, current | 语义一致，可保留 |
 | **故障码** | `getFaultCode(gunNo, uint16_t*)` 单一故障码 | YX22/YX23 多位故障/告警位 | 协议无“单一故障码”，需约定聚合规则或改接口 |
 | **清除故障** | `clearFault(gunNo)` 无故障码参数 | `TCU2CCU_CmdClearFaultData`: faultCode | 协议需要 faultCode，接口未提供 |
 | **配置阶段** | 无 | 版本校验(0x07/0x08)、下发充电参数(0x09/0x0A) | 仅 CANPileController 扩展方法，未进接口 |
@@ -35,7 +34,7 @@
 
 1. **启动充电**
    - 接口改为：`int startCharge(const TCU2CCU_CmdStartChargeData* cmd)`，或保留 `ChargeStartParams` 但在其内/外明确“仅用于 CAN 时映射到 TCU2CCU_CmdStartChargeData”。
-   - 若保留 ChargeStartParams：在接口头文件中注明“CAN 实现时映射为 loadControlSwitch/plugAndChargeFlag/auxPowerVoltage，targetVoltage/Current/Energy 由 setChargeParams 或协议约定在后续步骤下发”。
+- 若保留 ChargeStartParams：在接口头文件中注明“CAN 实现时映射为 loadControlSwitch/plugAndChargeFlag/auxPowerVoltage，后续参数由规约步骤下发”。
 
 2. **停止充电**
    - 接口改为：`int stopCharge(const TCU2CCU_CmdStopChargeData* cmd)`，或让 `ChargeStopParams` 包含 stopReason + tcuStopCode，并在协议层使用。
@@ -230,14 +229,14 @@
 | 序号 | 文件 | 修改内容 |
 |------|------|----------|
 | 1.1 | **ipile_controller.h** | ① 保留 `PileStatus` 结构体（getStatus 出参）。② 删除 `ChargeStartParams`、`ChargeStopParams`（启停不再通过基类传参）。③ 删除虚函数：`setChargeParams`、`getFaultCode`、`clearFault`、`heartbeat`、`onStatusChanged`。④ 将 `startCharge(const ChargeStartParams* params)` 改为 `startCharge()`（无参）。⑤ 将 `stopCharge(const ChargeStopParams* params)` 改为 `stopCharge()`（无参）。⑥ 保留 `getStatus(uint8_t gunNo, PileStatus* status)`，注释可改为“获取充电桩状态”。⑦ 保留 `initialize`、`cleanup`。 |
-| 1.2 | **ipile_protocol.h** | ① 将 `encodeStartCharge(const ChargeStartParams* params)` 改为无参 `encodeStartCharge()`（或保留带参版本仅给 CAN 内部使用，接口层只声明无参）。② 将 `encodeStopCharge(const ChargeStopParams* params)` 改为无参 `encodeStopCharge()`。③ 其余 `encodeSetChargeParams`、`encodeGetStatus`、`encodeClearFault`、`encodeHeartbeat`、`decodeFrame`、`getAggregatedStatus`、`decodeHeartbeat` 保留在规约层，供 CAN 等实现使用，不要求基类控制器暴露。 |
+| 1.2 | **ipile_protocol.h** | ① 将 `encodeStartCharge(const ChargeStartParams* params)` 改为无参 `encodeStartCharge()`（或保留带参版本仅给 CAN 内部使用，接口层只声明无参）。② 将 `encodeStopCharge(const ChargeStopParams* params)` 改为无参 `encodeStopCharge()`。③ 其余 `encodeGetStatus`、`encodeClearFault`、`encodeHeartbeat`、`decodeFrame`、`getAggregatedStatus`、`decodeHeartbeat` 保留在规约层，供 CAN 等实现使用，不要求基类控制器暴露。 |
 
 ### 6.3 阶段二：CAN 控制器与规约实现适配
 
 | 序号 | 文件 | 修改内容 |
 |------|------|----------|
-| 2.1 | **can_pile_controller.h** | ① 重写基类虚函数声明：`startCharge()`、`stopCharge()` 无参；`getStatus(uint8_t, PileStatus*)` 保留；移除对已删基类接口的 override（`setChargeParams`、`getFaultCode`、`clearFault`、`heartbeat`、`onStatusChanged`）。② 将上述能力改为 CANPileController 自身公有方法（非 override）：`setChargeParams`、`getFaultCode`、`clearFault`、`heartbeat` 等，供业务/测试通过具体类型调用。③ 保留现有扩展方法：`getYX22Data`、`isYX22DataValid`、`getHeartbeatCommStatus`、`isStartCompleteDataValid`、`encodeVersionCheck`、`isVersionCheckResponseValid`、`encodeIssueChargeParams`、`isChargeParamResponseValid`。 |
-| 2.2 | **can_pile_controller.cpp** | ① `startCharge()`：无参，内部调用 `m_protocol->encodeStartCharge(nullptr)` 或规约层无参 `encodeStartCharge()`，使用协议默认/内部已配置的启动参数。② `stopCharge()`：无参，同上，使用默认停止原因。③ `getStatus()`：实现不变，仍从 protocol 的 getAggregatedStatus 或缓存填充 PileStatus。④ 原 `setChargeParams`、`getFaultCode`、`clearFault`、`heartbeat`、`onStatusChanged` 改为普通成员函数（不再 override），实现逻辑可保持不变。⑤ 若规约层改为无参 encode，则 protocol 的 `encodeStartCharge()`/`encodeStopCharge()` 内部使用成员变量（如 m_cmdStartChargeData）的默认值或子类预先设置的配置。 |
+| 2.1 | **can_pile_controller.h** | ① 重写基类虚函数声明：`startCharge()`、`stopCharge()` 无参；`getStatus(uint8_t, PileStatus*)` 保留；移除对已删基类接口的 override（`getFaultCode`、`clearFault`、`heartbeat`、`onStatusChanged`）。② 将上述能力改为 CANPileController 自身公有方法（非 override）：`getFaultCode`、`clearFault`、`heartbeat` 等，供业务/测试通过具体类型调用。③ 保留现有扩展方法：`getYX22Data`、`isYX22DataValid`、`getHeartbeatCommStatus`、`isStartCompleteDataValid`、`encodeVersionCheck`、`isVersionCheckResponseValid`、`encodeIssueChargeParams`、`isChargeParamResponseValid`。 |
+| 2.2 | **can_pile_controller.cpp** | ① `startCharge()`：无参，内部调用 `m_protocol->encodeStartCharge(nullptr)` 或规约层无参 `encodeStartCharge()`，使用协议默认/内部已配置的启动参数。② `stopCharge()`：无参，同上，使用默认停止原因。③ `getStatus()`：实现不变，仍从 protocol 的 getAggregatedStatus 或缓存填充 PileStatus。④ 原 `getFaultCode`、`clearFault`、`heartbeat`、`onStatusChanged` 改为普通成员函数（不再 override），实现逻辑可保持不变。⑤ 若规约层改为无参 encode，则 protocol 的 `encodeStartCharge()`/`encodeStopCharge()` 内部使用成员变量（如 m_cmdStartChargeData）的默认值或子类预先设置的配置。 |
 | 2.3 | **can2ccu_protocol.h** | ① 若规约接口改为无参：声明 `encodeStartCharge()`、`encodeStopCharge()` 无参重载，或保留原签名供 CAN 内部使用、对外由 controller 只调无参。② 与 ipile_protocol.h 保持一致（无参虚函数则 CAN2CCUProtocol 实现无参版本）。 |
 | 2.4 | **can2ccu_protocol.cpp** | ① 实现无参 `encodeStartCharge()`：内部使用默认或已设置的 m_cmdStartChargeData（如 loadControlSwitch=0x02, plugAndChargeFlag=0x01, auxPowerVoltage=0x0C）调用现有 encodeStartChargeFrame()。② 实现无参 `encodeStopCharge()`：内部使用默认 m_cmdStopChargeData（如 stopReason=0x01, tcuStopCode=0x00）调用 encodeStopChargeFrame()。③ 若保留带参版本给扩展用，可保留原 `encodeStartCharge(const ChargeStartParams*)` 为内部或已废弃，避免与无参版本重复实现。 |
 
@@ -247,7 +246,7 @@
 |------|------|----------|
 | 3.1 | **pile_controller_process.cpp** | ① **心跳**：基类不再提供 `heartbeat()`。可选方案两选一或组合：**方案 A**：CANPileController 在内部（如 receiveThread 或独立定时）按 1s 周期自行发送心跳，process 不再调用 heartbeat；**方案 B**：process 中按具体类型调用，例如 `if (auto* can = dynamic_cast<CANPileController*>(m_controllers[i].get())) can->heartbeat();`。推荐方案 A，进程只依赖基类三接口 + init/cleanup。② **状态**：继续使用 `getStatus(gunNo, &status)`，无需修改。③ **onStatusChanged**：若 process 此前通过基类注册回调，删除该依赖；若 CAN 实现内部需要上报状态变化，可在 CANPileController 内用观察者或回调注册给 process，由 process 以具体类型注册，不放在基类。 |
 | 3.2 | **test_start_stop_charge.cpp** | ① 启停调用改为无参：`controller.startCharge()`、`controller.stopCharge()`，删除 ChargeStartParams/ChargeStopParams 的构造与传递。② 心跳：当前已使用 CANPileController 类型，保留 `controller.heartbeat()` 调用（作为 CAN 扩展接口）。③ 版本校验、桩参数、YX22、启动完成等仍通过 `controller.encodeVersionCheck()`、`controller.isVersionCheckResponseValid()` 等 CAN 扩展接口调用，无需改动。 |
-| 3.3 | **test_can_controller.cpp** | ① 已使用 CANPileController 类型，保留对 `getStatus`、`setChargeParams`、`getFaultCode`、`heartbeat` 的调用；这些改为 CANPileController 自身方法，不再通过基类指针调用（若测试用基类指针，需改为具体类型或 dynamic_cast 后调用扩展接口）。 |
+| 3.3 | **test_can_controller.cpp** | ① 已使用 CANPileController 类型，保留对 `getStatus`、`getFaultCode`、`heartbeat` 的调用；这些改为 CANPileController 自身方法，不再通过基类指针调用（若测试用基类指针，需改为具体类型或 dynamic_cast 后调用扩展接口）。 |
 | 3.4 | **test_protocol.cpp** | ① 若存在对 ChargeStartParams/ChargeStopParams 的构造及 encodeStartCharge(params)/encodeStopCharge(params) 的调用，改为无参调用或使用规约层内部默认；若测试需要覆盖“带参启动/停止”，可改为直接调用 CAN2CCUProtocol 的带参内部接口或通过 CANPileController 的扩展配置接口设参后再 startCharge()/stopCharge()。 |
 
 ### 6.5 阶段四：清理与文档
@@ -260,5 +259,5 @@
 ### 6.6 实施顺序与风险
 
 - **推荐顺序**：阶段一（基类 + 规约接口）→ 阶段二（CAN 实现）→ 阶段三（进程与测试）→ 阶段四（文档）。
-- **兼容性**：所有通过基类指针仅调用 startCharge/stopCharge/getStatus/initialize/cleanup 的代码可保持不变；依赖 heartbeat/setChargeParams/getFaultCode/clearFault/onStatusChanged 的调用方必须改为使用具体类型（如 CANPileController）或改为由子类内部自行完成（如心跳在 controller 内部定时发送）。
+- **兼容性**：所有通过基类指针仅调用 startCharge/stopCharge/getStatus/initialize/cleanup 的代码可保持不变；依赖 heartbeat/getFaultCode/clearFault/onStatusChanged 的调用方必须改为使用具体类型（如 CANPileController）或改为由子类内部自行完成（如心跳在 controller 内部定时发送）。
 - **回归**：完成各阶段后编译通过，运行 test_start_stop_charge、test_can_controller、test_protocol，确认启停与状态查询行为符合预期；进程主循环若采用方案 A（心跳在 CAN 内部），需确认 CAN 设备上心跳报文仍按 1s 周期发送。

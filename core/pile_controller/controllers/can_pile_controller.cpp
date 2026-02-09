@@ -377,6 +377,13 @@ bool CANPileController::isStartChargeResponseValid() const
     return m_protocol && m_protocol->isStartChargeResponseValid();
 }
 
+void CANPileController::clearStartChargeResponseValid()
+{
+    if (m_protocol) {
+        m_protocol->clearStartChargeResponseValid();
+    }
+}
+
 int CANPileController::getStopChargeResponse(TCU2CCU_StopChargeResponseData* out) const
 {
     if (!m_protocol) {
@@ -388,6 +395,13 @@ int CANPileController::getStopChargeResponse(TCU2CCU_StopChargeResponseData* out
 bool CANPileController::isStopChargeResponseValid() const
 {
     return m_protocol && m_protocol->isStopChargeResponseValid();
+}
+
+void CANPileController::clearStopChargeResponseValid()
+{
+    if (m_protocol) {
+        m_protocol->clearStopChargeResponseValid();
+    }
 }
 
 int CANPileController::getVersionCheckResponse(TCU2CCU_VersionCheckResponseData* out) const
@@ -429,6 +443,13 @@ bool CANPileController::isStartCompleteDataValid() const
     return m_protocol && m_protocol->isStartCompleteDataValid();
 }
 
+void CANPileController::clearStartCompleteValid()
+{
+    if (m_protocol) {
+        m_protocol->clearStartCompleteValid();
+    }
+}
+
 int CANPileController::getStopCompleteData(TCU2CCU_StatusStopCompleteData* out) const
 {
     if (!m_protocol) {
@@ -442,6 +463,12 @@ bool CANPileController::isStopCompleteDataValid() const
     return m_protocol && m_protocol->isStopCompleteDataValid();
 }
 
+void CANPileController::clearStopCompleteValid()
+{
+    if (m_protocol) {
+        m_protocol->clearStopCompleteValid();
+    }
+}
 int CANPileController::getYC20Data(TCU2CCU_DataYC20* out) const
 {
     if (!m_protocol) {
@@ -453,25 +480,6 @@ int CANPileController::getYC20Data(TCU2CCU_DataYC20* out) const
 bool CANPileController::isYC20DataValid() const
 {
     return m_protocol && m_protocol->isYC20DataValid();
-}
-
-int CANPileController::setChargeParams(uint8_t gunNo, uint16_t voltage, uint16_t current)
-{
-    if (!m_initialized) {
-        return -1;
-    }
-    
-    // BY ZF: 编码并发送设置充电参数命令（协议层内部会直接发送）
-    if (m_protocol->encodeSetChargeParams(gunNo, voltage, current) != 0) {
-        std::cerr << "[CANPileController] Failed to encode and send set charge params command\n";
-        return -1;
-    }
-    
-    std::cout << "[CANPileController] Set charge params command sent: gunNo=" 
-              << static_cast<int>(gunNo) 
-              << ", voltage=" << voltage 
-              << ", current=" << current << "\n";
-    return 0;
 }
 
 int CANPileController::getFaultCode(uint8_t gunNo, uint16_t* faultCode)

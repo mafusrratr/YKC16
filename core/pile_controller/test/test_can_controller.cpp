@@ -113,12 +113,6 @@ void testBasicCommands()
         }
         
         // BY ZF: 测试设置充电参数（框架实现）
-        ret = controller.setChargeParams(1, 3800, 100);  // 380.0V, 10.0A
-        if (ret == 0) {
-            std::cout << "✓ setChargeParams() 接口调用成功\n";
-        } else {
-            std::cout << "✗ setChargeParams() 接口调用失败\n";
-        }
         
         // BY ZF: 测试获取故障码（框架实现）
         uint16_t faultCode = 0;
@@ -204,4 +198,3 @@ int main(int argc, char* argv[])
     
     return 0;
 }
-

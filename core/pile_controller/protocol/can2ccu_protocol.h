@@ -69,7 +69,6 @@ public:
     // 注意：这些方法编码完成后会直接调用通讯层发送，不再返回数据
     int encodeStartCharge();
     int encodeStopCharge();
-    int encodeSetChargeParams(uint8_t gunNo, uint16_t voltage, uint16_t current);
     int encodeGetStatus(uint8_t gunNo);
     int encodeClearFault(uint8_t gunNo);
     
@@ -165,6 +164,7 @@ public:
      */
     int getStartChargeResponseData(TCU2CCU_StartChargeResponseData* outData) const;
     bool isStartChargeResponseValid() const { return m_startChargeResponseDataValid; }
+    void clearStartChargeResponseValid() { m_startChargeResponseDataValid = false; }
     
     /**
      * 设置停止充电命令数据
@@ -187,6 +187,7 @@ public:
      */
     int getStopChargeResponseData(TCU2CCU_StopChargeResponseData* outData) const;
     bool isStopChargeResponseValid() const { return m_stopChargeResponseDataValid; }
+    void clearStopChargeResponseValid() { m_stopChargeResponseDataValid = false; }
     
     /**
      * 获取版本校验应答数据（表23，CCU返回）
@@ -212,6 +213,7 @@ public:
      * @return 0成功，其他失败
      */
     int getStartCompleteData(TCU2CCU_StatusStartCompleteData* outStatusData) const;
+    void clearStartCompleteValid() { m_startCompleteDataValid = false; }
     
     /**
      * 获取充电停止完成状态数据
@@ -219,6 +221,7 @@ public:
      * @return 0成功，其他失败
      */
     int getStopCompleteData(TCU2CCU_StatusStopCompleteData* outStatusData) const;
+    void clearStopCompleteValid() { m_stopCompleteDataValid = false; }
     
     /**
      * 获取充电桩状态信息数据

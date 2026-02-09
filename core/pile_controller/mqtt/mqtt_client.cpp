@@ -46,6 +46,7 @@ bool MqttClient::init(const std::string& clientId, bool cleanSession)
         return false;
     }
     mosquitto_message_callback_set(m_mosq, &MqttClient::onMessage);
+    mosquitto_connect_callback_set(m_mosq, &MqttClient::onConnect);
     return true;
 }
 
@@ -103,6 +104,11 @@ void MqttClient::setMessageHandler(const MessageHandler& handler)
     m_onMessage = handler;
 }
 
+void MqttClient::setConnectHandler(const ConnectHandler& handler)
+{
+    m_onConnect = handler;
+}
+
 bool MqttClient::setWill(const std::string& topic, const std::string& payload, int qos, bool retain)
 {
     if (!m_mosq) {
@@ -137,4 +143,16 @@ void MqttClient::onMessage(struct mosquitto* mosq, void* userdata, const struct 
                        static_cast<size_t>(message->payloadlen));
     }
     self->m_onMessage(message->topic, payload);
+}
+
+void MqttClient::onConnect(struct mosquitto* mosq, void* userdata, int rc)
+{
+    (void)mosq;
+    if (!userdata) {
+        return;
+    }
+    MqttClient* self = static_cast<MqttClient*>(userdata);
+    if (self->m_onConnect) {
+        self->m_onConnect(rc);
+    }
 }

@@ -496,23 +496,6 @@ int CAN2CCUProtocol::encodeIssueChargeParams(const uint8_t pileId[7])
     return sendSingleFrame(0x18, PGN_PILE_CONFIG, businessData, 7);
 }
 
-int CAN2CCUProtocol::encodeSetChargeParams(uint8_t gunNo, uint16_t voltage, uint16_t current)
-{
-    // BY ZF: 编码并发送设置充电参数命令（待后续完善具体协议）
-    // 当前为占位实现
-    if (m_sendCallback == nullptr) {
-        std::cerr << "[CAN2CCU] Send callback not set\n";
-        return -1;
-    }
-    
-    // TODO: 根据协议文档实现具体的编码逻辑
-    // 当前先返回成功，待后续完善
-    (void)gunNo;
-    (void)voltage;
-    (void)current;
-    return 0;
-}
-
 int CAN2CCUProtocol::encodeGetStatus(uint8_t gunNo)
 {
     // BY ZF: 编码并发送读取状态命令（待后续完善具体协议）

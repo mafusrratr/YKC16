@@ -261,25 +261,12 @@ void PileControllerProcess::doRun()
     m_running = true;
     m_mainThread = std::thread([this]() {
         while (m_running.load()) {
-            // 处理命令消息
-            processCommandMessage();
-            
             // BY ZF: 更新状态（遍历所有枪）
             updateStatusFromController();
             
             // 心跳由 CANPileController 内部周期线程负责
             
-            // BY ZF: 优化轮询间隔以满足20ms延迟要求
-            unsigned long currentMsgs = 0, maxMsgs = 0;
-            if (m_cmdQueue && m_cmdQueue->getQueueStatus(&currentMsgs, &maxMsgs)) {
-                if (currentMsgs > 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     });
     m_mainThread.join();
@@ -518,7 +505,7 @@ void PileControllerProcess::updateStatusFromController()
         if (can->isStartChargeResponseValid()) {
             TCU2CCU_StartChargeResponseData r;
             if (can->getStartChargeResponse(&r) == 0) {
-                if (!cache.hasStartResp || std::memcmp(&cache.startResp, &r, sizeof(r)) != 0) {
+                if (!cache.hasStartResp) {
                     std::string payload = buildDataPayload(gunNo, "start_response", [&r](cJSON* data) {
                         cJSON_AddNumberToObject(data, "confirmFlag", r.confirmFlag);
                         cJSON_AddNumberToObject(data, "startFailReason", r.startFailReason);
@@ -526,56 +513,161 @@ void PileControllerProcess::updateStatusFromController()
                         cJSON_AddNumberToObject(data, "plugAndChargeFlag", r.plugAndChargeFlag);
                         cJSON_AddNumberToObject(data, "auxPowerVoltage", r.auxPowerVoltage);
                     });
-                    publishData(gunNo, "start_response", payload, false);
+                    publishCmdUpset(gunNo, payload);
                     cache.startResp = r;
                     cache.hasStartResp = true;
                 }
             }
+            can->clearStartChargeResponseValid();
         }
 
         if (can->isStopChargeResponseValid()) {
             TCU2CCU_StopChargeResponseData r;
             if (can->getStopChargeResponse(&r) == 0) {
-                if (!cache.hasStopResp || std::memcmp(&cache.stopResp, &r, sizeof(r)) != 0) {
+                if (!cache.hasStopResp) {
                     std::string payload = buildDataPayload(gunNo, "stop_response", [&r](cJSON* data) {
                         cJSON_AddNumberToObject(data, "confirmFlag", r.confirmFlag);
                     });
-                    publishData(gunNo, "stop_response", payload, false);
+                    publishCmdUpset(gunNo, payload);
                     cache.stopResp = r;
                     cache.hasStopResp = true;
                 }
             }
+            can->clearStopChargeResponseValid();
         }
 
         if (can->isStartCompleteDataValid()) {
             TCU2CCU_StatusStartCompleteData r;
             if (can->getStartCompleteData(&r) == 0) {
-                if (!cache.hasStartComplete || std::memcmp(&cache.startComplete, &r, sizeof(r)) != 0) {
+                if (!cache.hasStartComplete) {
                     std::string payload = buildDataPayload(gunNo, "start_complete", [&r](cJSON* data) {
+                        auto addByteArray = [](cJSON* obj, const char* key, const uint8_t* bytes, size_t len) {
+                            cJSON* arr = cJSON_CreateArray();
+                            for (size_t i = 0; i < len; i++) {
+                                cJSON_AddItemToArray(arr, cJSON_CreateNumber(bytes[i]));
+                            }
+                            cJSON_AddItemToObject(obj, key, arr);
+                        };
+
                         cJSON_AddNumberToObject(data, "successFlag", r.successFlag);
                         cJSON_AddNumberToObject(data, "chargeFailReason", r.chargeFailReason);
+                        addByteArray(data, "pileBmsVersion", r.pileBmsVersion, 3);
+                        addByteArray(data, "bmsPileVersion", r.bmsPileVersion, 3);
+                        cJSON_AddNumberToObject(data, "handshakeResult", r.handshakeResult);
+                        cJSON_AddNumberToObject(data, "batteryType", r.batteryType);
+                        cJSON_AddNumberToObject(data, "maxAllowTemp", r.maxAllowTemp);
+                        cJSON_AddNumberToObject(data, "bmsMaxChargeVoltage", r.bmsMaxChargeVoltage);
+                        cJSON_AddNumberToObject(data, "cellMaxChargeVoltage", r.cellMaxChargeVoltage);
+                        cJSON_AddNumberToObject(data, "maxAllowChargeCurrent", r.maxAllowChargeCurrent);
+                        cJSON_AddNumberToObject(data, "ratedTotalVoltage", r.ratedTotalVoltage);
+                        cJSON_AddNumberToObject(data, "currentTotalVoltage", r.currentTotalVoltage);
+                        cJSON_AddNumberToObject(data, "ratedCapacity", r.ratedCapacity);
+                        cJSON_AddNumberToObject(data, "nominalEnergy", r.nominalEnergy);
                         cJSON_AddNumberToObject(data, "soc", r.soc);
+                        cJSON_AddNumberToObject(data, "pileMaxOutputVoltage", r.pileMaxOutputVoltage);
+                        cJSON_AddNumberToObject(data, "pileMinOutputVoltage", r.pileMinOutputVoltage);
+                        cJSON_AddNumberToObject(data, "pileMaxOutputCurrent", r.pileMaxOutputCurrent);
+                        cJSON_AddNumberToObject(data, "pileMinOutputCurrent", r.pileMinOutputCurrent);
+                        auto sanitizeAscii = [](const char* src, size_t len) {
+                            std::string out;
+                            out.reserve(len);
+                            for (size_t i = 0; i < len; i++) {
+                                unsigned char ch = static_cast<unsigned char>(src[i]);
+                                if (ch == 0) {
+                                    break;
+                                }
+                                if (ch >= 0x20 && ch <= 0x7e) {
+                                    out.push_back(static_cast<char>(ch));
+                                } else {
+                                    out.push_back('.');
+                                }
+                            }
+                            return out;
+                        };
+                        std::string vinStr = sanitizeAscii(r.vin, 17);
+                        std::string manuStr = sanitizeAscii(r.batteryManufacturer, 4);
+                        cJSON_AddStringToObject(data, "vin", vinStr.c_str());
+                        cJSON_AddStringToObject(data, "batteryManufacturer", manuStr.c_str());
+                        addByteArray(data, "batterySerial", r.batterySerial, 4);
+                        cJSON_AddNumberToObject(data, "batteryProdYear", r.batteryProdYear);
+                        cJSON_AddNumberToObject(data, "batteryProdMonth", r.batteryProdMonth);
+                        cJSON_AddNumberToObject(data, "batteryProdDay", r.batteryProdDay);
+                        addByteArray(data, "batteryChargeCount", r.batteryChargeCount, 3);
+                        cJSON_AddNumberToObject(data, "batteryPropertyFlag", r.batteryPropertyFlag);
+                        addByteArray(data, "bmsSoftwareVersion", r.bmsSoftwareVersion, 8);
                     });
-                    publishData(gunNo, "start_complete", payload, false);
+                    publishCmdUpset(gunNo, payload);
                     cache.startComplete = r;
                     cache.hasStartComplete = true;
                 }
             }
+            can->clearStartCompleteValid();
         }
 
         if (can->isStopCompleteDataValid()) {
             TCU2CCU_StatusStopCompleteData r;
             if (can->getStopCompleteData(&r) == 0) {
-                if (!cache.hasStopComplete || std::memcmp(&cache.stopComplete, &r, sizeof(r)) != 0) {
+                if (!cache.hasStopComplete) {
                     std::string payload = buildDataPayload(gunNo, "stop_complete", [&r](cJSON* data) {
                         cJSON_AddNumberToObject(data, "stopReason", r.stopReason);
                         cJSON_AddNumberToObject(data, "stopSuccessFlag", r.stopSuccessFlag);
+                        cJSON_AddNumberToObject(data, "bmsStopReason", r.bmsStopReason);
+                        cJSON_AddNumberToObject(data, "bmsChargeFaultReason", r.bmsChargeFaultReason);
+                        cJSON_AddNumberToObject(data, "bmsStopErrorReason", r.bmsStopErrorReason);
                         cJSON_AddNumberToObject(data, "stopSoc", r.stopSoc);
+                        cJSON_AddNumberToObject(data, "cellMinVoltage", r.cellMinVoltage);
+                        cJSON_AddNumberToObject(data, "cellMaxVoltage", r.cellMaxVoltage);
+                        cJSON_AddNumberToObject(data, "batteryMinTemp", r.batteryMinTemp);
+                        cJSON_AddNumberToObject(data, "batteryMaxTemp", r.batteryMaxTemp);
+
+                        std::vector<std::string> faults;
+                        auto addTimeoutFault = [&faults](const char* name, uint8_t code) {
+                            if (code == 1) {
+                                faults.emplace_back(name);
+                            }
+                        };
+
+                        addTimeoutFault("timeoutSpn2560_00", r.timeoutSpn2560_00);
+                        addTimeoutFault("timeoutSpn2560_AA", r.timeoutSpn2560_AA);
+                        addTimeoutFault("timeoutTimeSync", r.timeoutTimeSync);
+                        addTimeoutFault("timeoutChargeReady", r.timeoutChargeReady);
+                        addTimeoutFault("timeoutChargeStatus", r.timeoutChargeStatus);
+                        addTimeoutFault("timeoutChargeStop", r.timeoutChargeStop);
+                        addTimeoutFault("timeoutChargeStat", r.timeoutChargeStat);
+                        addTimeoutFault("timeoutBmsVehicleId", r.timeoutBmsVehicleId);
+                        addTimeoutFault("timeoutBatteryParams", r.timeoutBatteryParams);
+                        addTimeoutFault("timeoutBmsReady", r.timeoutBmsReady);
+                        addTimeoutFault("timeoutBatteryStatus", r.timeoutBatteryStatus);
+                        addTimeoutFault("timeoutBatteryReq", r.timeoutBatteryReq);
+                        addTimeoutFault("timeoutBmsStop", r.timeoutBmsStop);
+                        addTimeoutFault("timeoutBmsStat", r.timeoutBmsStat);
+                        if (r.bmsOtherError) {
+                            char buf[32];
+                            std::snprintf(buf, sizeof(buf), "bmsOtherError=0x%02X", r.bmsOtherError);
+                            faults.emplace_back(buf);
+                        }
+                        if (r.pileOtherError) {
+                            char buf[32];
+                            std::snprintf(buf, sizeof(buf), "pileOtherError=0x%02X", r.pileOtherError);
+                            faults.emplace_back(buf);
+                        }
+                        cJSON* arr = cJSON_CreateArray();
+                        for (const auto& s : faults) {
+                            cJSON_AddItemToArray(arr, cJSON_CreateString(s.c_str()));
+                        }
+                        cJSON_AddItemToObject(data, "faults", arr);
                     });
-                    publishData(gunNo, "stop_complete", payload, false);
+                    publishCmdUpset(gunNo, payload);
                     cache.stopComplete = r;
                     cache.hasStopComplete = true;
                 }
+            }
+            can->clearStopCompleteValid();
+            if (cache.hasStopComplete) {
+                cache.hasStartResp = false;
+                cache.hasStopResp = false;
+                cache.hasStartComplete = false;
+                cache.hasStopComplete = false;
             }
         }
     }
@@ -595,6 +687,17 @@ bool PileControllerProcess::initMqtt()
     if (!m_mqtt.init(cid.str(), true)) {
         return false;
     }
+    m_mqtt.setConnectHandler([this](int rc) {
+        if (rc != 0) {
+            return;
+        }
+        for (uint8_t i = 0; i < m_config.gunCount; i++) {
+            uint8_t gunNo = m_config.gunConfigs[i].gunNo;
+            std::ostringstream t;
+            t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo - 1) << "/cmd";
+            m_mqtt.subscribe(t.str(), 1);
+        }
+    });
     if (!m_mqtt.connect(m_config.mqttHost, m_config.mqttPort, m_config.mqttKeepalive)) {
         return false;
     }
@@ -619,6 +722,13 @@ void PileControllerProcess::publishData(uint8_t gunNo, const std::string& type, 
     std::ostringstream t;
     t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo) << "/data";
     m_mqtt.publish(t.str(), payload, 0, retain);
+}
+
+void PileControllerProcess::publishCmdUpset(uint8_t gunNo, const std::string& payload)
+{
+    std::ostringstream t;
+    t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo) << "/cmdupset";
+    m_mqtt.publish(t.str(), payload, 2, false);
 }
 
 void PileControllerProcess::onMqttMessage(const std::string& topic, const std::string& payload)
@@ -676,15 +786,6 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
         }
         can->setStopChargeData(&stopCmd);
         can->stopCharge();
-    } else if (cmdStr == "set_charge_params") {
-        if (cJSON_IsObject(data)) {
-            cJSON* v = cJSON_GetObjectItem(data, "voltage");
-            cJSON* c = cJSON_GetObjectItem(data, "current");
-            if (cJSON_IsNumber(v) && cJSON_IsNumber(c)) {
-                can->setChargeParams(static_cast<uint8_t>(gun), static_cast<uint16_t>(v->valueint),
-                                     static_cast<uint16_t>(c->valueint));
-            }
-        }
     } else if (cmdStr == "clear_fault") {
         can->clearFault(static_cast<uint8_t>(gun));
     }

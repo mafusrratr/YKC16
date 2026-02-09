@@ -134,6 +134,7 @@ private:
 
     bool initMqtt();
     void publishData(uint8_t gunNo, const std::string& type, const std::string& payload, bool retain = true);
+    void publishCmdUpset(uint8_t gunNo, const std::string& payload);
     void onMqttMessage(const std::string& topic, const std::string& payload);
     std::string buildDataPayload(uint8_t gunNo, const std::string& type, const std::function<void(struct cJSON*)>& fillData);
     bool parseGunFromTopic(const std::string& topic, int& outGun) const;
@@ -154,23 +155,23 @@ private:
     };
 
     struct EventCache {
+        bool hasTotalFault;
+        uint8_t totalFault;
         bool hasStartResp;
         bool hasStopResp;
         bool hasStartComplete;
         bool hasStopComplete;
-        bool hasTotalFault;
-        uint8_t totalFault;
         TCU2CCU_StartChargeResponseData startResp;
         TCU2CCU_StopChargeResponseData stopResp;
         TCU2CCU_StatusStartCompleteData startComplete;
         TCU2CCU_StatusStopCompleteData stopComplete;
         EventCache()
-            : hasStartResp(false)
+            : hasTotalFault(false)
+            , totalFault(0)
+            , hasStartResp(false)
             , hasStopResp(false)
             , hasStartComplete(false)
             , hasStopComplete(false)
-            , hasTotalFault(false)
-            , totalFault(0)
         {}
     };
 

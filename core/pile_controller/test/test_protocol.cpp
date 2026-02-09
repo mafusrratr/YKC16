@@ -118,12 +118,6 @@ void testEncodeInterfaces()
     }
     
     // BY ZF: 测试编码设置充电参数命令
-    ret = protocol.encodeSetChargeParams(1, 3800, 100);
-    if (ret == 0) {
-        std::cout << "✓ encodeSetChargeParams() 调用成功\n";
-    } else {
-        std::cout << "✗ encodeSetChargeParams() 调用失败\n";
-    }
     
     // BY ZF: 测试编码读取状态命令
     ret = protocol.encodeGetStatus(1);
@@ -262,4 +256,3 @@ int main(int argc, char* argv[])
     
     return 0;
 }
-

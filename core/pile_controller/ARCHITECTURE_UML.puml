@@ -47,7 +47,6 @@ package "应用层 (Controller Layer)" LAYER_COLOR {
         +getYC20Data(out: TCU2CCU_DataYC20*): int
         +getYX22Data(out: TCU2CCU_DataYX22*): int
         +getYX23Data(out: TCU2CCU_DataYX23*): int
-        +setChargeParams(gunNo: uint8_t, voltage: uint16_t, current: uint16_t): int
         +getFaultCode(gunNo: uint8_t, faultCode: uint16_t*): int
         +clearFault(gunNo: uint8_t): int
         +heartbeat(): bool
@@ -103,7 +102,6 @@ package "规约层 (Protocol Layer)" LAYER_COLOR {
         +setSendCallback(callback: SendCallback): void
         +encodeStartCharge(): int
         +encodeStopCharge(): int
-        +encodeSetChargeParams(gunNo: uint8_t, voltage: uint16_t, current: uint16_t): int
         +encodeGetStatus(gunNo: uint8_t): int
         +encodeClearFault(gunNo: uint8_t): int
         +encodeHeartbeat(): int
