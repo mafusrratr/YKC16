@@ -150,6 +150,7 @@ private:
 
     // BY ZF: 重发控制（250ms 间隔，5s 超时）
     std::mutex m_retryMutex;
+    std::mutex m_protocolMutex;
     RetryState m_startReqRetry;
     RetryState m_stopReqRetry;
     RetryState m_startCompleteAckRetry;
