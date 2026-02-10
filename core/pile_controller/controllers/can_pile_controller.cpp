@@ -27,6 +27,8 @@ CANPileController::CANPileController()
     , m_versionOk(false)
     , m_chargeParamOk(false)
     , m_hasPileId(false)
+    , m_startCompleteLoadSwitch(0x01)
+    , m_stopCompleteReason(0x00)
 {
     memset(&m_cachedStatus, 0, sizeof(PileStatus));
     memset(m_pileId, 0, sizeof(m_pileId));
@@ -227,6 +229,13 @@ int CANPileController::startCharge()
         std::cerr << "[CANPileController] Failed to encode and send start charge command\n";
         return -1;
     }
+
+    {
+        std::lock_guard<std::mutex> lock(m_retryMutex);
+        m_startReqRetry.active = true;
+        m_startReqRetry.start = std::chrono::steady_clock::now();
+        m_startReqRetry.lastSend = m_startReqRetry.start;
+    }
     
     std::cout << "[CANPileController] Start charge command sent\n";
     return 0;
@@ -243,6 +252,13 @@ int CANPileController::stopCharge()
         std::cerr << "[CANPileController] Failed to encode and send stop charge command\n";
         return -1;
     }
+
+    {
+        std::lock_guard<std::mutex> lock(m_retryMutex);
+        m_stopReqRetry.active = true;
+        m_stopReqRetry.start = std::chrono::steady_clock::now();
+        m_stopReqRetry.lastSend = m_stopReqRetry.start;
+    }
     
     std::cout << "[CANPileController] Stop charge command sent\n";
     return 0;
@@ -254,6 +270,8 @@ void CANPileController::taskThread()
     const auto heartbeatInterval = milliseconds(1000);
     const auto versionInterval = milliseconds(500);
     const auto chargeParamInterval = milliseconds(500);
+    const auto retryInterval = milliseconds(250);
+    const auto retryTimeout = milliseconds(5000);
 
     while (m_taskRunning.load()) {
         auto now = steady_clock::now();
@@ -294,6 +312,42 @@ void CANPileController::taskThread()
             }
             if (isChargeParamResponseValid()) {
                 m_chargeParamOk = true;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_retryMutex);
+            if (m_startReqRetry.active) {
+                if (now - m_startReqRetry.start >= retryTimeout) {
+                    m_startReqRetry.active = false;
+                } else if (now - m_startReqRetry.lastSend >= retryInterval) {
+                    m_protocol->encodeStartCharge();
+                    m_startReqRetry.lastSend = now;
+                }
+            }
+            if (m_stopReqRetry.active) {
+                if (now - m_stopReqRetry.start >= retryTimeout) {
+                    m_stopReqRetry.active = false;
+                } else if (now - m_stopReqRetry.lastSend >= retryInterval) {
+                    m_protocol->encodeStopCharge();
+                    m_stopReqRetry.lastSend = now;
+                }
+            }
+            if (m_startCompleteAckRetry.active) {
+                if (now - m_startCompleteAckRetry.start >= retryTimeout) {
+                    m_startCompleteAckRetry.active = false;
+                } else if (now - m_startCompleteAckRetry.lastSend >= retryInterval) {
+                    m_protocol->encodeStartCompleteAck(m_startCompleteLoadSwitch, 0x00);
+                    m_startCompleteAckRetry.lastSend = now;
+                }
+            }
+            if (m_stopCompleteAckRetry.active) {
+                if (now - m_stopCompleteAckRetry.start >= retryTimeout) {
+                    m_stopCompleteAckRetry.active = false;
+                } else if (now - m_stopCompleteAckRetry.lastSend >= retryInterval) {
+                    m_protocol->encodeStopCompleteAck(m_stopCompleteReason, 0x00);
+                    m_stopCompleteAckRetry.lastSend = now;
+                }
             }
         }
 
@@ -553,6 +607,45 @@ void CANPileController::receiveThread()
             // BY ZF: 先按协议解码一帧（更新协议内部状态）
             int decodeRet = m_protocol->decodeFrame(canId, data, dataLen);
             if (decodeRet == 0) {
+                if (m_protocol->isStartChargeResponseValid()) {
+                    std::lock_guard<std::mutex> lock(m_retryMutex);
+                    m_startReqRetry.active = false;
+                }
+                if (m_protocol->isStopChargeResponseValid()) {
+                    std::lock_guard<std::mutex> lock(m_retryMutex);
+                    m_stopReqRetry.active = false;
+                }
+                if (m_protocol->isStartCompleteDataValid()) {
+                    std::lock_guard<std::mutex> lock(m_retryMutex);
+                    if (!m_startCompleteAckRetry.active) {
+                        TCU2CCU_CmdStartChargeData cmd;
+                        uint8_t loadSwitch = 0x01;
+                        if (m_protocol->getStartChargeData(&cmd) == 0) {
+                            loadSwitch = cmd.loadControlSwitch;
+                        }
+                        m_startCompleteLoadSwitch = loadSwitch;
+                        m_startCompleteAckRetry.active = true;
+                        m_startCompleteAckRetry.start = std::chrono::steady_clock::now();
+                        m_startCompleteAckRetry.lastSend = m_startCompleteAckRetry.start;
+                        m_protocol->encodeStartCompleteAck(m_startCompleteLoadSwitch, 0x00);
+                    }
+                }
+                if (m_protocol->isStopCompleteDataValid()) {
+                    std::lock_guard<std::mutex> lock(m_retryMutex);
+                    if (!m_stopCompleteAckRetry.active) {
+                        TCU2CCU_StatusStopCompleteData stopData;
+                        uint8_t stopReason = 0x00;
+                        if (m_protocol->getStopCompleteData(&stopData) == 0) {
+                            stopReason = stopData.stopReason;
+                        }
+                        m_stopCompleteReason = stopReason;
+                        m_stopCompleteAckRetry.active = true;
+                        m_stopCompleteAckRetry.start = std::chrono::steady_clock::now();
+                        m_stopCompleteAckRetry.lastSend = m_stopCompleteAckRetry.start;
+                        m_protocol->encodeStopCompleteAck(m_stopCompleteReason, 0x00);
+                    }
+                }
+
                 // BY ZF: 解码完成，从协议层汇总状态并更新缓存
                 PileStatus status;
                 if (m_protocol->getAggregatedStatus(&status) == 0) {

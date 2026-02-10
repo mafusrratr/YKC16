@@ -383,6 +383,17 @@ void PileControllerProcess::updateStatusFromController()
             });
             publishData(gunNo, "yc", payload, false);
         }
+        EventCache& cache = m_eventCaches[i];
+        if (cache.pendingClear) {
+            if (now - cache.workStatusZeroAt >= std::chrono::milliseconds(500)) {
+                cache.hasStartResp = false;
+                cache.hasStopResp = false;
+                cache.hasStartComplete = false;
+                cache.hasStopComplete = false;
+                cache.pendingClear = false;
+            }
+        }
+
         if (doPublish && dataCache.hasYx22) {
             const TCU2CCU_DataYX22& yx22 = dataCache.yx22;
             const uint8_t vinReq = dataCache.hasYx23 ? dataCache.yx23.vinReq : 0;
@@ -399,10 +410,17 @@ void PileControllerProcess::updateStatusFromController()
                 cJSON_AddNumberToObject(data, "otherFault", yx22.otherFault);
             });
             publishData(gunNo, "yx", payload, false);
+            if (cache.hasWorkStatus) {
+                if (cache.lastWorkStatus != 0 && yx22.workStatus == 0) {
+                    cache.pendingClear = true;
+                    cache.workStatusZeroAt = now;
+                }
+            }
+            cache.hasWorkStatus = true;
+            cache.lastWorkStatus = yx22.workStatus;
         }
 
         // 事件即时发布
-        EventCache& cache = m_eventCaches[i];
         if (dataCache.hasYx22) {
             const TCU2CCU_DataYX22& yx22 = dataCache.yx22;
             if (!cache.hasTotalFault || cache.totalFault != yx22.totalFault) {
@@ -663,12 +681,6 @@ void PileControllerProcess::updateStatusFromController()
                 }
             }
             can->clearStopCompleteValid();
-            if (cache.hasStopComplete) {
-                cache.hasStartResp = false;
-                cache.hasStopResp = false;
-                cache.hasStartComplete = false;
-                cache.hasStopComplete = false;
-            }
         }
     }
 }

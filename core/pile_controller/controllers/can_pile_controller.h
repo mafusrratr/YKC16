@@ -15,6 +15,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 
 /**
  * CAN通信方式的充电桩主控控制器
@@ -83,6 +84,13 @@ public:
     int encodeIssueChargeParams(const uint8_t pileId[7]);
 
 private:
+    struct RetryState {
+        bool active;
+        std::chrono::steady_clock::time_point start;
+        std::chrono::steady_clock::time_point lastSend;
+        RetryState() : active(false) {}
+    };
+
     // BY ZF: 接收线程（非阻塞接收，循环处理）
     void receiveThread();
     // BY ZF: 周期性任务线程（心跳/版本校验/下发桩参数）
@@ -139,6 +147,18 @@ private:
     // BY ZF: 充电桩编号（BCD 7字节）
     uint8_t m_pileId[7];
     bool m_hasPileId;
+
+    // BY ZF: 重发控制（250ms 间隔，5s 超时）
+    std::mutex m_retryMutex;
+    RetryState m_startReqRetry;
+    RetryState m_stopReqRetry;
+    RetryState m_startCompleteAckRetry;
+    RetryState m_stopCompleteAckRetry;
+
+
+    // BY ZF: 启动完成和停止完成状态
+    uint8_t m_startCompleteLoadSwitch;
+    uint8_t m_stopCompleteReason;
 };
 
 #endif // CAN_PILE_CONTROLLER_H

@@ -814,9 +814,6 @@ int CAN2CCUProtocol::decodeStartCompleteFrame(uint32_t canId, const uint8_t* dat
         m_statusStartCompleteData.batteryPropertyFlag = buf[68];
         memcpy(m_statusStartCompleteData.bmsSoftwareVersion, &buf[76], 8);
         m_startCompleteDataValid = true;
-        // 表13：收到启动完成状态后发送应答帧（负荷控制开关与启动命令一致，确认成功）
-        uint8_t loadSwitch = m_cmdStartChargeDataValid ? m_cmdStartChargeData.loadControlSwitch : 0x01;
-        encodeStartCompleteAck(loadSwitch, 0x00);  // 00H 成功
         resetLongFrameContext(PGN_START_COMPLETE);
         return 0;
     } else if (result == 1) {
@@ -881,8 +878,6 @@ int CAN2CCUProtocol::decodeStopCompleteFrame(uint32_t canId, const uint8_t* data
         m_statusStopCompleteData.timeoutBmsStat    = d22 & 3U;
         m_statusStopCompleteData.pileOtherError    = (d22 >> 2) & 0x3FU;
         m_stopCompleteDataValid = true;
-        // 表17：收到停止完成状态后发送充电完成应答帧（PGN=0x14）
-        encodeStopCompleteAck(m_statusStopCompleteData.stopReason, 0x00);  // 00H 成功
         resetLongFrameContext(PGN_STOP_COMPLETE);
         return 0;
     } else if (result == 1) {

@@ -161,6 +161,10 @@ private:
         bool hasStopResp;
         bool hasStartComplete;
         bool hasStopComplete;
+        bool hasWorkStatus;
+        uint8_t lastWorkStatus;
+        bool pendingClear;
+        std::chrono::steady_clock::time_point workStatusZeroAt;
         TCU2CCU_StartChargeResponseData startResp;
         TCU2CCU_StopChargeResponseData stopResp;
         TCU2CCU_StatusStartCompleteData startComplete;
@@ -172,6 +176,9 @@ private:
             , hasStopResp(false)
             , hasStartComplete(false)
             , hasStopComplete(false)
+            , hasWorkStatus(false)
+            , lastWorkStatus(0)
+            , pendingClear(false)
         {}
     };
 
