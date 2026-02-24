@@ -9,7 +9,7 @@
 interfaces/
 ├── iprocess.h          ✅ 所有进程都需要（合理）
 ├── ilogger.h           ❌ 只有LoggerProcess一个实现（过度设计）
-├── icharge_logic.h     ❌ 只有ChargeLogicProcess一个实现（过度设计）
+├── itcu_logic.h     ❌ 只有ChargeLogicProcess一个实现（过度设计）
 ├── icommunication.h    ⚠️  可能有多种实现（但应该放在进程内部）
 ├── ipile_controller.h ⚠️  可能有多种实现（但应该放在进程内部）
 └── imeter.h            ⚠️  可能有多种实现（但应该放在进程内部）
@@ -76,8 +76,7 @@ core/interfaces/
 
 **删除的接口：**
 - `ilogger.h` → 删除接口，保留类型定义（LogLevel, LogEntry, TradeRecord, FeeModel）
-- `icharge_logic.h` → 完全删除
-- `icommunication.h` → 移到 `core/communication/icommunication.h`
+- `itcu_logic.h` → 完全删除
 - `ipile_controller.h` → 移到 `core/pile_controller/ipile_controller.h`
 - `imeter.h` → 移到 `core/meter/imeter.h`
 
@@ -224,8 +223,8 @@ meter/
 
 **重构后：**
 ```
-charge_logic/
-├── charge_logic_process.h/cpp  # 直接实现，不需要接口
+ tcu_logic/
+├── tcu_logic_process.h/cpp  # 直接实现，不需要接口
 ├── charge_state_machine.h/cpp  # 状态机实现
 ├── gun_context.h               # 枪上下文
 └── ...
@@ -242,7 +241,7 @@ charge_logic/
 ```
 core/interfaces/
 ├── ilogger.h              # 删除，类型定义移到 base/common/logger_types.h
-├── icharge_logic.h        # 完全删除
+├── itcu_logic.h        # 完全删除
 ├── icommunication.h       # 移到 communication/ 目录
 ├── ipile_controller.h     # 移到 pile_controller/ 目录
 └── imeter.h               # 移到 meter/ 目录
@@ -257,7 +256,6 @@ core/base/common/
 core/base/common/
 └── logger_types.h         # 从 ilogger.h 提取类型定义
 
-core/communication/
 └── icommunication.h       # 从 interfaces/ 移入
 
 core/pile_controller/
@@ -351,7 +349,7 @@ core/base/logger/
 
 ### 阶段4：清理阶段（1天）
 
-1. ✅ 删除 `icharge_logic.h`
+1. ✅ 删除 `itcu_logic.h`
 2. ✅ 删除 `ilogger.h`（类型定义已移到 logger_types.h）
 3. ✅ 删除 `base/common/config_manager.h/cpp`
 4. ✅ 更新文档
@@ -423,7 +421,7 @@ core/
 ├── interfaces/          # 6个接口文件
 │   ├── iprocess.h
 │   ├── ilogger.h
-│   ├── icharge_logic.h
+│   ├── itcu_logic.h
 │   ├── icommunication.h
 │   ├── ipile_controller.h
 │   └── imeter.h
@@ -476,4 +474,3 @@ core/
 **方案制定时间：** 2025-01-XX  
 **方案版本：** v1.0  
 **待评审确认后执行**
-

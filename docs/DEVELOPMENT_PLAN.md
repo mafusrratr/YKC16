@@ -20,7 +20,7 @@
    - 统一使用 ConfigManagerLite
 
 ### 📋 待开发模块
-1. **charge_logic** - 充电逻辑进程（核心业务）
+1. **tcu_logic** - 充电逻辑进程（核心业务）
 2. **meter** - 计量计费进程（部分代码需重构）
 3. **pile_controller** - 主控通信进程
 4. **communication** - 平台通信进程
@@ -46,7 +46,7 @@
    - **重构**：已有部分代码（evs_meter_oop），需要重构为多进程架构
 
 **优先级2：核心业务逻辑层**
-3. **charge_logic（充电逻辑进程）** - 4-5周
+3. **tcu_logic（充电逻辑进程）** - 4-5周
    - **为什么核心**：这是整个系统的核心业务逻辑
    - **依赖**：
      - 共享内存（已有）
@@ -63,11 +63,11 @@
 
 **优先级3：对外通信层**
 4. **communication（平台通信进程）** - 2-3周
-   - **为什么后续**：需要 charge_logic 的交易数据上报
+   - **为什么后续**：需要 tcu_logic 的交易数据上报
    - **依赖**：
      - 共享内存（已有）
      - logger（已完成）
-     - charge_logic 的交易数据
+     - tcu_logic 的交易数据
    - **接口**：使用进程内部的 `ICommunication` 接口
    - **实现**：先实现 TCP，后续可扩展 UDP/MQTT
 
@@ -78,14 +78,14 @@
 
 ### 方案B：核心优先（备选）
 
-如果希望快速看到核心业务逻辑运行，可以先开发 charge_logic，使用模拟数据：
-1. charge_logic（使用模拟的主控和电表数据）
+如果希望快速看到核心业务逻辑运行，可以先开发 tcu_logic，使用模拟数据：
+1. tcu_logic（使用模拟的主控和电表数据）
 2. pile_controller
 3. meter
 4. communication
 5. display
 
-**不推荐**：因为 charge_logic 需要真实数据才能完整测试。
+**不推荐**：因为 tcu_logic 需要真实数据才能完整测试。
 
 ## 详细开发计划
 
@@ -184,7 +184,7 @@ meter/
 
 ---
 
-### 阶段3：charge_logic（充电逻辑进程）
+### 阶段3：tcu_logic（充电逻辑进程）
 
 #### 3.1 需求分析
 - **核心功能**：多枪充电状态机管理
@@ -205,9 +205,9 @@ meter/
 
 #### 3.3 文件结构
 ```
-charge_logic/
+tcu_logic/
 ├── charge_state_machine.h/cpp  # 单枪状态机
-├── charge_logic_process.h/cpp  # 主进程（管理多枪）
+├── tcu_logic_process.h/cpp  # 主进程（管理多枪）
 ├── order_manager.h/cpp          # 订单管理
 ├── auth_handler.h/cpp           # 鉴权处理
 ├── main.cpp
@@ -318,7 +318,7 @@ communication/
 |------|---------|--------|
 | pile_controller | 2-3周 | 高 |
 | meter | 2-3周 | 高 |
-| charge_logic | 4-5周 | 最高 |
+| tcu_logic | 4-5周 | 最高 |
 | communication | 2-3周 | 中 |
 | display | 2-3周 | 低 |
 

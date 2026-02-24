@@ -1172,6 +1172,19 @@ void CAN2CCUProtocol::resetLongFrameContext(uint8_t pgn)
     }
 }
 
+void CAN2CCUProtocol::resetAllLongFrameContexts()
+{
+    for (int i = 0; i < 16; i++) {
+        m_longFrameContexts[i].isValid = false;
+        m_longFrameContexts[i].isComplete = false;
+        m_longFrameContexts[i].totalFrames = 0;
+        m_longFrameContexts[i].currentFrame = 0;
+        m_longFrameContexts[i].dataLength = 0;
+        m_longFrameContexts[i].lastFrameTime = 0;
+        memset(m_longFrameContexts[i].buffer, 0, sizeof(m_longFrameContexts[i].buffer));
+    }
+}
+
 int CAN2CCUProtocol::processLongFrame(uint32_t canId, const uint8_t* data, size_t dataLen, LongFrameContext* context)
 {
     // BY ZF: 处理多帧数据（长帧组装）
@@ -1186,6 +1199,19 @@ int CAN2CCUProtocol::processLongFrame(uint32_t canId, const uint8_t* data, size_
     
     if (data == nullptr || dataLen < 8 || context == nullptr) {
         return -1;
+    }
+
+    // BY ZF: 多帧超时处理（超过 2 秒则重置上下文）
+    if (context->isValid && context->lastFrameTime != 0) {
+        const uint32_t nowSec = static_cast<uint32_t>(time(nullptr));
+        if (nowSec - context->lastFrameTime > 2) {
+            context->isValid = false;
+            context->isComplete = false;
+            context->totalFrames = 0;
+            context->currentFrame = 0;
+            context->dataLength = 0;
+            memset(context->buffer, 0, sizeof(context->buffer));
+        }
     }
     
     uint8_t frameSeq = data[0];  // 帧序号（所有帧都在data[0]）

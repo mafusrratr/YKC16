@@ -7,7 +7,7 @@ CXX = $(CROSS_COMPILE)g++
 AR = $(CROSS_COMPILE)ar
 CXXFLAGS = -Wall -O2 -std=c++11
 INCLUDES = -I../base -I../interfaces -I../../libv2gshm/libcshm \
-           -Imqtt/include -Icjson/include
+           -I../base/mqtt -I../base/mqtt/include -I../base/cjson/include
 
 # 目录设置
 OBJ_DIR = obj
@@ -19,7 +19,7 @@ TARGET = $(RELEASE_DIR)/tcu_pile_controller
 
 # 源文件
 SOURCES = main.cpp pile_controller_process.cpp \
-          mqtt/mqtt_client.cpp \
+          ../base/mqtt/mqtt_client.cpp \
           protocol/can2ccu_protocol.cpp \
           controllers/can_pile_controller.cpp
 BASE_SOURCES = ../base/common/config_manager_lite.cpp \
@@ -68,7 +68,7 @@ $(OBJ_DIR)/protocol/%.o: protocol/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # mqtt目录源文件编译规则
-$(OBJ_DIR)/mqtt/%.o: mqtt/%.cpp
+$(OBJ_DIR)/mqtt/%.o: ../base/mqtt/%.cpp
 	@mkdir -p $(OBJ_DIR)/mqtt
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 

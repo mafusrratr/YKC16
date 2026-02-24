@@ -193,7 +193,7 @@
 │   │   ├── logger/          # 日志相关基础组件（LogSender，多个进程都需要）
 │   │   └── process/         # 进程管理基础组件
 │   ├── daemon/              # 守护进程
-│   ├── charge_logic/        # 充电逻辑进程（不需要接口）
+│   ├── tcu_logic/        # 充电逻辑进程（不需要接口）
 │   ├── meter/               # 计量计费进程
 │   │   └── imeter.h         # 进程内部接口（用于多种电表协议实现）
 │   ├── pile_controller/     # 主控通信进程

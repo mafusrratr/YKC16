@@ -26,18 +26,15 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
     
-    // 检查参数
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <config_file>" << std::endl;
-        return 1;
-    }
+    // BY ZF: 固定配置路径
+    const char* configPath = "/usr/app/config/pile_controller.ini";
     
     // 创建进程实例
     PileControllerProcess process;
     g_process = &process;
     
     // 初始化
-    if (!process.initialize(argv[1])) {
+    if (!process.initialize(configPath)) {
         std::cerr << "Failed to initialize PileController process" << std::endl;
         return 1;
     }
@@ -60,4 +57,3 @@ int main(int argc, char* argv[]) {
     std::cout << "PileController process stopped" << std::endl;
     return 0;
 }
-

@@ -8,7 +8,6 @@
 #include <cstdarg>
 #include <cstdio>
 #include <signal.h>
-#include <unistd.h>
 
 BaseProcess::BaseProcess(ProcessType type, const char* name)
     : m_type(type)
@@ -24,7 +23,8 @@ BaseProcess::BaseProcess(ProcessType type, const char* name)
 
 BaseProcess::~BaseProcess()
 {
-    stop();
+    // BY ZF: 析构阶段禁止再走虚函数清理，避免 pure virtual 调用
+    m_running = false;
     std::cout << "BaseProcess destroyed: " << m_name << std::endl;
 }
 
@@ -71,6 +71,11 @@ int BaseProcess::start()
 
 void BaseProcess::stop()
 {
+    // BY ZF: stop 幂等，避免重复清理
+    if (m_status.load() == PROC_STATUS_STOPPED) {
+        return;
+    }
+
     std::cout << "BaseProcess::stop " << m_name << std::endl;
     
     m_running = false;
@@ -90,10 +95,6 @@ void BaseProcess::run()
         try {
             // 调用子类主循环
             doRun();
-            
-            // 短暂休眠，避免CPU占用过高
-            usleep(100000);  // 100ms
-            
         } catch (const std::exception& e) {
             std::cout << "Exception in process " << m_name << ": " << e.what() << std::endl;
             setStatus(PROC_STATUS_ERROR);

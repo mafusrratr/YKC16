@@ -13,7 +13,7 @@
 enum ProcessType {
     PROC_UNKNOWN = 0,
     PROC_DAEMON,
-    PROC_CHARGE_LOGIC,
+    PROC_TCU_LOGIC,
     PROC_METER,
     PROC_PILE_CONTROLLER,    // 主控通信进程
     PROC_DISPLAY,
@@ -82,4 +82,3 @@ public:
 };
 
 #endif // IPROCESS_H
-

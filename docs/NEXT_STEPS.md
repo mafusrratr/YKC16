@@ -23,7 +23,7 @@
 
 #### 其他模块
 - ❌ meter - 计量计费进程
-- ❌ charge_logic - 充电逻辑进程（核心业务）
+- ❌ tcu_logic - 充电逻辑进程（核心业务）
 - ❌ communication - 平台通信进程
 - ❌ display - 显示界面进程
 
@@ -33,7 +33,7 @@
 
 **理由**：
 1. **架构验证**：共享内存实现最简单，可以快速验证整个架构设计
-2. **依赖关系**：其他模块（charge_logic、meter）可能需要 pile_controller 的状态数据
+2. **依赖关系**：其他模块（tcu_logic、meter）可能需要 pile_controller 的状态数据
 3. **完整性**：先完成一个模块，再开发其他模块，思路更清晰
 4. **时间短**：共享内存实现预计 2-3 小时即可完成
 
@@ -67,7 +67,7 @@
 
 ---
 
-### 方案3：开始 charge_logic 模块
+### 方案3：开始 tcu_logic 模块
 
 **理由**：
 1. **核心业务**：这是整个系统的核心
@@ -90,7 +90,7 @@
    - 为后续开发提供参考
 
 2. **接下来**：实现命令消息处理（1-2小时）
-   - 处理来自 charge_logic 的控制命令
+   - 处理来自 tcu_logic 的控制命令
    - 实现消息队列接收逻辑
 
 3. **然后**：实现状态更新逻辑（1-2小时）
@@ -102,7 +102,7 @@
 **完成后的收益**：
 - ✅ pile_controller 模块基本完成（除了具体协议实现）
 - ✅ 架构设计得到验证
-- ✅ 为 charge_logic 和 meter 提供数据基础
+- ✅ 为 tcu_logic 和 meter 提供数据基础
 - ✅ 可以开始开发其他模块
 
 ---
@@ -163,7 +163,7 @@ class SharedMemoryPileController : public IPileController {
 2. ✅ **pile_controller 命令消息处理**（1-2小时）
 3. ✅ **pile_controller 状态更新**（1-2小时）
 4. ⏭️ **meter 模块**（2-3周）
-5. ⏭️ **charge_logic 模块**（4-5周）
+5. ⏭️ **tcu_logic 模块**（4-5周）
 
 **关键决策点**：
 - 如果希望快速验证架构 → 选择方案1

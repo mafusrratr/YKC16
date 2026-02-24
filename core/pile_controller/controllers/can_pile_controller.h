@@ -153,13 +153,11 @@ private:
     std::mutex m_protocolMutex;
     RetryState m_startReqRetry;
     RetryState m_stopReqRetry;
-    RetryState m_startCompleteAckRetry;
-    RetryState m_stopCompleteAckRetry;
-
-
     // BY ZF: 启动完成和停止完成状态
     uint8_t m_startCompleteLoadSwitch;
     uint8_t m_stopCompleteReason;
+
+    std::atomic<bool> m_commTimeoutActive;
 };
 
 #endif // CAN_PILE_CONTROLLER_H

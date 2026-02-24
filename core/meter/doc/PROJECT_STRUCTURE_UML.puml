@@ -1,0 +1,42 @@
+@startuml
+title tcu_meter 项目结构 UML
+
+package "core/meter" {
+  [main.cpp] as Main
+  [meter_process.h/.cpp] as MP
+  [dlt645_meter.h/.cpp] as D645
+}
+
+package "core/base (reuse)" {
+  [BaseProcess] as BP
+  [MqttClient] as MC
+  [SerialCommunication] as SC
+  [ConfigManagerLite] as CFG
+  [cJSON] as CJ
+}
+
+Main --> MP : 创建/启动进程
+MP --|> BP : 继承
+MP --> D645 : 轮询读表
+MP --> MC : MQTT发布
+MP --> CFG : 读取配置
+MP --> CJ : 组装JSON
+D645 --> SC : 485收发
+
+note right of MP
+  核心职责与主流程函数:
+  - loadConfig()/initMqtt()/initMeter()
+  - pollOnce(): 按枪轮询
+  - readGunMeter(): 单枪读取 + 重试
+  - publishData()/publishEvent()
+end note
+
+note right of D645
+  协议职责与主流程函数:
+  - readAll(): 总电量/电压/电流
+  - readOne()/requestRead()
+  - tryExtractFrame()/decodeReadResponse()
+  - checksum()/decodeBcdLe()
+end note
+
+@enduml

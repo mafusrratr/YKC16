@@ -306,6 +306,9 @@ public:
      * @return true有效，false无效
      */
     bool isYX23DataValid() const { return m_yx23DataValid; }
+
+    // BY ZF: 重置所有多帧接收上下文（用于通信异常恢复）
+    void resetAllLongFrameContexts();
     
     /**
      * 根据心跳接收情况返回通信状态（供外部判断超时、告警等）

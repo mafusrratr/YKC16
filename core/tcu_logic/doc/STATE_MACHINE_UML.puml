@@ -1,0 +1,42 @@
+@startuml
+title tcu_logic 状态机流转 UML
+
+hide empty description
+
+[*] --> IDLE
+
+IDLE --> PREPARE : vehicle_connected && totalFault=0
+IDLE --> ERROR : deviceErr_on / totalFault
+
+PREPARE --> STARTING : start_cmd && auth_ok
+PREPARE --> IDLE : vehicle_disconnected
+PREPARE --> ERROR : deviceErr_on / totalFault
+
+STARTING --> CHARGING : start_complete_ok
+STARTING --> STOPPING : start_complete_fail\nor deviceErr_on/totalFault\nor stop_cmd
+STARTING --> IDLE : reset_error
+STARTING --> STOPPING : start_timeout_50s
+
+CHARGING --> STOPPING : stop_cmd\nor tcu_precharge_near_limit\nor deviceErr_on/totalFault\nor workStatus=0\nor stop_complete
+
+STOPPING --> STOPPED : meter_stale_15s\nor meter_stable_3x
+STOPPING --> STOPPING : stop_complete_seen\n(仅停止重发)
+
+STOPPED --> IDLE : vehicle_disconnected
+
+ERROR --> IDLE : reset_error\nor deviceErr_off
+
+note right of STOPPING
+  进入STOPPING后:
+  - 周期重发 stop_charge
+  - 结算窗口等待电表更新
+  - 满足条件后进入 STOPPED
+end note
+
+note bottom of CHARGING
+  计费中:
+  - 分段累计电量/电费/服务费
+  - 接近预充阈值触发 tcu_stop_request
+end note
+
+@enduml

@@ -1,7 +1,7 @@
 # PileController 进程 MQTT 通信规范（草案）
 
 ## 1. 目标与范围
-- 目标：定义 pile_controller 与其他进程（如 charge_logic、meter 等）通过 MQTT 的消息规范。
+- 目标：定义 pile_controller 与其他进程（如 tcu_logic、meter 等）通过 MQTT 的消息规范。
 - 范围：命令下发与状态/事件数据发布。
 
 ## 2. Broker 约定
@@ -15,15 +15,15 @@
 - `tcu/pile/{gun}/cmd`
 
 ### 3.2 上送命令通道（由 pile_controller 主动发起）
-- `tcu/pile/{gun}/cmdupset`
+- `tcu/pile/{gun}/event`
 
 ### 3.2 数据通道
 - `tcu/pile/{gun}/data`
 
 **说明**：
 - `{gun}`：`0` / `1` / `all`
-- `cmd`、`cmdupset` 与 `data` 必须区分，避免处理混淆。
-- **上下行方向不固定**：根据业务角色决定发布/订阅方向（例如：charge_logic 可发布 cmd，pile_controller 可发布 data；也可在某些场景反向）。
+- `cmd`、`event` 与 `data` 必须区分，避免处理混淆。
+- **上下行方向不固定**：根据业务角色决定发布/订阅方向（例如：tcu_logic 可发布 cmd，pile_controller 可发布 data；也可在某些场景反向）。
 
 ## 4. Payload 通用字段
 所有消息建议包含以下字段：
@@ -50,7 +50,7 @@ Topic：`tcu/pile/{gun}/cmd`
 {
   "ts": 1736150000000,
   "seq": 56,
-  "source": "charge_logic",
+  "source": "tcu_logic",
   "gun": 0,
   "cmd": "start_charge",
   "data": {
@@ -66,7 +66,7 @@ Topic：`tcu/pile/{gun}/cmd`
 {
   "ts": 1736150000000,
   "seq": 57,
-  "source": "charge_logic",
+  "source": "tcu_logic",
   "gun": 0,
   "cmd": "stop_charge",
   "data": {
@@ -79,7 +79,6 @@ Topic：`tcu/pile/{gun}/cmd`
 ### 5.1 cmd 字段建议值
 - `start_charge`
 - `stop_charge`
-- `clear_fault`
 
 ### 5.2 start_charge 参数
 - `loadControlSwitch`：负荷控制开关（01H=启用，02H=关闭）
@@ -108,20 +107,26 @@ Topic：`tcu/pile/{gun}/data`
 ### 6.1 type 分类建议
 - `yc`：遥测
 - `yx`：遥信
-- `error`：故障/异常
+- `data` 通道不再承载 `deviceErr` 事件
 
-## 6.2 上送命令消息（cmdupset）
-Topic：`tcu/pile/{gun}/cmdupset`
+## 6.2 上送命令消息（event）
+Topic：`tcu/pile/{gun}/event`
 
 用于上送命令/流程事件：
 - `start_response`：启动应答
 - `stop_response`：停止应答
 - `start_complete`：启动完成
 - `stop_complete`：停止完成
+- `deviceErr_on`：故障总由 0->1（故障出现）
+- `deviceErr_off`：故障总由 1->0（故障恢复）
+
+说明：
+- event 不做去重，按 CAN 接收次数直接上送。
 
 ## 7. QoS 与 Retain 建议
 - 状态/数据类：QoS 0（低延迟）
-- 命令类：QoS 1（可靠投递）
+- 命令下发（cmd）：QoS 2（可靠投递）
+- 上送命令（event）：QoS 2（确保送达）
 - `data` 不使用 retain
 - `cmd` 不建议 retain
 

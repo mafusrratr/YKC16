@@ -422,7 +422,7 @@ private:
 
 ```
 控制命令流（下行）：
-charge_logic进程
+tcu_logic进程
     ↓ (消息队列，包含gun_no)
 PileControllerProcess::processCommandMessage()
     ↓ 根据gun_no选择对应控制器

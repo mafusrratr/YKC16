@@ -29,6 +29,7 @@ CANPileController::CANPileController()
     , m_hasPileId(false)
     , m_startCompleteLoadSwitch(0x01)
     , m_stopCompleteReason(0x00)
+    , m_commTimeoutActive(false)
 {
     memset(&m_cachedStatus, 0, sizeof(PileStatus));
     memset(m_pileId, 0, sizeof(m_pileId));
@@ -293,8 +294,24 @@ void CANPileController::taskThread()
 
         // 心跳超时检测
         if (getHeartbeatCommStatus() == 0x01) {
-            m_versionOk = false;
-            m_chargeParamOk = false;
+            if (!m_commTimeoutActive.load()) {
+                m_commTimeoutActive = true;
+                m_versionOk = false;
+                m_chargeParamOk = false;
+                {
+                    std::lock_guard<std::mutex> lock(m_retryMutex);
+                    m_startReqRetry.active = false;
+                    m_stopReqRetry.active = false;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_protocolMutex);
+                    m_protocol->resetAllLongFrameContexts();
+                }
+            }
+        } else {
+            if (m_commTimeoutActive.load()) {
+                m_commTimeoutActive = false;
+            }
         }
 
         // 版本校验
@@ -352,24 +369,7 @@ void CANPileController::taskThread()
                     m_stopReqRetry.lastSend = now;
                 }
             }
-            if (m_startCompleteAckRetry.active) {
-                if (now - m_startCompleteAckRetry.start >= retryTimeout) {
-                    m_startCompleteAckRetry.active = false;
-                } else if (now - m_startCompleteAckRetry.lastSend >= retryInterval) {
-                    std::lock_guard<std::mutex> protoLock(m_protocolMutex);
-                    m_protocol->encodeStartCompleteAck(m_startCompleteLoadSwitch, 0x00);
-                    m_startCompleteAckRetry.lastSend = now;
-                }
-            }
-            if (m_stopCompleteAckRetry.active) {
-                if (now - m_stopCompleteAckRetry.start >= retryTimeout) {
-                    m_stopCompleteAckRetry.active = false;
-                } else if (now - m_stopCompleteAckRetry.lastSend >= retryInterval) {
-                    std::lock_guard<std::mutex> protoLock(m_protocolMutex);
-                    m_protocol->encodeStopCompleteAck(m_stopCompleteReason, 0x00);
-                    m_stopCompleteAckRetry.lastSend = now;
-                }
-            }
+            // 启动完成/停止完成应答只发送一次，不参与重发
         }
 
         std::this_thread::sleep_for(milliseconds(50));
@@ -544,6 +544,7 @@ void CANPileController::clearStopCompleteValid()
         m_protocol->clearStopCompleteValid();
     }
 }
+
 int CANPileController::getYC20Data(TCU2CCU_DataYC20* out) const
 {
     if (!m_protocol) {
@@ -641,45 +642,27 @@ void CANPileController::receiveThread()
                     m_stopReqRetry.active = false;
                 }
                 if (m_protocol->isStartCompleteDataValid()) {
-                    std::lock_guard<std::mutex> lock(m_retryMutex);
-                    if (!m_startCompleteAckRetry.active) {
-                        TCU2CCU_CmdStartChargeData cmd;
-                        uint8_t loadSwitch = 0x01;
-                        {
-                            std::lock_guard<std::mutex> protoLock(m_protocolMutex);
-                            if (m_protocol->getStartChargeData(&cmd) == 0) {
-                                loadSwitch = cmd.loadControlSwitch;
-                            }
+                    TCU2CCU_CmdStartChargeData cmd;
+                    uint8_t loadSwitch = 0x01;
+                    {
+                        std::lock_guard<std::mutex> protoLock(m_protocolMutex);
+                        if (m_protocol->getStartChargeData(&cmd) == 0) {
+                            loadSwitch = cmd.loadControlSwitch;
                         }
                         m_startCompleteLoadSwitch = loadSwitch;
-                        m_startCompleteAckRetry.active = true;
-                        m_startCompleteAckRetry.start = std::chrono::steady_clock::now();
-                        m_startCompleteAckRetry.lastSend = m_startCompleteAckRetry.start;
-                        {
-                            std::lock_guard<std::mutex> protoLock(m_protocolMutex);
-                            m_protocol->encodeStartCompleteAck(m_startCompleteLoadSwitch, 0x00);
-                        }
+                        m_protocol->encodeStartCompleteAck(m_startCompleteLoadSwitch, 0x00);
                     }
                 }
                 if (m_protocol->isStopCompleteDataValid()) {
-                    std::lock_guard<std::mutex> lock(m_retryMutex);
-                    if (!m_stopCompleteAckRetry.active) {
-                        TCU2CCU_StatusStopCompleteData stopData;
-                        uint8_t stopReason = 0x00;
-                        {
-                            std::lock_guard<std::mutex> protoLock(m_protocolMutex);
-                            if (m_protocol->getStopCompleteData(&stopData) == 0) {
-                                stopReason = stopData.stopReason;
-                            }
+                    TCU2CCU_StatusStopCompleteData stopData;
+                    uint8_t stopReason = 0x00;
+                    {
+                        std::lock_guard<std::mutex> protoLock(m_protocolMutex);
+                        if (m_protocol->getStopCompleteData(&stopData) == 0) {
+                            stopReason = stopData.stopReason;
                         }
                         m_stopCompleteReason = stopReason;
-                        m_stopCompleteAckRetry.active = true;
-                        m_stopCompleteAckRetry.start = std::chrono::steady_clock::now();
-                        m_stopCompleteAckRetry.lastSend = m_stopCompleteAckRetry.start;
-                        {
-                            std::lock_guard<std::mutex> protoLock(m_protocolMutex);
-                            m_protocol->encodeStopCompleteAck(m_stopCompleteReason, 0x00);
-                        }
+                        m_protocol->encodeStopCompleteAck(m_stopCompleteReason, 0x00);
                     }
                 }
 

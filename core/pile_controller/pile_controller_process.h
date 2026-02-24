@@ -13,7 +13,7 @@
 #include "../base/common/message_queue.h"
 #include "../base/logger/log_sender.h"
 #include "ipile_controller.h"
-#include "mqtt/mqtt_client.h"
+#include "../base/mqtt/mqtt_client.h"
 #include <thread>
 #include <atomic>
 #include <memory>
@@ -157,28 +157,9 @@ private:
     struct EventCache {
         bool hasTotalFault;
         uint8_t totalFault;
-        bool hasStartResp;
-        bool hasStopResp;
-        bool hasStartComplete;
-        bool hasStopComplete;
-        bool hasWorkStatus;
-        uint8_t lastWorkStatus;
-        bool pendingClear;
-        std::chrono::steady_clock::time_point workStatusZeroAt;
-        TCU2CCU_StartChargeResponseData startResp;
-        TCU2CCU_StopChargeResponseData stopResp;
-        TCU2CCU_StatusStartCompleteData startComplete;
-        TCU2CCU_StatusStopCompleteData stopComplete;
         EventCache()
             : hasTotalFault(false)
             , totalFault(0)
-            , hasStartResp(false)
-            , hasStopResp(false)
-            , hasStartComplete(false)
-            , hasStopComplete(false)
-            , hasWorkStatus(false)
-            , lastWorkStatus(0)
-            , pendingClear(false)
         {}
     };
 

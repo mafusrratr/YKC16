@@ -10,7 +10,7 @@
 - `timestamp`: 日志时间戳
 - `level`: 日志级别 (0=DEBUG, 1=INFO, 2=WARN, 3=ERROR, 4=FATAL)
 - `module`: 模块名称，用于区分日志来源
-  - 业务模块：`"daemon"`, `"charge_logic"`, `"meter"` 等
+  - 业务模块：`"daemon"`, `"tcu_logic"`, `"meter"` 等
   - 系统模块：`"system"` (系统事件)
   - 错误模块：`"error"` (错误日志)
 - `message`: 日志消息内容，包含事件类型或错误信息

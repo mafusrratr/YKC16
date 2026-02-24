@@ -1,0 +1,67 @@
+@startuml
+title tcu_meter 数据读取-解析-MQTT上送数据流
+
+actor "调度器(doRun)" as SCH
+participant "MeterProcess::pollOnce" as POLL
+participant "readGunMeter(gun)" as READ
+participant "Dlt645Meter::readAll" as ALL
+participant "Dlt645Meter::readOne(DI)" as ONE
+participant "Dlt645Meter::requestRead" as REQ
+participant "SerialCommunication" as SER
+participant "Dlt645Meter::tryExtractFrame" as EXTRACT
+participant "Dlt645Meter::decodeReadResponse" as DEC
+participant "MeterProcess::publishData" as PUBD
+participant "MqttClient" as MQTT
+participant "Subscriber(tcu_logic)" as SUB
+participant "MeterProcess::publishEvent" as PUBE
+
+SCH -> POLL : 每 poll_interval_ms 触发
+loop each gun
+  POLL -> READ : 读取当前枪数据
+  loop retry_count + 1
+    READ -> ALL : readAll(meterAddr)
+    ALL -> ONE : readOne(Energy DI)
+    ONE -> REQ : requestRead(addr, di)
+    REQ -> SER : send(645读请求帧)
+    loop until read_timeout_ms
+      REQ -> SER : receive()
+      SER --> REQ : bytes / no data
+      REQ -> EXTRACT : tryExtractFrame(rxBuffer)
+      EXTRACT --> REQ : frame? yes/no
+    end
+    REQ --> ONE : response frame / timeout
+    ONE -> DEC : decodeReadResponse(frame, DI)
+    DEC --> ONE : value / fail
+    ALL -> ONE : readOne(Voltage DI)
+    ALL -> ONE : readOne(Current DI)
+    ONE --> ALL : value
+    ALL --> READ : MeterReading{totalEnergy,voltage,current}
+    READ --> POLL : success / fail
+  end
+
+  alt success
+    POLL -> PUBD : publishData(gun, reading)
+    PUBD -> MQTT : publish tcu/meter/{gun}/data QoS0
+    MQTT --> SUB : data payload
+    alt offline -> online
+      POLL -> PUBE : publishEvent(meter_online)
+      PUBE -> MQTT : publish tcu/meter/{gun}/event QoS1
+    end
+  else fail
+    alt first fail or online->offline
+      POLL -> PUBE : publishEvent(meter_offline, reason)
+      PUBE -> MQTT : publish tcu/meter/{gun}/event QoS1
+    end
+  end
+end
+
+note right of DEC
+  解析步骤:
+  1) 校验DI
+  2) 数据区每字节 -0x33
+  3) BCD(低位在前)转十进制
+  4) 按 decimals 缩放
+end note
+
+@enduml
+

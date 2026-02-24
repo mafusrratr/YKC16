@@ -1,0 +1,49 @@
+@startuml
+title tcu_logic 架构与通信
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+package "tcu_logic 进程" {
+  [ChargeLogicProcess] as CLP
+  [BaseProcess] as BP
+  [MqttClient] as MC
+  [ConfigManagerLite] as CFG
+  [cJSON] as CJSON
+  CLP --> BP : lifecycle
+  CLP --> MC : MQTT收发
+  CLP --> CFG : 读取配置
+  CLP --> CJSON : JSON解析/构建
+}
+
+component "MQTT Broker" as BROKER
+component "pile_controller" as PILE
+component "HMI" as HMI
+component "meter" as METER
+component "platform" as PLAT
+
+CLP --> BROKER : publish/subscribe
+PILE --> BROKER
+HMI --> BROKER
+METER --> BROKER
+PLAT --> BROKER
+
+note right of CLP
+  状态机：IDLE/PREPARE/STARTING/CHARGING/
+          STOPPING/STOPPED/ERROR
+  PREPARE->STARTING 仅鉴权通过
+end note
+
+note bottom of BROKER
+  tcu/pile/{gun}/cmd        QoS2
+  tcu/pile/{gun}/event      QoS2
+  tcu/pile/{gun}/data       QoS0
+  tcu/logic/{gun}/cmd       QoS1
+  tcu/logic/{gun}/event     QoS1
+  tcu/logic/{gun}/feeData   QoS1
+  tcu/meter/{gun}/data      QoS0
+  tcu/plat/{gun}/cmd        QoS1
+  tcu/plat/{gun}/event      QoS1
+end note
+
+@enduml

@@ -31,7 +31,7 @@
 - ✅ 所有接口文件添加了使用说明注释
 
 ### 阶段4：清理不需要的文件 ✅
-- ✅ 删除 `interfaces/icharge_logic.h`（只有一个实现）
+- ✅ 删除 `interfaces/itcu_logic.h`（只有一个实现）
 - ✅ 删除 `interfaces/ilogger.h`（类型定义已移到 logger_types.h）
 - ✅ 删除 `interfaces/icommunication.h`（已移到 communication/）
 - ✅ 删除 `interfaces/ipile_controller.h`（已移到 pile_controller/）
@@ -58,7 +58,7 @@ core/
 │
 ├── daemon/              # ✅ 守护进程（已完成）
 ├── logger/              # ✅ 日志进程（已完成）
-├── charge_logic/        # 充电逻辑进程（待开发）
+├── tcu_logic/        # 充电逻辑进程（待开发）
 ├── meter/               # 计量计费进程（待重构）
 │   └── imeter.h         # ✅ 进程内部接口
 ├── pile_controller/     # 主控通信进程（待开发）
@@ -102,7 +102,7 @@ core/
 ✅ 所有修改已完成，编译测试通过
 
 ## 后续工作
-1. 实现 charge_logic 进程（不需要接口）
+1. 实现 tcu_logic 进程（不需要接口）
 2. 实现 communication 进程（使用进程内部的 ICommunication 接口）
 3. 实现 pile_controller 进程（使用进程内部的 IPileController 接口）
 4. 重构 meter 进程（使用进程内部的 IMeter 接口）
