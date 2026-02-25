@@ -121,18 +121,18 @@ public:
         const std::string& vinCode,
         int timeDivType,
         int startType,
-        unsigned int chargeStartTime,
-        unsigned int chargeEndTime,
-        int startSoc,
-        int endSoc,
+        uint64_t chargeStartTime,
+        uint64_t chargeEndTime,
+        double startSoc,
+        double endSoc,
         unsigned int reason,
         const std::string& feeModelId,
-        long long sumStart,
-        long long sumEnd,
-        unsigned int totalElect,
-        unsigned int totalPowerCost,
-        unsigned int totalServCost,
-        unsigned int totalCost,
+        double sumStart,
+        double sumEnd,
+        double totalElect,
+        double totalPowerCost,
+        double totalServCost,
+        double totalCost,
         int timeNum,
         const std::string& partElectText,    // 逗号分隔电量
         const std::string& chargeFeeText,    // 逗号分隔电费
@@ -336,4 +336,3 @@ private:
 };
 
 #endif // DATABASE_MANAGER_H
-

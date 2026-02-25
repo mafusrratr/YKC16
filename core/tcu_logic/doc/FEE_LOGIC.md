@@ -76,11 +76,11 @@
   - `vinCode` <- `start_complete.vin`
   - `timeDivType` <- `chargeMode`
   - `startType` <- 启动来源（HMI=1，Platform=2）
-  - `chargeStartTime/chargeEndTime` <- 启停时间（UTC秒）
-  - `startSoc/endSoc` <- `start_complete.soc` / `stop_complete.stopSoc`
+  - `chargeStartTime/chargeEndTime` <- 启停时间（YYYYMMDDHHMMSS）
+  - `startSoc/endSoc` <- `start_complete.soc`(0.1% -> %) / `stop_complete.stopSoc`(%)，统一按 % 保存
   - `reason` <- `stop_complete.stopReason`
   - `feeModelId` <- 计费模型ID
-  - `sumStart/sumEnd` <- 电表总示值（按 0.01kWh）
-  - `totalElect` <- 总电量（0.01kWh）
-  - `totalPowerCost/totalServCost/totalCost` <- 费用（分）
+  - `sumStart/sumEnd` <- 电表总示值（kWh，double，保留5位小数）
+  - `totalElect` <- 总电量（kWh，double，保留5位小数）
+  - `totalPowerCost/totalServCost/totalCost` <- 费用（元，double，保留5位小数）
   - `timeNum/partElect/chargeFee/serviceFee` <- 分段计费结果

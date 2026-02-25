@@ -104,16 +104,16 @@ private:
         bool hasAuthBasis;                      // 是否已具备启动基础参数
         uint64_t startTimeMs;                   // 启动请求时间戳(ms)
         int startType;                          // 启动方式
-        unsigned int chargeStartTime;           // 充电开始 UTC 秒
-        unsigned int chargeEndTime;             // 充电结束 UTC 秒
+        uint64_t chargeStartTime;               // 充电开始时间（YYYYMMDDHHMMSS）
+        uint64_t chargeEndTime;                 // 充电结束时间（YYYYMMDDHHMMSS）
         std::string chargeUserNo;               // 用户号
         std::string orderNo;                    // 订单号
         std::string preTradeNo;                 // 平台交易流水
         std::string tradeNo;                    // 本地交易流水
         bool hasVinCode;                        // VIN 是否有效
         std::string vinCode;                    // VIN
-        int startSoc;                           // 启动 SOC
-        int endSoc;                             // 结束 SOC
+        double startSoc;                        // 启动 SOC（%）
+        double endSoc;                          // 结束 SOC（%）
         unsigned int stopReason;                // 停止原因
         int chargeMode;                         // 充电模式
         double prechargeAmount;                 // 预充值金额(元)

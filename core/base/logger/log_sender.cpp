@@ -189,11 +189,11 @@ void LogSender::saveFeeModel(const FeeModel& model) {
 }
 
 std::string LogSender::tradeRecordToJson(const TradeRecord& rec) {
-    auto vec2text = [](const std::vector<unsigned int>& arr) -> std::string {
+    auto vec2text = [](const std::vector<double>& arr) -> std::string {
         std::ostringstream oss;
         for (size_t i = 0; i < arr.size(); ++i) {
             if (i > 0) oss << ',';
-            oss << arr[i];
+            oss << std::fixed << std::setprecision(5) << arr[i];
         }
         return oss.str();
     };
@@ -265,5 +265,3 @@ std::string LogSender::feeModelToJson(const FeeModel& model) {
          << "\"service_fee_text\":\"" << intArray2text(model.serviceFee) << "\"}";
     return json.str();
 }
-
-

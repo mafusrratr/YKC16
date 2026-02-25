@@ -42,25 +42,25 @@ struct TradeRecord {
     std::string vinCode;            // VIN
     int timeDivType = 0;            // 计量计费类型（0/1/2...）
     int startType = 0;              // 启动方式（刷卡/远程等）
-    unsigned int chargeStartTime = 0; // 开始充电时间（UTC秒）
-    unsigned int chargeEndTime = 0;   // 结束充电时间（UTC秒）
-    int startSoc = 0;               // 启动时SOC（%）
-    int endSoc = 0;                 // 停止时SOC（%）
+    uint64_t chargeStartTime = 0; // 开始充电时间（YYYYMMDDHHMMSS）
+    uint64_t chargeEndTime = 0;   // 结束充电时间（YYYYMMDDHHMMSS）
+    double startSoc = 0.0;          // 启动时SOC（%）
+    double endSoc = 0.0;            // 停止时SOC（%）
     unsigned int reason = 0;        // 停止充电原因
     std::string feeModelId;         // 计费模型编号
-    long long sumStart = 0;         // 电表总起示值
-    long long sumEnd = 0;           // 电表总止示值
-    unsigned int totalElect = 0;    // 总电量（0.01kWh）
-    unsigned int totalPowerCost = 0;// 总电费（分）
-    unsigned int totalServCost = 0; // 总服务费（分）
-    unsigned int totalCost = 0;     // 总消费金额（分）
+    double sumStart = 0.0;          // 电表总起示值（kWh）
+    double sumEnd = 0.0;            // 电表总止示值（kWh）
+    double totalElect = 0.0;        // 总电量（kWh）
+    double totalPowerCost = 0.0;    // 总电费（元）
+    double totalServCost = 0.0;     // 总服务费（元）
+    double totalCost = 0.0;         // 总消费金额（元）
     int timeNum = 0;                // 时段数
-    std::vector<unsigned int> partElect;   // 时段电量（kWh*100，长度timeNum）
-    std::vector<unsigned int> chargeFee;   // 时段电费（分，长度timeNum）
-    std::vector<unsigned int> serviceFee;  // 时段服务费（分，长度timeNum）
+    std::vector<double> partElect;         // 时段电量（kWh）
+    std::vector<double> chargeFee;         // 时段电费（元）
+    std::vector<double> serviceFee;        // 时段服务费（元）
     int startPoint = 0;             // 起始点标识
     int crossPoints = 0;            // 跨越点数
-    std::vector<unsigned int> pointsElect; // 跨越点电量（长度crossPoints）
+    std::vector<double> pointsElect;       // 跨越点电量（kWh）
     std::string cardNumber;         // 实体卡号
 };
 
@@ -75,8 +75,5 @@ struct FeeModel {
 };
 
 #endif // LOGGER_TYPES_H
-
-
-
 
 

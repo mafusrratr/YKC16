@@ -36,25 +36,25 @@ struct TradeRecord {
     std::string vinCode;
     int timeDivType = 0;
     int startType = 0;
-    unsigned int chargeStartTime = 0;
-    unsigned int chargeEndTime = 0;
-    int startSoc = 0;
-    int endSoc = 0;
+    uint64_t chargeStartTime = 0;
+    uint64_t chargeEndTime = 0;
+    double startSoc = 0.0;
+    double endSoc = 0.0;
     unsigned int reason = 0;
     std::string feeModelId;
-    long long sumStart = 0;
-    long long sumEnd = 0;
-    unsigned int totalElect = 0;
-    unsigned int totalPowerCost = 0;
-    unsigned int totalServCost = 0;
-    unsigned int totalCost = 0;
+    double sumStart = 0.0;
+    double sumEnd = 0.0;
+    double totalElect = 0.0;
+    double totalPowerCost = 0.0;
+    double totalServCost = 0.0;
+    double totalCost = 0.0;
     int timeNum = 0;
-    std::vector<unsigned int> partElect;
-    std::vector<unsigned int> chargeFee;
-    std::vector<unsigned int> serviceFee;
+    std::vector<double> partElect;
+    std::vector<double> chargeFee;
+    std::vector<double> serviceFee;
     int startPoint = 0;
     int crossPoints = 0;
-    std::vector<unsigned int> pointsElect;
+    std::vector<double> pointsElect;
     std::string cardNumber;
 };
 
@@ -67,5 +67,3 @@ struct FeeModel {
     std::vector<unsigned int> chargeFee;
     std::vector<unsigned int> serviceFee;
 };
-
-

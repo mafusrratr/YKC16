@@ -758,12 +758,44 @@ void LoggerProcess::parseAndLogMessage(const std::string& jsonData)
         auto getStr = [](const std::string &j, const std::string &key) {
             size_t p = j.find("\"" + key + "\":\"");
             if (p == std::string::npos) return std::string{};
-            p += key.size() + 4; // BY ZF: 指向首个引号，随后跳过
+            p += key.size() + 4; // BY ZF: 直接指向 value 首字符（可为空串）
             size_t start = p;
-            if (start < j.size() && j[start] == '"') ++start;
             size_t end = j.find('"', start);
             if (end == std::string::npos) return std::string{};
             return j.substr(start, end-start);
+        };
+        auto getDouble = [&](const std::string& key) -> double {
+            std::string s = getStr(jsonData, key);
+            if (!s.empty()) {
+                try { return std::stod(s); } catch (...) { return 0.0; }
+            }
+            size_t p = jsonData.find("\"" + key + "\":");
+            if (p == std::string::npos) return 0.0;
+            p += key.size() + 3;
+            while (p < jsonData.size() &&
+                   (jsonData[p] == ' ' || jsonData[p] == '\t' || jsonData[p] == '\n' || jsonData[p] == '\r')) {
+                ++p;
+            }
+            size_t start = p;
+            if (p < jsonData.size() && (jsonData[p] == '-' || jsonData[p] == '+')) {
+                ++p;
+            }
+            bool hasDigit = false;
+            while (p < jsonData.size()) {
+                char c = jsonData[p];
+                if ((c >= '0' && c <= '9')) {
+                    hasDigit = true;
+                    ++p;
+                    continue;
+                }
+                if (c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-') {
+                    ++p;
+                    continue;
+                }
+                break;
+            }
+            if (!hasDigit) return 0.0;
+            try { return std::stod(jsonData.substr(start, p - start)); } catch (...) { return 0.0; }
         };
         auto parseIntMulti = [&](const std::string& key)->int {
             int v = getInt(jsonData, key);
@@ -792,18 +824,20 @@ void LoggerProcess::parseAndLogMessage(const std::string& jsonData)
         std::string vinCode = getStr(jsonData, "vin_code");
         int timeDivType = getInt(jsonData, "time_div_type");
         int startType = getInt(jsonData, "start_type");
-        unsigned int chargeStartTime = (unsigned int)getInt(jsonData, "charge_start_time");
-        unsigned int chargeEndTime = (unsigned int)getInt(jsonData, "charge_end_time");
-        int startSoc = getInt(jsonData, "start_soc");
-        int endSoc = getInt(jsonData, "end_soc");
+        long long chargeStartTimeRaw = getLL(jsonData, "charge_start_time");
+        long long chargeEndTimeRaw = getLL(jsonData, "charge_end_time");
+        uint64_t chargeStartTime = chargeStartTimeRaw > 0 ? static_cast<uint64_t>(chargeStartTimeRaw) : 0ULL;
+        uint64_t chargeEndTime = chargeEndTimeRaw > 0 ? static_cast<uint64_t>(chargeEndTimeRaw) : 0ULL;
+        double startSoc = getDouble("start_soc");
+        double endSoc = getDouble("end_soc");
         unsigned int reason = (unsigned int)getInt(jsonData, "reason");
         std::string feeModelId = getStr(jsonData, "fee_model_id");
-        long long sumStart = getLL(jsonData, "sum_start");
-        long long sumEnd = getLL(jsonData, "sum_end");
-        unsigned int totalElect = (unsigned int)getInt(jsonData, "total_elect");
-        unsigned int totalPowerCost = (unsigned int)getInt(jsonData, "total_power_cost");
-        unsigned int totalServCost = (unsigned int)getInt(jsonData, "total_serv_cost");
-        unsigned int totalCost = (unsigned int)getInt(jsonData, "total_cost");
+        double sumStart = getDouble("sum_start");
+        double sumEnd = getDouble("sum_end");
+        double totalElect = getDouble("total_elect");
+        double totalPowerCost = getDouble("total_power_cost");
+        double totalServCost = getDouble("total_serv_cost");
+        double totalCost = getDouble("total_cost");
         int timeNum = parseIntMulti("time_num"); // BY ZF
         int startPoint = getInt(jsonData, "start_point");
         int crossPoints = parseIntMulti("cross_points"); // BY ZF
@@ -917,9 +951,12 @@ void LoggerProcess::parseAndLogMessage(const std::string& jsonData)
 // BY ZF: 直接接收业务层传入的 TradeRecord，完成长度校验并入库（不经过 MQ）
 void LoggerProcess::logTradeRecord(const TradeRecord& rec)
 {
-    auto vec2text = [](const std::vector<unsigned int>& arr) -> std::string {
+    auto vec2text = [](const std::vector<double>& arr) -> std::string {
         std::ostringstream oss;
-        for (size_t i = 0; i < arr.size(); ++i) { if (i > 0) oss << ','; oss << arr[i]; }
+        for (size_t i = 0; i < arr.size(); ++i) {
+            if (i > 0) oss << ',';
+            oss << std::fixed << std::setprecision(5) << arr[i];
+        }
         return oss.str();
     };
     // BY ZF: 严格长度校验

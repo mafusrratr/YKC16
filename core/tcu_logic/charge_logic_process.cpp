@@ -74,6 +74,17 @@ namespace {
         return std::round(v * 100000.0) / 100000.0;
     }
 
+    // BY ZF: Unix 秒时间戳转 YYYYMMDDHHMMSS 数字，便于交易表直接检索
+    uint64_t toYmdHmsNumber(std::time_t tsSec) {
+        std::tm tmv;
+        localtime_r(&tsSec, &tmv);
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%04d%02d%02d%02d%02d%02d",
+                      tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                      tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+        return static_cast<uint64_t>(std::strtoull(buf, nullptr, 10));
+    }
+
     int readGunCountFromIni(const std::string& path) {
         std::ifstream in(path.c_str());
         if (!in.is_open()) {
@@ -187,6 +198,8 @@ bool ChargeLogicProcess::doInitialize()
 
     m_gunStates.clear();
     m_gunStates.resize(m_config.gunCount);
+    // BY ZF: 初始化完成后写入一条 info 日志，便于联调确认进程已就绪
+    m_logSender.info("init_completed", std::string("gun_count=") + std::to_string(m_config.gunCount));
     return true;
 }
 
@@ -482,7 +495,8 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
             }
             cJSON* soc = cJSON_GetObjectItem(data, "soc");
             if (soc && cJSON_IsNumber(soc)) {
-                m_gunStates[gun].startSoc = soc->valueint;
+                // BY ZF: start_complete.soc 协议量纲为 0.1%，这里统一换算成 %
+                m_gunStates[gun].startSoc = soc->valuedouble / 10.0;
             }
             const char* vin = getString(data, "vin");
             if (vin && vin[0]) {
@@ -506,7 +520,8 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
             }
             cJSON* soc = cJSON_GetObjectItem(data, "stopSoc");
             if (soc && cJSON_IsNumber(soc)) {
-                m_gunStates[gun].endSoc = soc->valueint;
+                // BY ZF: stop_complete.stopSoc 协议量纲为 %，直接使用
+                m_gunStates[gun].endSoc = soc->valuedouble;
             }
         }
         handleEvent(gun, EVT_STOP_COMPLETE, "stop_complete");
@@ -821,7 +836,7 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     }
 
     gs.startTimeMs = startTs;
-    gs.chargeStartTime = static_cast<unsigned int>(startTs / 1000ULL);
+    gs.chargeStartTime = toYmdHmsNumber(static_cast<std::time_t>(startTs / 1000ULL));
     gs.chargeEndTime = 0;
     gs.chargeUserNo = userNo;
     gs.orderNo = orderNo;
@@ -1023,6 +1038,7 @@ void ChargeLogicProcess::applyEnergyDeltaToFee(uint8_t gun, double deltaKwh)
     gs.hasTotalAmount = true;
 }
 
+// BY ZF: 预充金额接近阈值时，触发停机
 void ChargeLogicProcess::maybeTriggerTcuStopByPrecharge(uint8_t gun)
 {
     if (gun >= m_gunStates.size()) {
@@ -1249,30 +1265,34 @@ void ChargeLogicProcess::logTradeRecordOnStopped(uint8_t gun, const char* reason
     rec.timeDivType = gs.chargeMode;
     rec.startType = gs.startType;
     rec.chargeStartTime = gs.chargeStartTime;
-    rec.chargeEndTime = static_cast<unsigned int>(std::time(nullptr));
+    rec.chargeEndTime = toYmdHmsNumber(std::time(nullptr));
     gs.chargeEndTime = rec.chargeEndTime;
-    rec.startSoc = gs.startSoc;
-    rec.endSoc = gs.endSoc;
+    rec.startSoc = roundTo5(gs.startSoc);
+    rec.endSoc = roundTo5(gs.endSoc);
     rec.reason = gs.stopReason;
     rec.feeModelId = gs.feeModelId;
 
-    const long long sumStart01 = static_cast<long long>(std::llround(gs.feeEnergyBaseKwh * 100.0));
-    const long long sumEnd01 = static_cast<long long>(std::llround((gs.feeEnergyBaseKwh + gs.feeTotalEnergyKwh) * 100.0));
-    rec.sumStart = sumStart01;
-    rec.sumEnd = sumEnd01;
-    rec.totalElect = static_cast<unsigned int>(std::max<long long>(0, static_cast<long long>(std::llround(gs.feeTotalEnergyKwh * 100.0))));
-    rec.totalPowerCost = static_cast<unsigned int>(std::max<long long>(0, static_cast<long long>(std::llround(gs.feeTotalElectricAmount * 100.0))));
-    rec.totalServCost = static_cast<unsigned int>(std::max<long long>(0, static_cast<long long>(std::llround(gs.feeTotalServiceAmount * 100.0))));
-    rec.totalCost = rec.totalPowerCost + rec.totalServCost;
+    const double sumStartKwh = std::max(0.0, gs.feeEnergyBaseKwh);
+    const double sumEndKwh = std::max(0.0, gs.feeEnergyBaseKwh + gs.feeTotalEnergyKwh);
+    const double totalElectKwh = std::max(0.0, gs.feeTotalEnergyKwh);
+    const double totalPowerCostYuan = std::max(0.0, gs.feeTotalElectricAmount);
+    const double totalServCostYuan = std::max(0.0, gs.feeTotalServiceAmount);
+    const double totalCostYuan = totalPowerCostYuan + totalServCostYuan;
+    rec.sumStart = roundTo5(sumStartKwh);
+    rec.sumEnd = roundTo5(sumEndKwh);
+    rec.totalElect = roundTo5(totalElectKwh);
+    rec.totalPowerCost = roundTo5(totalPowerCostYuan);
+    rec.totalServCost = roundTo5(totalServCostYuan);
+    rec.totalCost = roundTo5(totalCostYuan);
 
     rec.timeNum = gs.feeTimeNum;
     rec.partElect.reserve(gs.feeSegEnergyKwh.size());
     rec.chargeFee.reserve(gs.feeSegElectricAmount.size());
     rec.serviceFee.reserve(gs.feeSegServiceAmount.size());
     for (size_t i = 0; i < gs.feeSegEnergyKwh.size(); i++) {
-        rec.partElect.push_back(static_cast<unsigned int>(std::max<long long>(0, static_cast<long long>(std::llround(gs.feeSegEnergyKwh[i] * 100.0)))));
-        rec.chargeFee.push_back(static_cast<unsigned int>(std::max<long long>(0, static_cast<long long>(std::llround(gs.feeSegElectricAmount[i] * 100.0)))));
-        rec.serviceFee.push_back(static_cast<unsigned int>(std::max<long long>(0, static_cast<long long>(std::llround(gs.feeSegServiceAmount[i] * 100.0)))));
+        rec.partElect.push_back(roundTo5(std::max(0.0, gs.feeSegEnergyKwh[i])));
+        rec.chargeFee.push_back(roundTo5(std::max(0.0, gs.feeSegElectricAmount[i])));
+        rec.serviceFee.push_back(roundTo5(std::max(0.0, gs.feeSegServiceAmount[i])));
     }
 
     rec.startPoint = 0;
