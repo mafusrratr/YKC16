@@ -274,6 +274,7 @@ bool DatabaseManager::createChargeTables() {
             cross_points INTEGER,
             points_elect_text TEXT,
             card_number TEXT,
+            platform_confirm_flag INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     )";
@@ -290,6 +291,28 @@ bool DatabaseManager::createChargeTables() {
     }
     if (!executeSQL(DB_CHARGE, "CREATE INDEX IF NOT EXISTS idx_gun_no ON charge_trade_info(gun_no)")) {
         return false;
+    }
+    // BY ZF: 兼容历史库，补齐平台确认标志字段（已存在时忽略）。
+    sqlite3* chargeDb = getConnection(DB_CHARGE);
+    if (chargeDb) {
+        char* errMsg = nullptr;
+        const int rc = sqlite3_exec(
+            chargeDb,
+            "ALTER TABLE charge_trade_info ADD COLUMN platform_confirm_flag INTEGER DEFAULT 0",
+            nullptr,
+            nullptr,
+            &errMsg
+        );
+        if (rc != SQLITE_OK) {
+            std::string err = errMsg ? errMsg : "";
+            if (errMsg) {
+                sqlite3_free(errMsg);
+            }
+            if (err.find("duplicate column name") == std::string::npos) {
+                std::cout << "Failed to ensure platform_confirm_flag column: " << err << std::endl;
+                return false;
+            }
+        }
     }
 
     std::cout << "Charge database tables created successfully" << std::endl;
@@ -573,6 +596,16 @@ bool DatabaseManager::logChargeTradeInfo(
         << createdTimeStr << "'" // BY ZF: created_at 使用本地时间
         << ")";
 
+    return executeSQL(DB_CHARGE, sql.str());
+}
+
+bool DatabaseManager::updateTradeConfirmFlag(const std::string& tradeNo, int confirmFlag)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const std::string safeTradeNo = escapeSqlString(tradeNo);
+    std::stringstream sql;
+    sql << "UPDATE charge_trade_info SET platform_confirm_flag=" << confirmFlag
+        << " WHERE trade_no='" << safeTradeNo << "'";
     return executeSQL(DB_CHARGE, sql.str());
 }
 

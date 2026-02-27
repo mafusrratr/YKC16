@@ -39,6 +39,7 @@
 ### 2.4 与平台交互
 - 平台下发到 tcu_logic
   - `tcu/plat/{gun}/cmd`
+  - `tcu/plat/{gun}/setConfig`
 - tcu_logic 上报平台
   - `tcu/plat/{gun}/event`
 
@@ -76,13 +77,78 @@
 - `set_policy`
 
 平台鉴权类 cmd（plat/cmd）：
-- `auth_ok`：鉴权通过
-- `auth_fail`：鉴权失败
-- `auth_result`：通用结果（`data.result == 0` 通过，非 0 失败）
+- `auth_result`：通用结果（`data.result == 1` 通过，其他失败）
 ```json
 {
   "cmd": "auth_result",
-  "data": { "result": 0 }
+  "data": {
+    "result": 1,
+    "loadControlSwitch": 1,
+    "plugAndChargeFlag": 1,
+    "auxPowerVoltage": 12,
+    "mergeChargeFlag": 0
+  }
+}
+```
+
+说明：
+- 当 `auth_result.data.result == 1` 时，`data` 中的启动参数会覆盖 `pendingStartData`，
+  作为最终下发给 `tcu/pile/{gun}/cmd` 的 `start_charge.data`。
+
+平台停止命令（plat/cmd）：
+- `stop_charge`：平台要求停止充电（与 HMI 停机语义一致）
+```json
+{
+  "ts": 1736150005000,
+  "seq": 21,
+  "source": "platform",
+  "gun": 0,
+  "cmd": "stop_charge",
+  "data": {
+    "stopReason": 1,
+    "tcuStopCode": 0
+  }
+}
+```
+
+平台记录确认命令（plat/cmd）：
+- `record_cfm`：平台确认某条充电记录已入平台账单
+```json
+{
+  "ts": 1736150006000,
+  "seq": 22,
+  "source": "tcu_comm",
+  "gun": 0,
+  "cmd": "record_cfm",
+  "data": {
+    "tradeNo": "DP202602120001",
+    "confirmFlag": 1
+  }
+}
+```
+
+平台配置确认下发（plat/setConfig）：
+```json
+{
+  "ts": 1772200000000,
+  "seq": 12,
+  "source": "tcu_comm",
+  "gun": 0,
+  "cmd": "setConfig",
+  "data": {
+    "cdzId": 58050010904022,
+    "feeModel": {
+      "timeNum": 2,
+      "timeSeg": ["0000", "1200"],
+      "chargeFee": [0.7, 0.9],
+      "serviceFee": [0.15, 0.15]
+    },
+    "gunCount": 2,
+    "guns": [
+      {"gun": 0, "gunId": 4294967295, "gunType": 1},
+      {"gun": 1, "gunId": 4294967295, "gunType": 1}
+    ]
+  }
 }
 ```
 
@@ -125,7 +191,7 @@
   "code": "deviceErr",
   "faults": ["emergencyStopFault", "smokeFault"],
   "otherFault": 34
-}
+} 
 ```
 - `charge_record`
 ```json
@@ -135,6 +201,26 @@
   "durationSec": 3600,
   "energyKwh": 12.34,
   "stopReason": "user_stop"
+}
+```
+- `update_record`
+```json
+{
+  "gunNo": 0,
+  "preTradeNo": "P202602120001",
+  "tradeNo": "DP202602120001",
+  "chargeStartTime": 20260212120001,
+  "chargeEndTime": 20260212153010,
+  "startSoc": 20.0,
+  "endSoc": 80.0,
+  "reason": 1,
+  "feeModelId": "MODEL002",
+  "sumStart": 112.53000,
+  "sumEnd": 120.61000,
+  "totalElect": 8.08000,
+  "totalPowerCost": 15.23000,
+  "totalServCost": 2.54000,
+  "totalCost": 17.77000
 }
 ```
 - `auth_basis`

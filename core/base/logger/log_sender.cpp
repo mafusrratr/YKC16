@@ -188,6 +188,16 @@ void LogSender::saveFeeModel(const FeeModel& model) {
     sendToQueue(json);
 }
 
+void LogSender::confirmTradeRecord(const std::string& tradeNo, int confirmFlag) {
+    std::ostringstream json;
+    json << "{"
+         << "\"type\":\"record_cfm\","
+         << "\"trade_no\":\"" << tradeNo << "\","
+         << "\"confirm_flag\":" << confirmFlag
+         << "}";
+    sendToQueue(json.str());
+}
+
 std::string LogSender::tradeRecordToJson(const TradeRecord& rec) {
     auto vec2text = [](const std::vector<double>& arr) -> std::string {
         std::ostringstream oss;

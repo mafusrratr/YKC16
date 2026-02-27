@@ -1,6 +1,6 @@
 # tcu_logic 最小测试用例（MQTT 模拟）
 
-## 1. HMI 启动流程（测试阶段自动鉴权通过）→ 进入充电
+## 1. HMI 启动流程（start_charge + auth_result）→ 进入充电
 1) 先保证遥信进入 PREPARE
 - 发布 topic：`tcu/pile/0/data`
 ```json
@@ -41,13 +41,31 @@
   }
 }
 ```
-3) 期望：
+3) 平台返回鉴权结果（含最终启动参数）
+- 发布 topic：`tcu/plat/0/cmd`
+```json
+{
+  "ts": 1736150000200,
+  "seq": 3,
+  "source": "platform",
+  "gun": 0,
+  "cmd": "auth_result",
+  "data": {
+    "result": 1,
+    "loadControlSwitch": 1,
+    "plugAndChargeFlag": 1,
+    "auxPowerVoltage": 12,
+    "mergeChargeFlag": 0
+  }
+}
+```
+4) 期望：
 - `logic/event` 上报 `auth_basis`
-- tcu_logic 下发 `tcu/pile/0/cmd` `start_charge`
+- tcu_logic 下发 `tcu/pile/0/cmd` `start_charge`（参数以 `auth_result.data` 为准）
 - `logic/event` 上报 `state_change` 到 STARTING
 - 充电中收到电量增量后，`tcu/logic/0/feeData` 开始上送分段费用
 
-4) pile_controller 上送启动完成
+5) pile_controller 上送启动完成
 - 发布 topic：`tcu/pile/0/event`
 ```json
 {
@@ -63,7 +81,7 @@
 ```
 期望：状态进入 CHARGING
 
-## 2. 平台启动流程（测试阶段自动鉴权通过）→ 进入充电
+## 2. 平台启动流程（start_charge + auth_result）→ 进入充电
 - 发布 topic：`tcu/plat/0/cmd`
 ```json
 {
@@ -87,6 +105,23 @@
   }
 }
 ```
+然后发布 topic：`tcu/plat/0/cmd`
+```json
+{
+  "ts": 1736150001100,
+  "seq": 6,
+  "source": "platform",
+  "gun": 0,
+  "cmd": "auth_result",
+  "data": {
+    "result": 1,
+    "loadControlSwitch": 1,
+    "plugAndChargeFlag": 1,
+    "auxPowerVoltage": 12,
+    "mergeChargeFlag": 0
+  }
+}
+```
 期望：先上报 `auth_basis`，再下发 `tcu/pile/0/cmd` `start_charge`，状态到 STARTING
 
 ## 3. 停止流程 → STOPPING → STOPPED
@@ -106,6 +141,23 @@
 }
 ```
 期望：进入 STOPPING，并下发 `tcu/pile/0/cmd` `stop_charge`
+
+平台停止命令等价用例（与 HMI 停机相同）：
+- 发布 topic：`tcu/plat/0/cmd`
+```json
+{
+  "ts": 1736150002050,
+  "seq": 701,
+  "source": "platform",
+  "gun": 0,
+  "cmd": "stop_charge",
+  "data": {
+    "stopReason": 1,
+    "tcuStopCode": 0
+  }
+}
+```
+期望：同样进入 STOPPING，并下发 `tcu/pile/0/cmd` `stop_charge`
 
 2) pile_controller 上送停止完成
 - 发布 topic：`tcu/pile/0/event`
@@ -166,13 +218,17 @@
 ```
 期望：进入 IDLE
 
-## 6. STARTING 超时 50s 自动转 STOPPING
+## 6. STARTING 超时与重发
 1) 先进入 PREPARE（复用用例1步骤1），然后下发启动命令（复用用例1步骤2）
-2) 不发送 `tcu/pile/0/event` `start_complete`
-3) 等待约 50 秒
+2) 发布鉴权通过（复用用例1步骤3）
+3) 不发送 `tcu/pile/0/event` `start_complete`
+4) 等待约 30 秒
+期望：
+- 可观察到 `tcu/pile/0/cmd` 追加重发一次 `start_charge`
+5) 继续等待到约 60 秒
 期望：
 - `logic/event` 出现 `state_change`：`STARTING -> STOPPING`
-- reason 为 `starting_timeout_50s`
+- reason 为 `starting_timeout_60s`
 - 同时可观察到 `tcu/pile/0/cmd` 周期下发 `stop_charge`（2s 间隔）
 
 ## 7. STOPPED 不响应 reset_error，仅车辆断开才回 IDLE

@@ -37,8 +37,8 @@
 - 状态：`IDLE/PREPARE/STARTING/CHARGING/STOPPING/STOPPED/ERROR`
 - 关键约束：
   - `start_cmd` 仅在 `PREPARE` 状态响应。
-  - `PREPARE → STARTING` 仅在鉴权通过（`auth_ok/auth_result`）后触发。
-  - `STARTING` 超过 50s 未收到 `start_complete`，转 `STOPPING`。
+  - `PREPARE → STARTING` 仅在鉴权通过（`auth_result.result == 1`）后触发。
+  - `STARTING` 超过 30s 未收到 `start_complete` 重发一次启动命令；超过 60s 转 `STOPPING`。
   - `STOPPING → STOPPED` 使用固定 15s 结算窗口，或电表连续 3 次无变化提前结束。
   - `STOPPED → IDLE` 车辆断开（`vehicleConnectStatus=0`）。
 - 详细流转见：`core/tcu_logic/doc/STATE_MACHINE.md`

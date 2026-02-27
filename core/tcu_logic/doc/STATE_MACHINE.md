@@ -26,14 +26,15 @@
 - `PREPARE` → `STARTING`
   - 触发：收到启动命令 + 鉴权通过
   - 动作：下发 start_charge，收到 start_response(成功) 后进入 STARTING
-  - 说明：当前测试阶段，收到 HMI/平台 `start_charge` 默认鉴权通过
+  - 说明：平台通过 `auth_result` 返回鉴权结果，`result==1` 才视为通过
 - `PREPARE` → `IDLE`
   - 触发：车辆连接状态断开
 - `STARTING` → `CHARGING`
   - 触发：收到 `start_complete` 且成功
 - `STARTING` → `STOPPING`
-  - 触发：`start_complete` 失败 / `deviceErr` / `totalFault` / 收到 stop_cmd / 启动阶段超时 50s（未收到 start_complete）
+  - 触发：`start_complete` 失败 / `deviceErr` / `totalFault` / 收到 stop_cmd / 启动阶段超时 60s（未收到 start_complete）
   - 动作：下发 stop_charge，进入停止流程
+  - 说明：启动阶段 30s 未收到 `start_complete` 时先重发一次 `start_charge`
 - `CHARGING` → `STOPPING`
   - 触发：收到 stop_cmd / 金额停机 / 设备故障 / workStatus=00 / stop_complete
   - 动作：下发 stop_charge；当总金额接近预充值金额时发布 `tcu_stop_request` 并触发停机

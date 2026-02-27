@@ -137,6 +137,8 @@ private:
         bool pendingStart;                      // 已收 start_charge，等待 PREPARE 窗口处理
         bool stopCompleteSeen;                  // 是否收到 stop_complete
         std::string pendingStartData;           // 缓存启动命令 data JSON
+        std::string lastStartCmdData;           // 最近一次下发给 pile 的启动参数
+        bool startingRetrySent;                 // STARTING 30s 重发是否已执行
         std::chrono::steady_clock::time_point startingEnterTime;  // 进入 STARTING 时间
         std::chrono::steady_clock::time_point stoppingEnterTime;  // 进入 STOPPING 时间
         std::chrono::steady_clock::time_point lastMeterMsgTime;   // 最近电表消息时间
@@ -182,6 +184,7 @@ private:
             , feeTotalServiceAmount(0.0)
             , pendingStart(false)
             , stopCompleteSeen(false)
+            , startingRetrySent(false)
         {}
     };
 
@@ -203,6 +206,7 @@ private:
     void publishLogicEvent(uint8_t gun, const std::string& event, cJSON* data);
     void publishFeeData(uint8_t gun);
     void publishStateChange(uint8_t gun, ChargeState from, ChargeState to, const char* reason);
+    void publishUpdateRecordEvent(uint8_t gun, const TradeRecord& rec);
     // BY ZF: 结束充电后记录交易日志
     void logTradeRecordOnStopped(uint8_t gun, const char* reason);
     // BY ZF: 启动鉴权参数与计费模型解析

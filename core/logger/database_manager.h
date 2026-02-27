@@ -142,6 +142,14 @@ public:
         const std::string& pointsElectText,  // 逗号分隔跨越点电量
         const std::string& cardNumber
     );
+
+    /**
+     * @brief 更新交易记录的平台确认标志。
+     * @param tradeNo 设备交易流水号（唯一键）
+     * @param confirmFlag 确认标志（0未确认，1已确认）
+     * @return true 成功
+     */
+    bool updateTradeConfirmFlag(const std::string& tradeNo, int confirmFlag);
     
     // ========== 计费模型相关 ==========
     

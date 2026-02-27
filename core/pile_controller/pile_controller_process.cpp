@@ -375,8 +375,9 @@ void PileControllerProcess::updateStatusFromController()
         if (doPublish && dataCache.hasYc20) {
             const TCU2CCU_DataYC20& yc20 = dataCache.yc20;
             std::string payload = buildDataPayload(gunNo, "yc", [&yc20](cJSON* data) {
-                cJSON_AddNumberToObject(data, "outputVoltage", yc20.outputVoltage);
-                cJSON_AddNumberToObject(data, "outputCurrent", yc20.outputCurrent);
+                // BY ZF: 协议原始单位为 0.1V/0.1A，MQTT 上送按 V/A。
+                cJSON_AddNumberToObject(data, "outputVoltage", static_cast<double>(yc20.outputVoltage) / 10.0);
+                cJSON_AddNumberToObject(data, "outputCurrent", static_cast<double>(yc20.outputCurrent) / 10.0);
                 cJSON_AddNumberToObject(data, "soc", yc20.soc);
                 cJSON_AddNumberToObject(data, "batteryMinTemp", yc20.batteryMinTemp);
                 cJSON_AddNumberToObject(data, "batteryMaxTemp", yc20.batteryMaxTemp);

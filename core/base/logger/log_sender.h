@@ -82,6 +82,13 @@ public:
      */
     void saveFeeModel(const FeeModel& model);
 
+    /**
+     * @brief 发送交易记录平台确认消息到 logger 进程。
+     * @param tradeNo 交易流水号
+     * @param confirmFlag 确认标志（0/1）
+     */
+    void confirmTradeRecord(const std::string& tradeNo, int confirmFlag = 1);
+
 private:
     /**
      * 添加日志条目到缓冲区
@@ -146,5 +153,4 @@ private:
 };
 
 #endif // LOG_SENDER_H
-
 

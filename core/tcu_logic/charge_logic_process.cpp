@@ -216,11 +216,29 @@ void ChargeLogicProcess::doRun()
                     maybeTriggerTcuStopByPrecharge(static_cast<uint8_t>(i));
                 }
                 if (gs.state == STATE_STARTING) {
-                    // BY ZF: 启动阶段 50s 未收到启动完成则转入停机流程
-                    if (gs.startingEnterTime.time_since_epoch().count() != 0 &&
-                        now - gs.startingEnterTime >= std::chrono::seconds(50)) {
-                        handleEvent(static_cast<uint8_t>(i), EVT_STOP_CMD, "starting_timeout_50s");
-                        continue;
+                    if (gs.startingEnterTime.time_since_epoch().count() != 0) {
+                        const auto elapsed = now - gs.startingEnterTime;
+                        // BY ZF: STARTING 持续 30s 未完成，重发一次启动命令
+                        if (!gs.startingRetrySent && elapsed >= std::chrono::seconds(30)) {
+                            cJSON* retryData = nullptr;
+                            if (!gs.lastStartCmdData.empty()) {
+                                retryData = cJSON_Parse(gs.lastStartCmdData.c_str());
+                            }
+                            if (retryData) {
+                                publishPileCmd(static_cast<uint8_t>(i), "start_charge", retryData);
+                                cJSON_Delete(retryData);
+                            } else {
+                                cJSON* pileStartData = buildPileStartData(nullptr);
+                                publishPileCmd(static_cast<uint8_t>(i), "start_charge", pileStartData);
+                                cJSON_Delete(pileStartData);
+                            }
+                            gs.startingRetrySent = true;
+                        }
+                        // BY ZF: STARTING 持续 60s 未完成，进入停机流程
+                        if (elapsed >= std::chrono::seconds(60)) {
+                            handleEvent(static_cast<uint8_t>(i), EVT_STOP_CMD, "starting_timeout_60s");
+                            continue;
+                        }
                     }
                 }
                 if (gs.state == STATE_STOPPING) {
@@ -240,6 +258,12 @@ void ChargeLogicProcess::doRun()
                     if (gs.stoppingEnterTime.time_since_epoch().count() != 0 &&
                         now - gs.stoppingEnterTime >= std::chrono::seconds(15)) {
                         handleEvent(static_cast<uint8_t>(i), EVT_METER_STALE, "stopping_settle_15s");
+                        continue;
+                    }
+                    // BY ZF: 兜底保护，避免 STOPPING 长时间滞留
+                    if (gs.stoppingEnterTime.time_since_epoch().count() != 0 &&
+                        now - gs.stoppingEnterTime >= std::chrono::seconds(30)) {
+                        handleEvent(static_cast<uint8_t>(i), EVT_METER_STALE, "stopping_force_timeout_30s");
                     }
                 }
             }
@@ -442,24 +466,6 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
         return;
     }
 
-    if (cmd == "auth_ok") {
-        if (gs.state != STATE_PREPARE || !gs.pendingStart) {
-            cJSON* evt = cJSON_CreateObject();
-            cJSON_AddStringToObject(evt, "cmd", "auth_ok");
-            cJSON_AddStringToObject(evt, "state", stateToString(gs.state));
-            cJSON_AddNumberToObject(evt, "pendingStart", gs.pendingStart ? 1 : 0);
-            cJSON_AddStringToObject(evt, "reason", "auth_without_prepare_or_start");
-            publishLogicEvent(gun, "cmd_reject", evt);
-            cJSON_Delete(evt);
-            return;
-        }
-        handleEvent(gun, EVT_AUTH_OK, "auth_ok");
-        return;
-    }
-    if (cmd == "auth_fail") {
-        handleEvent(gun, EVT_AUTH_FAIL, "auth_fail");
-        return;
-    }
     if (cmd == "auth_result") {
         int result = 0;
         if (data) {
@@ -468,7 +474,20 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
                 result = v->valueint;
             }
         }
-        if (result == 0) {
+        // BY ZF: 鉴权结果约定：1=通过，其他=失败
+        if (result == 1) {
+            // BY ZF: 使用鉴权回参覆盖启动参数，确保以下发到 pile 的参数为准
+            if (data && gs.pendingStart) {
+                cJSON* pileStartData = buildPileStartData(data);
+                if (pileStartData) {
+                    char* out = cJSON_PrintUnformatted(pileStartData);
+                    if (out) {
+                        gs.pendingStartData = out;
+                        cJSON_free(out);
+                    }
+                    cJSON_Delete(pileStartData);
+                }
+            }
             handleEvent(gun, EVT_AUTH_OK, "auth_ok");
         } else {
             handleEvent(gun, EVT_AUTH_FAIL, "auth_fail");
@@ -785,6 +804,61 @@ void ChargeLogicProcess::publishStateChange(uint8_t gun, ChargeState from, Charg
     cJSON_Delete(data);
 }
 
+void ChargeLogicProcess::publishUpdateRecordEvent(uint8_t gun, const TradeRecord& rec)
+{
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddNumberToObject(data, "gunNo", rec.gunNo);
+    cJSON_AddStringToObject(data, "preTradeNo", rec.preTradeNo.c_str());
+    cJSON_AddStringToObject(data, "tradeNo", rec.tradeNo.c_str());
+    cJSON_AddStringToObject(data, "vinCode", rec.vinCode.c_str());
+    cJSON_AddNumberToObject(data, "timeDivType", rec.timeDivType);
+    cJSON_AddNumberToObject(data, "startType", rec.startType);
+    cJSON_AddNumberToObject(data, "chargeStartTime", static_cast<double>(rec.chargeStartTime));
+    cJSON_AddNumberToObject(data, "chargeEndTime", static_cast<double>(rec.chargeEndTime));
+    cJSON_AddNumberToObject(data, "startSoc", roundTo5(rec.startSoc));
+    cJSON_AddNumberToObject(data, "endSoc", roundTo5(rec.endSoc));
+    cJSON_AddNumberToObject(data, "reason", rec.reason);
+    cJSON_AddStringToObject(data, "feeModelId", rec.feeModelId.c_str());
+    cJSON_AddNumberToObject(data, "sumStart", roundTo5(rec.sumStart));
+    cJSON_AddNumberToObject(data, "sumEnd", roundTo5(rec.sumEnd));
+    cJSON_AddNumberToObject(data, "totalElect", roundTo5(rec.totalElect));
+    cJSON_AddNumberToObject(data, "totalPowerCost", roundTo5(rec.totalPowerCost));
+    cJSON_AddNumberToObject(data, "totalServCost", roundTo5(rec.totalServCost));
+    cJSON_AddNumberToObject(data, "totalCost", roundTo5(rec.totalCost));
+    cJSON_AddNumberToObject(data, "timeNum", rec.timeNum);
+    cJSON_AddNumberToObject(data, "startPoint", rec.startPoint);
+    cJSON_AddNumberToObject(data, "crossPoints", rec.crossPoints);
+    cJSON_AddStringToObject(data, "cardNumber", rec.cardNumber.c_str());
+
+    // BY ZF: 上送分时段明细，便于平台侧直接生成账单。
+    cJSON* partElectArr = cJSON_CreateArray();
+    for (size_t i = 0; i < rec.partElect.size(); ++i) {
+        cJSON_AddItemToArray(partElectArr, cJSON_CreateNumber(roundTo5(rec.partElect[i])));
+    }
+    cJSON_AddItemToObject(data, "partElect", partElectArr);
+
+    cJSON* chargeFeeArr = cJSON_CreateArray();
+    for (size_t i = 0; i < rec.chargeFee.size(); ++i) {
+        cJSON_AddItemToArray(chargeFeeArr, cJSON_CreateNumber(roundTo5(rec.chargeFee[i])));
+    }
+    cJSON_AddItemToObject(data, "chargeFee", chargeFeeArr);
+
+    cJSON* serviceFeeArr = cJSON_CreateArray();
+    for (size_t i = 0; i < rec.serviceFee.size(); ++i) {
+        cJSON_AddItemToArray(serviceFeeArr, cJSON_CreateNumber(roundTo5(rec.serviceFee[i])));
+    }
+    cJSON_AddItemToObject(data, "serviceFee", serviceFeeArr);
+
+    cJSON* pointsElectArr = cJSON_CreateArray();
+    for (size_t i = 0; i < rec.pointsElect.size(); ++i) {
+        cJSON_AddItemToArray(pointsElectArr, cJSON_CreateNumber(roundTo5(rec.pointsElect[i])));
+    }
+    cJSON_AddItemToObject(data, "pointsElect", pointsElectArr);
+
+    publishLogicEvent(gun, "update_record", data);
+    cJSON_Delete(data);
+}
+
 void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* source)
 {
     if (gun >= m_gunStates.size()) {
@@ -841,9 +915,11 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     gs.chargeUserNo = userNo;
     gs.orderNo = orderNo;
     gs.preTradeNo = preTradeNo.empty() ? orderNo : preTradeNo;
-    gs.tradeNo = gs.orderNo.empty()
+    // BY ZF: tradeNo 与 preTradeNo/orderNo 对齐，不再添加前缀。
+    const std::string baseTradeNo = gs.preTradeNo.empty() ? gs.orderNo : gs.preTradeNo;
+    gs.tradeNo = baseTradeNo.empty()
         ? ("T" + std::to_string(gun) + "_" + std::to_string(gs.chargeStartTime))
-        : ("D" + gs.orderNo);
+        : baseTradeNo;
     gs.startType = (source && std::string(source) == "platform") ? 2 : 1;
     gs.startSoc = 0;
     gs.endSoc = 0;
@@ -1097,34 +1173,49 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
                     cJSON* startData = cJSON_Parse(gs.pendingStartData.c_str());
                     if (startData) {
                         publishPileCmd(gun, "start_charge", startData);
+                        gs.lastStartCmdData = gs.pendingStartData;
                         cJSON_Delete(startData);
                     } else {
                         cJSON* pileStartData = buildPileStartData(nullptr);
                         publishPileCmd(gun, "start_charge", pileStartData);
+                        char* out = cJSON_PrintUnformatted(pileStartData);
+                        if (out) {
+                            gs.lastStartCmdData = out;
+                            cJSON_free(out);
+                        }
                         cJSON_Delete(pileStartData);
                     }
                 } else {
                     cJSON* pileStartData = buildPileStartData(nullptr);
                     publishPileCmd(gun, "start_charge", pileStartData);
+                    char* out = cJSON_PrintUnformatted(pileStartData);
+                    if (out) {
+                        gs.lastStartCmdData = out;
+                        cJSON_free(out);
+                    }
                     cJSON_Delete(pileStartData);
                 }
                 gs.pendingStart = false;
                 gs.pendingStartData.clear();
+                gs.startingRetrySent = false;
             }
             transitionTo(gun, STATE_STARTING, reason);
         } else if (evt == EVT_AUTH_FAIL) {
             gs.pendingStart = false;
             gs.pendingStartData.clear();
+            gs.lastStartCmdData.clear();
             transitionTo(gun, STATE_PREPARE, reason);
         } else if (evt == EVT_VEHICLE_DISCONNECTED) {
             gs.pendingStart = false;
             gs.pendingStartData.clear();
+            gs.lastStartCmdData.clear();
             transitionTo(gun, STATE_IDLE, reason);
         } else if (evt == EVT_TOTAL_FAULT || evt == EVT_DEVICE_ERR) {
             transitionTo(gun, STATE_ERROR, reason);
         } else if (evt == EVT_RESET_ERROR) {
             gs.pendingStart = false;
             gs.pendingStartData.clear();
+            gs.lastStartCmdData.clear();
             transitionTo(gun, STATE_IDLE, reason);
         } else if (evt == EVT_START_CMD) {
             transitionTo(gun, STATE_PREPARE, reason);
@@ -1141,7 +1232,11 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
         }
         break;
     case STATE_CHARGING:
-        if (evt == EVT_STOP_CMD || evt == EVT_WORKSTATUS_ZERO || evt == EVT_STOP_COMPLETE || evt == EVT_TOTAL_FAULT || evt == EVT_DEVICE_ERR) {
+        if (evt == EVT_STOP_COMPLETE) {
+            enterStopping(gun, reason);
+            // BY ZF: CHARGING 直接收到 stop_complete 时，保留完成标记，避免在 enterStopping 中被清零
+            gs.stopCompleteSeen = true;
+        } else if (evt == EVT_STOP_CMD || evt == EVT_WORKSTATUS_ZERO || evt == EVT_TOTAL_FAULT || evt == EVT_DEVICE_ERR) {
             enterStopping(gun, reason);
         }
         break;
@@ -1180,8 +1275,10 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
     gs.state = to;
     if (to == STATE_STARTING) {
         gs.startingEnterTime = std::chrono::steady_clock::now();
+        gs.startingRetrySent = false;
     } else {
         gs.startingEnterTime = std::chrono::steady_clock::time_point();
+        gs.startingRetrySent = false;
     }
     publishStateChange(gun, prev, to, reason);
     if (to == STATE_STOPPED && prev == STATE_STOPPING) {
@@ -1203,6 +1300,8 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
 
     gs.pendingStart = false;
     gs.pendingStartData.clear();
+    gs.lastStartCmdData.clear();
+    gs.startingRetrySent = false;
     gs.stopCompleteSeen = false;
     gs.tcuStopReqSent = false;
     gs.meterStableCount = 0;
@@ -1301,6 +1400,7 @@ void ChargeLogicProcess::logTradeRecordOnStopped(uint8_t gun, const char* reason
     rec.cardNumber = gs.chargeUserNo;
 
     m_logSender.logTradeRecord(rec);
+    publishUpdateRecordEvent(gun, rec);
 
     if (reason && reason[0]) {
         m_logSender.info("trade_record_logged", reason);

@@ -75,5 +75,3 @@ struct FeeModel {
 };
 
 #endif // LOGGER_TYPES_H
-
-

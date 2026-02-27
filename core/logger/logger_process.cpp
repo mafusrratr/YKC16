@@ -830,7 +830,7 @@ void LoggerProcess::parseAndLogMessage(const std::string& jsonData)
         uint64_t chargeEndTime = chargeEndTimeRaw > 0 ? static_cast<uint64_t>(chargeEndTimeRaw) : 0ULL;
         double startSoc = getDouble("start_soc");
         double endSoc = getDouble("end_soc");
-        unsigned int reason = (unsigned int)getInt(jsonData, "reason");
+        unsigned int reason = static_cast<unsigned int>(getInt(jsonData, "reason"));
         std::string feeModelId = getStr(jsonData, "fee_model_id");
         double sumStart = getDouble("sum_start");
         double sumEnd = getDouble("sum_end");
@@ -875,6 +875,40 @@ void LoggerProcess::parseAndLogMessage(const std::string& jsonData)
             sumStart, sumEnd, totalElect, totalPowerCost, totalServCost, totalCost, timeNum,
             partElectText, chargeFeeText, serviceFeeText, startPoint, crossPoints, pointsElectText, cardNumber
         );
+        return;
+    }
+
+    // BY ZF: 处理平台确认类型（根据 trade_no 更新确认标志）
+    if (msgType == "record_cfm") {
+        auto getInt = [](const std::string &j, const std::string &key) {
+            size_t p = j.find("\"" + key + "\":");
+            if (p == std::string::npos) return 0;
+            p += key.size() + 3;
+            while (p < j.size() && (j[p] == ' ' || j[p] == '\t' || j[p] == '\n' || j[p] == '\r')) ++p;
+            long long val = 0; bool hasDigit = false;
+            while (p < j.size() && j[p] >= '0' && j[p] <= '9') { val = val * 10 + (j[p]-'0'); hasDigit = true; ++p; }
+            return hasDigit ? static_cast<int>(val) : 0;
+        };
+        auto getStr = [](const std::string &j, const std::string &key) {
+            size_t p = j.find("\"" + key + "\":\"");
+            if (p == std::string::npos) return std::string{};
+            p += key.size() + 4;
+            size_t end = j.find('"', p);
+            if (end == std::string::npos) return std::string{};
+            return j.substr(p, end - p);
+        };
+
+        const std::string tradeNo = getStr(jsonData, "trade_no");
+        int confirmFlag = getInt(jsonData, "confirm_flag");
+        if (confirmFlag != 0) {
+            confirmFlag = 1;
+        }
+        if (tradeNo.empty() || !m_dbManager) {
+            return;
+        }
+        if (!m_dbManager->updateTradeConfirmFlag(tradeNo, confirmFlag)) {
+            this->warn("record_cfm_update", std::string("update_failed tradeNo=") + tradeNo);
+        }
         return;
     }
     

@@ -8,14 +8,15 @@ hide empty description
 IDLE --> PREPARE : vehicle_connected && totalFault=0
 IDLE --> ERROR : deviceErr_on / totalFault
 
-PREPARE --> STARTING : start_cmd && auth_ok
+PREPARE --> STARTING : start_cmd && auth_result==1
 PREPARE --> IDLE : vehicle_disconnected
 PREPARE --> ERROR : deviceErr_on / totalFault
 
 STARTING --> CHARGING : start_complete_ok
 STARTING --> STOPPING : start_complete_fail\nor deviceErr_on/totalFault\nor stop_cmd
 STARTING --> IDLE : reset_error
-STARTING --> STOPPING : start_timeout_50s
+STARTING --> STARTING : start_retry_30s
+STARTING --> STOPPING : start_timeout_60s
 
 CHARGING --> STOPPING : stop_cmd\nor tcu_precharge_near_limit\nor deviceErr_on/totalFault\nor workStatus=0\nor stop_complete
 
