@@ -1,0 +1,81 @@
+@startuml
+title 充电计费单元 - 主要进程框架
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam rectangle {
+  BorderColor #4A4A4A
+  FontColor #222222
+}
+left to right direction
+
+rectangle "MQTT Broker\n(mosquitto)\n<<核心路由总线>>" as MQ #FFF2CC
+
+component "tcu_logic\n(core/tcu_logic)" as LOGIC
+component "tcu_pile_controller\n(core/pile_controller)" as PILE
+component "tcu_meter\n(core/meter)" as METER
+component "tcu_comm\n(core/comm/<Platform>)" as COMM
+component "logger\n(core/logger)" as LOGGER
+component "daemon\n(core/daemon)" as DAEMON
+
+cloud "充电桩主控\n(CAN2CCU)" as CCU
+cloud "网络桩设备\n(UDP/TCP)" as NET_PILE
+cloud "串口桩设备\n(RS485/Modbus)" as SERIAL_PILE
+cloud "桩侧MQTT代理\n(可选)" as PILE_MQTT
+cloud "DLT645 电表\n(RS485)" as METER_HW
+cloud "平台主站\n(TCP/私有协议)" as PLAT
+actor "HMI" as HMI
+
+HMI --> MQ : tcu/logic/{gun}/cmd
+MQ --> LOGIC : logic/+/cmd\nplat/+/cmd\npile/+/event\npile/+/data\nmeter/+/data
+LOGIC --> MQ : tcu/pile/{gun}/cmd\n tcu/logic/{gun}/event\n tcu/logic/{gun}/feeData
+
+MQ --> PILE : tcu/pile/{gun}/cmd
+PILE --> MQ : tcu/pile/{gun}/event\n tcu/pile/{gun}/data
+PILE --> CCU : CAN 接入
+CCU --> PILE : 状态/响应/遥测
+PILE --> NET_PILE : UDP/TCP 接入
+NET_PILE --> PILE : 状态/响应/遥测
+PILE --> SERIAL_PILE : RS485 接入
+SERIAL_PILE --> PILE : 状态/响应/遥测
+PILE <--> PILE_MQTT : MQTT 接入(可选)
+
+METER --> METER_HW : 645轮询
+METER_HW --> METER : 电量/电压/电流
+METER --> MQ : tcu/meter/{gun}/data\n tcu/meter/{gun}/event
+
+COMM --> PLAT : 平台上行帧
+PLAT --> COMM : 平台下行帧
+COMM --> MQ : tcu/plat/{gun}/cmd\n tcu/plat/{gun}/event
+MQ --> COMM : logic/+/event\n logic/+/feeData\n pile/+/data\n pile/+/event\n meter/+/data
+
+LOGIC --> LOGGER : logTradeRecord(...)
+COMM --> LOGGER : confirmTradeRecord(...)
+DAEMON --> LOGIC : 进程守护
+DAEMON --> PILE : 进程守护
+DAEMON --> METER : 进程守护
+DAEMON --> COMM : 进程守护
+
+note bottom of COMM
+每个平台独立目录实现：
+core/comm/ChangzhouLiyangSmartcityPlat
+core/comm/Zhongshihua2.0
+end note
+
+note right of PILE
+多方式接入能力：
+- CAN / CAN2CCU
+- UDP / TCP
+- RS485 / Modbus
+- MQTT(可选透传)
+通过统一 MQTT 主题对外输出
+end note
+
+note top of MQ
+核心路由职责：
+- 进程解耦
+- Topic 级路由与广播
+- QoS 保障命令可靠性
+end note
+
+@enduml

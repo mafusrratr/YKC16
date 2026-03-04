@@ -1,0 +1,58 @@
+@startuml
+title 关键业务时序 - 启动/充电/停机/记录确认
+
+skinparam shadowing false
+autonumber
+
+actor "HMI/平台" as UP
+participant "tcu_logic" as LOGIC
+participant "tcu_pile_controller" as PILE
+participant "tcu_meter" as METER
+participant "tcu_comm" as COMM
+participant "平台主站" as PLAT
+database "logger" as LOGGER
+
+== 启动阶段 ==
+UP -> LOGIC : MQTT cmd:start_charge
+LOGIC -> LOGIC : 状态校验(PREPARE)\n鉴权通过
+LOGIC -> PILE : MQTT tcu/pile/{gun}/cmd\nstart_charge
+PILE --> LOGIC : MQTT event:start_response
+PILE --> LOGIC : MQTT event:start_complete
+LOGIC -> LOGIC : STARTING -> CHARGING
+LOGIC --> UP : MQTT logic/event:state_change
+
+== 充电阶段 ==
+loop 每15秒
+  LOGIC --> UP : MQTT logic/feeData
+end
+
+loop 周期轮询
+  METER --> LOGIC : MQTT meter/data(totalEnergy,voltage,current)
+  PILE --> LOGIC : MQTT pile/data(yx/yc)
+end
+
+loop 平台上报周期
+  COMM <- LOGIC : MQTT logic/event + feeData
+  COMM <- PILE : MQTT pile/data + pile/event
+  COMM <- METER : MQTT meter/data
+  COMM -> PLAT : 平台实时帧(如0x13)
+end
+
+== 停机阶段 ==
+UP -> LOGIC : MQTT cmd:stop_charge\n(或故障触发)
+LOGIC -> PILE : MQTT cmd:stop_charge
+PILE --> LOGIC : MQTT event:stop_response
+PILE --> LOGIC : MQTT event:stop_complete
+LOGIC -> LOGIC : STOPPING收敛(15s/3次无变化)\n-> STOPPED
+LOGIC --> UP : MQTT logic/event:state_change
+
+== 交易记录 ==
+LOGIC --> COMM : MQTT logic/event:update_record
+LOGIC -> LOGGER : logTradeRecord(...)
+COMM -> PLAT : 上传交易记录帧(如0x60/0x3D)
+PLAT --> COMM : 记录确认(如0x70)
+COMM -> LOGGER : confirmTradeRecord(tradeNo)
+COMM --> LOGIC : MQTT plat/cmd:record_cfm (可选)
+
+@enduml
+

@@ -1,0 +1,84 @@
+@startuml
+title 嵌入式 Linux 系统到应用基本架构图
+
+skinparam shadowing false
+skinparam componentStyle rectangle
+top to bottom direction
+
+rectangle "应用层 (Application)" as APP #E8F4FF {
+  [HMI/业务应用]
+  [tcu_logic]
+  [tcu_pile_controller]
+  [tcu_meter]
+  [tcu_comm]
+  [logger/daemon]
+}
+
+rectangle "中间件与基础库 (Middleware)" as MIDDLE #F3F8E8 {
+  [MQTT Broker (mosquitto)]
+  [MQTT Client SDK]
+  [cJSON]
+  [libv2gshm / IPC]
+  [配置与日志组件]
+}
+
+rectangle "用户空间系统服务 (Userspace)" as USER #FFF7E8 {
+  [systemd/init]
+  [udev]
+  [netif/ssh]
+  [诊断与运维工具]
+}
+
+rectangle "Linux 内核层 (Kernel)" as KERNEL #FCEEF5 {
+  [进程调度]
+  [内存管理]
+  [VFS]
+  [网络协议栈]
+  [IPC机制]
+}
+
+rectangle "设备驱动层 (Drivers)" as DRV #F8F0FF {
+  [CAN/SOCKETCAN]
+  [UART/RS485]
+  [Ethernet/Wi-Fi]
+  [GPIO/Watchdog]
+  [Storage/eMMC]
+}
+
+rectangle "板级支持包 (BSP)" as BSP #F2F2F2 {
+  [设备树 (DTS)]
+  [时钟/电源/引脚配置]
+  [SoC 外设适配]
+}
+
+rectangle "引导链路 (Boot)" as BOOT #EFEFEF {
+  [BootROM]
+  [SPL/U-Boot]
+  [Kernel + DTB + RootFS]
+}
+
+rectangle "硬件层 (Hardware)" as HW #EDEDED {
+  [ARM SoC]
+  [CAN收发器]
+  [RS485收发器]
+  [网口/4G模块]
+  [Flash/eMMC]
+}
+
+APP -down-> MIDDLE : API/消息总线
+MIDDLE -down-> USER : 系统服务调用
+USER -down-> KERNEL : syscall
+KERNEL -down-> DRV : 驱动接口
+DRV -down-> BSP : 板级适配
+BSP -down-> BOOT : 启动参数/设备树
+BOOT -down-> HW : 上电启动
+
+note right of APP
+本项目业务主链路：
+pile_controller / tcu_logic /
+tcu_meter / tcu_comm
+通过 MQTT 解耦协作
+end note
+
+@enduml
+

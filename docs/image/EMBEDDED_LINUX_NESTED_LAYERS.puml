@@ -1,0 +1,35 @@
+@startuml
+title 嵌入式 Linux 套框分层架构图
+
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam rectangle {
+  BorderColor #4D4D4D
+  FontColor #1F1F1F
+}
+
+rectangle "应用与业务域\nApplication Domain" #E8F4FF {
+  rectangle "业务进程层\n- tcu_logic\n- tcu_pile_controller\n- tcu_meter\n- tcu_comm\n- logger/daemon" #D9ECFF {
+    rectangle "中间件与运行时\n- MQTT Broker/Client\n- cJSON\n- IPC/libv2gshm\n- 配置与日志组件" #ECF7FF {
+      rectangle "Linux 用户空间\n- init/systemd\n- 网络与运维工具\n- 标准C/C++运行库" #F3FBFF {
+        rectangle "Linux 内核空间\n- 调度/内存/VFS/网络/IPC" #FFF6E8 {
+          rectangle "设备驱动层\n- CAN/UART/RS485/Ethernet/GPIO/Watchdog/Storage" #FFF1DC {
+            rectangle "BSP 与启动链路\n- DTS/Board Config\n- U-Boot/Kernel/RootFS" #F7F7F7 {
+              rectangle "硬件平台\n- ARM SoC\n- CAN/485收发器\n- eMMC/Flash\n- 网口/4G模块" #EFEFEF
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+note right
+分层原则：
+1) 上层仅依赖下层提供的稳定接口
+2) 协议适配与业务逻辑解耦
+3) 故障优先局部隔离，避免全局影响
+end note
+
+@enduml
+

@@ -4,7 +4,7 @@
  */
 
 #include "comm_process.h"
-#include "../base/cjson/include/cjson/cJSON.h"
+#include "../../base/cjson/include/cjson/cJSON.h"
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -30,6 +30,9 @@ namespace {
     static const uint8_t kCmdLoginAck = 0x30;
     static const uint8_t kCmdHeartbeat = 0x21;
     static const uint8_t kCmdChargeInfo = 0x22;
+    static const uint8_t kCmdRemoteStartAck = 0x04;
+    static const uint8_t kCmdRemoteStopAck = 0x05;
+    
     static const uint8_t kCmdChargeRecord = 0x60;
     static const uint8_t kCmdRemoteStart = 0x14;
     static const uint8_t kCmdRemoteStop = 0x15;
@@ -142,12 +145,30 @@ namespace {
         case 0x30: return "login_ack";
         case 0x21: return "heartbeat";
         case 0x22: return "charge_info";
+        case 0x04: return "remote_start_ack";
+        case 0x05: return "remote_stop_ack";
         case 0x60: return "charge_record";
         case 0x14: return "remote_start";
         case 0x15: return "remote_stop";
         case 0x70: return "record_confirm";
         default: return "unknown";
         }
+    }
+
+    // BY ZF: 平台0x04/0x05中的枪状态定义：00空闲/01连接/02工作/03故障。
+    static uint8_t mapGunStatusForCtrlAck(uint8_t gunStatus, uint8_t vehicleConnectStatus)
+    {
+        // BY ZF: 当前实现中 m_gunStatus 已被平台上报映射复用，故在此收敛到控制应答所需定义。
+        if (gunStatus == 0x01) {   // ERROR
+            return 0x03;
+        }
+        if (gunStatus == 0x03) {   // CHARGING/STOPPING
+            return 0x02;
+        }
+        if (vehicleConnectStatus != 0) {
+            return 0x01;
+        }
+        return 0x00;
     }
 }
 
@@ -358,13 +379,14 @@ bool CommProcess::publishPlatCmd(uint8_t gun, const std::string& payload)
 
 bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& payload)
 {
-    if (gun < m_gunStatus.size()) {
+    if (gun < m_gunStatus.size() && gun < m_gunRuntimeData.size()) {
         cJSON* root = cJSON_Parse(payload.c_str());
         if (root && cJSON_IsObject(root)) {
             cJSON* evt = cJSON_GetObjectItem(root, "event");
             cJSON* data = cJSON_GetObjectItem(root, "data");
             //更新充电状态
             if (cJSON_IsString(evt) && std::strcmp(evt->valuestring, "state_change") == 0 && cJSON_IsObject(data)) {
+                cJSON* from = cJSON_GetObjectItem(data, "from");
                 cJSON* to = cJSON_GetObjectItem(data, "to");
                 if (cJSON_IsString(to) && to->valuestring) {
                     // BY ZF: tcu_logic 状态 -> 平台枪状态
@@ -385,6 +407,30 @@ bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& pa
                         m_gunStatus[gun] = 0x04;
                     } else {
                         m_gunStatus[gun] = 0x01;
+                    }
+
+                    // BY ZF: 远程控制应答触发规则：
+                    // BY ZF: STARTING->CHARGING 启动成功；STARTING->其他 启动失败。
+                    // BY ZF: CHARGING->STOPPED 停机成功。
+                    const char* fromState = (cJSON_IsString(from) && from->valuestring) ? from->valuestring : "";
+                    GunRuntimeData& rd = m_gunRuntimeData[gun];
+                    if (rd.pendingCtrlCmd == 0x00 && std::strcmp(fromState, "STARTING") == 0) {
+                        const uint8_t result = (std::strcmp(to->valuestring, "CHARGING") == 0) ? 0x00 : 0x01;
+                        const std::vector<uint8_t> ackBody = buildRemoteStartAckBody(gun, result);
+                        if (!ackBody.empty()) {
+                            sendPlatformFrame(kCmdRemoteStartAck, ackBody);
+                        }
+                        rd.pendingCtrlCmd = 0xFF;
+                        rd.pendingCtrlSince = std::chrono::steady_clock::time_point();
+                    } else if (rd.pendingCtrlCmd == 0x01 &&
+                               std::strcmp(fromState, "CHARGING") == 0 &&
+                               std::strcmp(to->valuestring, "STOPPED") == 0) {
+                        const std::vector<uint8_t> ackBody = buildRemoteStopAckBody(gun, 0x00);
+                        if (!ackBody.empty()) {
+                            sendPlatformFrame(kCmdRemoteStopAck, ackBody);
+                        }
+                        rd.pendingCtrlCmd = 0xFF;
+                        rd.pendingCtrlSince = std::chrono::steady_clock::time_point();
                     }
                 }
             }
@@ -1137,6 +1183,101 @@ std::vector<uint8_t> CommProcess::buildChargeInfoBody(uint8_t gun)
     return body;
 }
 
+std::vector<uint8_t> CommProcess::buildRemoteStartAckBody(uint8_t gun, uint8_t result)
+{
+    std::vector<uint8_t> body;
+    if (gun >= m_config.gunIdList.size() ||
+        gun >= m_gunRuntimeData.size() ||
+        gun >= m_gunStatus.size() ||
+        gun >= m_vehicleConnectStatus.size()) {
+        return body;
+    }
+
+    const GunRuntimeData& rd = m_gunRuntimeData[gun];
+    const uint8_t gunStatus = mapGunStatusForCtrlAck(m_gunStatus[gun], m_vehicleConnectStatus[gun]);
+
+    // BY ZF: 0x04 信息体：result(1) + gunId(4) + gunStatus(1) + orderId(10BCD) + userId(5BCD)
+    body.push_back(result);
+    appendU32BE(body, m_config.gunIdList[gun]);
+    body.push_back(gunStatus);
+    appendOrderIdBcd10(body, rd.orderNo);
+
+    std::string userDigits;
+    userDigits.reserve(rd.chargeUserNo.size());
+    for (size_t i = 0; i < rd.chargeUserNo.size(); ++i) {
+        const char c = rd.chargeUserNo[i];
+        if (c >= '0' && c <= '9') {
+            userDigits.push_back(c);
+        }
+    }
+    if (userDigits.size() > 10) {
+        userDigits = userDigits.substr(userDigits.size() - 10);
+    }
+    if (userDigits.size() < 10) {
+        userDigits.insert(userDigits.begin(), 10 - userDigits.size(), '0');
+    }
+    for (size_t i = 0; i < 10; i += 2) {
+        const uint8_t hi = static_cast<uint8_t>(userDigits[i] - '0');
+        const uint8_t lo = static_cast<uint8_t>(userDigits[i + 1] - '0');
+        body.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return body;
+}
+
+std::vector<uint8_t> CommProcess::buildRemoteStopAckBody(uint8_t gun, uint8_t result)
+{
+    std::vector<uint8_t> body;
+    if (gun >= m_config.gunIdList.size() ||
+        gun >= m_gunRuntimeData.size() ||
+        gun >= m_gunStatus.size() ||
+        gun >= m_vehicleConnectStatus.size()) {
+        return body;
+    }
+
+    const GunRuntimeData& rd = m_gunRuntimeData[gun];
+    const uint8_t gunStatus = mapGunStatusForCtrlAck(m_gunStatus[gun], m_vehicleConnectStatus[gun]);
+
+    // BY ZF: 0x05 信息体：result(1) + gunId(4) + gunStatus(1) + orderId(10BCD)
+    body.push_back(result);
+    appendU32BE(body, m_config.gunIdList[gun]);
+    body.push_back(gunStatus);
+    appendOrderIdBcd10(body, rd.orderNo);
+    return body;
+}
+
+void CommProcess::checkRemoteCtrlAckTimeout(const std::chrono::steady_clock::time_point& now)
+{
+    // BY ZF: 远程启停控制应答超时120秒，超时后回对应0x04/0x05失败并清理等待态。
+    const std::chrono::seconds timeoutSec(120);
+    const size_t cnt = m_gunRuntimeData.size();
+    for (size_t i = 0; i < cnt; ++i) {
+        GunRuntimeData& rd = m_gunRuntimeData[i];
+        if (rd.pendingCtrlCmd == 0xFF) {
+            continue;
+        }
+        if (rd.pendingCtrlSince.time_since_epoch().count() == 0) {
+            rd.pendingCtrlSince = now;
+            continue;
+        }
+        if (now - rd.pendingCtrlSince >= timeoutSec) {
+            const uint8_t gun = static_cast<uint8_t>(i);
+            if (rd.pendingCtrlCmd == 0x00) {
+                const std::vector<uint8_t> ackBody = buildRemoteStartAckBody(gun, 0x01);
+                if (!ackBody.empty()) {
+                    sendPlatformFrame(kCmdRemoteStartAck, ackBody);
+                }
+            } else if (rd.pendingCtrlCmd == 0x01) {
+                const std::vector<uint8_t> ackBody = buildRemoteStopAckBody(gun, 0x01);
+                if (!ackBody.empty()) {
+                    sendPlatformFrame(kCmdRemoteStopAck, ackBody);
+                }
+            }
+            rd.pendingCtrlCmd = 0xFF;
+            rd.pendingCtrlSince = std::chrono::steady_clock::time_point();
+        }
+    }
+}
+
 void CommProcess::reportChargeInfoPeriodic()
 {
     const uint8_t count = static_cast<uint8_t>(m_gunStatus.size());
@@ -1184,6 +1325,7 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
         }
         break;
     case LOGIN_DONE:
+        checkRemoteCtrlAckTimeout(now);
         if (now - m_lastHeartbeat >= std::chrono::seconds(m_config.tcpHeartbeatSec)) {
             if (!sendPlatformFrame(kCmdHeartbeat, buildHeartbeatBody())) {
                 closePlatformTcp();
@@ -1287,6 +1429,8 @@ bool CommProcess::extractSetConfigData(uint8_t cmd, const uint8_t* body, size_t 
 
     cJSON* data = cJSON_CreateObject();
     cJSON_AddNumberToObject(data, "cdzId", static_cast<double>(cdzId));
+    // BY ZF: setConfig 增加本机配置的 MAC 地址，供内部模块透传使用。
+    cJSON_AddStringToObject(data, "macAddr", m_config.macAddr.c_str());
     cJSON* feeModel = cJSON_CreateObject();
     cJSON_AddNumberToObject(feeModel, "timeNum", numOfTimePeriods);
     cJSON* timeSeg = cJSON_CreateArray();
@@ -1340,6 +1484,20 @@ bool CommProcess::extractSetConfigData(uint8_t cmd, const uint8_t* body, size_t 
         cJSON_AddItemToArray(guns, gi);
     }
     cJSON_AddItemToObject(data, "guns", guns);
+
+    // BY ZF: 运营商ID（9字节ASCII）位于枪配置之后；包长不足时置空字符串。
+    std::string operatorId;
+    if (pos + 9 <= bodyLen) {
+        operatorId.reserve(9);
+        for (size_t i = 0; i < 9; ++i) {
+            const uint8_t b = body[pos + i];
+            if (b == 0x00) {
+                break;
+            }
+            operatorId.push_back(static_cast<char>(b));
+        }
+    }
+    cJSON_AddStringToObject(data, "operatorId", operatorId.c_str());
 
     // BY ZF: 配置确认成功后，同步运行参数（用于后续登录/心跳上报）。
     if (feedbackResult == 0x00) {
@@ -1479,6 +1637,11 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             if (!parsedFeeModel.feeModelId.empty()) {
                 m_logSender.saveFeeModel(parsedFeeModel);
             }
+            if (gun < m_gunRuntimeData.size()) {
+                // BY ZF: 记录待回执启动控制命令，待状态流转触发0x04。
+                m_gunRuntimeData[gun].pendingCtrlCmd = 0x00;
+                m_gunRuntimeData[gun].pendingCtrlSince = std::chrono::steady_clock::now();
+            }
             publishPlatCommand(gun, "start_charge", startData);
         }
         if (startData) {
@@ -1491,6 +1654,11 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         uint8_t gun = 0;
         cJSON* stopData = nullptr;
         if (parseRemoteStop015(body, bodyLen, gun, &stopData)) {
+            if (gun < m_gunRuntimeData.size()) {
+                // BY ZF: 记录待回执停止控制命令，待状态流转触发0x05。
+                m_gunRuntimeData[gun].pendingCtrlCmd = 0x01;
+                m_gunRuntimeData[gun].pendingCtrlSince = std::chrono::steady_clock::now();
+            }
             publishPlatCommand(gun, "stop_charge", stopData);
         }
         if (stopData) {
@@ -1511,22 +1679,11 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         return;
     }
 
-    // BY ZF: 其它平台业务命令：先透传原始十六进制给内部 cmd，后续再细分映射。
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "ts", static_cast<double>(std::time(nullptr)) * 1000.0);
-    cJSON_AddNumberToObject(root, "seq", static_cast<double>(++m_seq));
-    cJSON_AddStringToObject(root, "source", "tcu_comm");
-    cJSON_AddNumberToObject(root, "gun", 0);
-    cJSON_AddStringToObject(root, "cmd", "platform_raw");
-    cJSON* dataObj = cJSON_CreateObject();
-    cJSON_AddNumberToObject(dataObj, "platCmd", cmd);
-    cJSON_AddItemToObject(root, "data", dataObj);
-    char* out = cJSON_PrintUnformatted(root);
-    if (out) {
-        publishPlatCmd(0, out);
-        free(out);
+    // BY ZF: 未识别平台帧仅记录调试，不向MQTT发布。
+    if (m_config.debugTcp) {
+        std::cout << "[Comm][TCP][RX_FRAME] ignored cmd=0x"
+                  << std::hex << static_cast<int>(cmd) << std::dec << std::endl;
     }
-    cJSON_Delete(root);
 }
 
 bool CommProcess::parseRemoteStart014(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel)
@@ -1782,7 +1939,7 @@ bool CommProcess::publishSetConfig(uint8_t gun, cJSON* data)
     cJSON_AddNumberToObject(root, "seq", static_cast<double>(++m_seq));
     cJSON_AddStringToObject(root, "source", "tcu_comm");
     cJSON_AddNumberToObject(root, "gun", gun);
-    cJSON_AddStringToObject(root, "cmd", "setConfig");
+    cJSON_AddStringToObject(root, "type", "setConfig");
     cJSON_AddItemToObject(root, "data", cJSON_Duplicate(data, 1));
 
     char* out = cJSON_PrintUnformatted(root);
@@ -1795,8 +1952,8 @@ bool CommProcess::publishSetConfig(uint8_t gun, cJSON* data)
     if (payload.empty()) {
         return false;
     }
-    const std::string topic = buildTopic("plat", gun, "setConfig");
-    return m_mqtt.publish(topic, payload, 1, false);
+    const std::string topic = buildTopic("plat", gun, "event");
+    return m_mqtt.publish(topic, payload, 1, true);
 }
 
 bool CommProcess::isHexString(const std::string& s, size_t needLen) const

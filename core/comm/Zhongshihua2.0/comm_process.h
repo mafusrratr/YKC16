@@ -6,15 +6,16 @@
 #ifndef COMM_PROCESS_H
 #define COMM_PROCESS_H
 
-#include "../base/process/base_process.h"
-#include "../base/mqtt/mqtt_client.h"
-#include "../base/logger/log_sender.h"
+#include "../../base/process/base_process.h"
+#include "../../base/mqtt/mqtt_client.h"
+#include "../../base/logger/log_sender.h"
 #include <string>
 #include <atomic>
 #include <chrono>
 #include <vector>
 #include <cstdint>
 #include <array>
+#include <random>
 
 struct cJSON;
 
@@ -35,8 +36,10 @@ struct CommConfig {
     int tcpReconnectSec;              // TCP 断线重连间隔
 
     std::string cdzNo;                // 充电终端编号
+    std::string loginId;              // 登录ID（用于生成8字节登录秘钥）
     std::string macAddr;              // 24位十六进制 MAC（ASCII）
     std::string factoryCreditCode;    // 企业信用代码
+    std::string sm2PublicKey;         // 平台提供的初始SM2公钥（HEX/ASCII）
     uint8_t chargerType;              // 桩类型（固定0x01：直流）
     std::vector<uint32_t> gunIdList;  // 枪ID列表（每枪4字节）
     std::vector<uint8_t> gunTypeList; // 枪类型列表（固定0x01：直流枪）
@@ -95,10 +98,48 @@ private:
         double prechargeAmount;
         int userStatus;
         uint8_t billingFlag;
+        
+        // 遥信数据
+        uint8_t gunStatus;             // 枪工作状态（00空闲/01连接/02工作/03故障/04停止）
+        uint8_t vehicleConnectStatus;  // 车辆连接状态（0未连接/1已连接）
+        uint8_t yxWorkStatus;          // 遥信-工作状态
+        uint8_t yxTotalFault;          // 遥信-总故障
+        uint8_t yxTotalAlarm;          // 遥信-总告警
+        uint8_t yxEmergencyStopFault;  // 遥信-急停故障
+        uint8_t yxVehicleConnectStatus;// 遥信-车辆连接状态
+        uint8_t yxVinReq;              // 遥信-vinReq
+        uint8_t yxGunSeatStatus;       // 遥信-枪座状态
+        uint8_t yxElectronicLockStatus;// 遥信-电子锁状态
+        uint8_t yxDcContactorStatus;   // 遥信-直流接触器状态
+        uint8_t yxOtherFault;          // 遥信-otherFault
 
         //遥测数据
-        double voltage;
-        double current;
+        double voltage;             // 充电输出电压（V）
+        double current;             // 充电输出电流（A）
+        double soc;                 // SOC（%）
+        double batteryMinTemp;      // 电池组最低温度（℃）
+        double batteryMaxTemp;      // 电池组最高温度（℃）
+        double cellMaxVoltage;      // 单体电池最高电压（V）
+        double cellMinVoltage;      // 单体电池最低电压（V）
+        double pileEnvTemp;         // 充电机环境温度（℃）
+        double guideVoltage;        // 充电导引电压（V）
+        double bmsReqVoltage;       // BMS需求电压（V）
+        double bmsReqCurrent;       // BMS需求电流（A）
+        int ycChargeMode;           // 充电模式
+        double bmsMeasuredVoltage;  // BMS充电电压测量值（V）
+        double bmsMeasuredCurrent;  // BMS充电电流测量值（A）
+        double chargedTime;         // 充电时长 (s)
+        double estimatedRemainTime; // 估算剩余充电时间（min）
+        double interfaceTemp1;      // 充电接口温度探头1（℃）
+        double interfaceTemp2;      // 充电接口温度探头2（℃）
+        double interfaceTemp3;      // 充电接口温度探头3（℃）
+        double interfaceTemp4;      // 充电接口温度探头4（℃）
+        int maxVoltageCellNo;       // 最高单体动力蓄电池电压所在编号
+        int maxTempPointNo;         // 最高温度检测点编号
+        int minTempPointNo;         // 最低动力蓄电池温度检测点编号
+        double inletTemp;           // 充电机进风口温度（℃）
+        double outletTemp;          // 充电机出风口温度（℃）
+        double envHumidity;         // 充电机环境湿度（%）
 
 
         //遥脉数据
@@ -106,6 +147,11 @@ private:
         double totalAmount;
         double electricAmount;
         double serviceAmount;
+        
+        double meterEnergy;         // 电表示数 (kWh)
+        double meterVoltage;        // meter voltage (V)
+        double meterCurrent;        // meter current (A)
+
         std::string feeModelId;
         int feeTimeNum;
         std::vector<FeeSegmentData> feeSegments;
@@ -117,22 +163,61 @@ private:
             , prechargeAmount(0.0)
             , userStatus(0)
             , billingFlag(0)
+            , gunStatus(0)
+            , vehicleConnectStatus(0)
+            , yxWorkStatus(0)
+            , yxTotalFault(0)
+            , yxTotalAlarm(0)
+            , yxEmergencyStopFault(0)
+            , yxVehicleConnectStatus(0)
+            , yxVinReq(0)
+            , yxGunSeatStatus(0)
+            , yxElectronicLockStatus(0)
+            , yxDcContactorStatus(0)
+            , yxOtherFault(0)
             , voltage(0.0)
             , current(0.0)
+            , soc(0.0)
+            , batteryMinTemp(0.0)
+            , batteryMaxTemp(0.0)
+            , cellMaxVoltage(0.0)
+            , cellMinVoltage(0.0)
+            , pileEnvTemp(0.0)
+            , guideVoltage(0.0)
+            , bmsReqVoltage(0.0)
+            , bmsReqCurrent(0.0)
+            , ycChargeMode(0)
+            , bmsMeasuredVoltage(0.0)
+            , bmsMeasuredCurrent(0.0)
+            , estimatedRemainTime(0.0)
+            , interfaceTemp1(0.0)
+            , interfaceTemp2(0.0)
+            , interfaceTemp3(0.0)
+            , interfaceTemp4(0.0)
+            , maxVoltageCellNo(0)
+            , maxTempPointNo(0)
+            , minTempPointNo(0)
+            , inletTemp(0.0)
+            , outletTemp(0.0)
+            , envHumidity(0.0)
             , totalEnergy(0.0)
             , totalAmount(0.0)
             , electricAmount(0.0)
             , serviceAmount(0.0)
+            , chargedTime(0.0)
+            , meterEnergy(0.0)
+            , meterVoltage(0.0)
+            , meterCurrent(0.0)
             , feeTimeNum(0)
         {}
     };
 
-    // BY ZF: 平台登录流程状态机（模板）
+    // BY ZF: 中石化2.0上线状态机：登录认证 -> 计费模型同步 -> 在线心跳
     enum PlatformLoginState {
-        LOGIN_IDLE = 0,        // 已连 TCP，等待发起 setConfig 请求
-        LOGIN_REQ_SET_CONFIG,  // 周期发送 setConfig 请求(0x00)，等待 0x10
-        LOGIN_REQ_LOGIN,       // 周期发送登录请求(0x20)，等待 0x30
-        LOGIN_DONE             // 登录完成，维持心跳
+        LOGIN_IDLE = 0,          // 已连TCP，等待发起登录认证
+        LOGIN_REQ_AUTH,          // 周期发送0x01登录认证，请求0x02应答
+        LOGIN_REQ_FEE_MODEL,     // 周期发送0x09计费模型请求，等待0x0A应答
+        LOGIN_ONLINE             // 已上线，维持0x03心跳与业务上送
     };
 
     // BY ZF: 初始化阶段
@@ -150,6 +235,7 @@ private:
     bool handleLogicFeeForPlatform(uint8_t gun, const std::string& payload);
     bool handlePileDataForPlatform(uint8_t gun, const std::string& payload);
     bool handlePileEventForPlatform(uint8_t gun, const std::string& payload);
+    bool handleMeterDataForPlatform(uint8_t gun, const std::string& payload);
 
     std::string ensureGunField(const std::string& payload, uint8_t gun) const; // 确保 payload 含 gun 字段
     std::string buildTopic(const char* module, uint8_t gun, const char* leaf) const;
@@ -167,10 +253,11 @@ private:
     std::vector<uint8_t> buildPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body);
     bool sendPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body);
 
-    // BY ZF: 登录阶段业务信息体构造
-    std::vector<uint8_t> buildSetConfigRequestBody() const; // 0x00
-    std::vector<uint8_t> buildLoginRequestBody() const;     // 0x20
-    std::vector<uint8_t> buildHeartbeatBody();
+    // BY ZF: 中石化2.0上线阶段信息体构造
+    std::vector<uint8_t> buildLoginRequestBody() const;      // 0x01 登录认证请求体
+    std::vector<uint8_t> buildFeeModelRequestBody() const;   // 0x09 计费模型请求体
+    std::vector<uint8_t> buildTimeSyncRequestBody() const;   // 0x0B 对时请求体
+    std::vector<uint8_t> buildHeartbeatBody();               // 0x03 心跳请求体
     std::vector<uint8_t> buildChargeInfoBody(uint8_t gun);
     void reportChargeInfoPeriodic();
 
@@ -178,15 +265,13 @@ private:
     void handlePlatformRxData(const char* data, size_t len);
     void processPlatformPacket(const uint8_t* frame, size_t frameLen);
 
-    // BY ZF: 将平台参数下发到内部 setConfig 主题
-    bool publishSetConfig(uint8_t gun, cJSON* data);
-
     // BY ZF: 通用工具函数
     bool isHexString(const std::string& s, size_t needLen) const;
     static uint16_t calcCrc16Modbus(const uint8_t* data, size_t len);
     static uint8_t bcdByte(int value);
     static void appendU16BE(std::vector<uint8_t>& out, uint16_t v);
     static void appendU32BE(std::vector<uint8_t>& out, uint32_t v);
+    static void appendU64BE(std::vector<uint8_t>& out, uint64_t v);
     static uint16_t readU16BE(const uint8_t* p);
     static uint32_t readU32BE(const uint8_t* p);
     static std::string toHex(const uint8_t* data, size_t len);
@@ -195,12 +280,15 @@ private:
     static uint8_t hhmmToBcdHour(const std::string& hhmm);
     static void appendOrderIdBcd10(std::vector<uint8_t>& out, const std::string& orderNo);
     bool syncSystemTime(int year, int month, int day, int hour, int minute, int second);
+    void resetCryptoSession();
+    void prepareLoginCryptoContext();
+    bool tryUpdateSm2PubKeyFromLoginAck(const uint8_t* body, size_t bodyLen);
 
     // BY ZF: 平台命令解析
-    bool extractSetConfigData(uint8_t cmd, const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
     bool parseRemoteStart014(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel);
     bool parseRemoteStop015(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
     bool parseRecordConfirm070(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
+    bool parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeModel& feeModel);
     bool buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data, std::vector<uint8_t>& body);
 
     // BY ZF: 平台命令发布
@@ -217,13 +305,17 @@ private:
     std::chrono::steady_clock::time_point m_lastTcpConnectTry; // 最近重连尝试时间
     std::chrono::steady_clock::time_point m_lastLoginAction;   // 最近登录动作时间
     std::chrono::steady_clock::time_point m_lastHeartbeat;     // 最近心跳发送时间
-    std::chrono::steady_clock::time_point m_lastChargeInfoReport; // 最近0x22上报时间
+    std::chrono::steady_clock::time_point m_lastChargeInfoReport; // 最近0x13上报时间
     std::vector<uint8_t> m_tcpRxCache;                // TCP 粘包缓存
-    std::vector<uint8_t> m_gunStatus;                 // 心跳上报枪状态缓存（00空闲/01连接/02工作/03故障）
-    std::vector<uint8_t> m_vehicleConnectStatus;      // 来自 pile yx 的车辆连接状态（0未连接/1已连接）
     std::vector<GunRuntimeData> m_gunRuntimeData;     // 来自 pile/logic 的实时业务数据缓存
     std::vector<FeeModel> m_feeModelByGun;            // 按枪保存的当前计费模型
     uint8_t m_heartbeatCounter;                       // 心跳计数
+
+    std::array<uint8_t, 16> m_sm4SessionKey;         // 登录后会话SM4密钥A（16字节）
+    bool m_sm4SessionKeyReady;                       // 会话密钥已生成并可用于解密
+    bool m_loginCryptoPrepared;                      // 当前登录轮次已完成密钥准备
+    std::string m_sm2PublicKeyActive;                // 当前生效SM2公钥（可被平台下发更新）
+    
 };
 
 #endif // COMM_PROCESS_H

@@ -381,7 +381,26 @@ void PileControllerProcess::updateStatusFromController()
                 cJSON_AddNumberToObject(data, "soc", yc20.soc);
                 cJSON_AddNumberToObject(data, "batteryMinTemp", yc20.batteryMinTemp);
                 cJSON_AddNumberToObject(data, "batteryMaxTemp", yc20.batteryMaxTemp);
+                cJSON_AddNumberToObject(data, "cellMaxVoltage", static_cast<double>(yc20.cellMaxVoltage) / 10.0);
+                cJSON_AddNumberToObject(data, "cellMinVoltage", static_cast<double>(yc20.cellMinVoltage) / 10.0);
                 cJSON_AddNumberToObject(data, "pileEnvTemp", yc20.pileEnvTemp);
+                cJSON_AddNumberToObject(data, "guideVoltage", static_cast<double>(yc20.guideVoltage) / 10.0);
+                cJSON_AddNumberToObject(data, "bmsReqVoltage", static_cast<double>(yc20.bmsReqVoltage) / 10.0);
+                cJSON_AddNumberToObject(data, "bmsReqCurrent", static_cast<double>(yc20.bmsReqCurrent) / 10.0);
+                cJSON_AddNumberToObject(data, "chargeMode", yc20.chargeMode);
+                cJSON_AddNumberToObject(data, "bmsMeasuredVoltage", static_cast<double>(yc20.bmsMeasuredVoltage) / 10.0);
+                cJSON_AddNumberToObject(data, "bmsMeasuredCurrent", static_cast<double>(yc20.bmsMeasuredCurrent) / 10.0);
+                cJSON_AddNumberToObject(data, "estimatedRemainTime", yc20.estimatedRemainTime);
+                cJSON_AddNumberToObject(data, "interfaceTemp1", yc20.interfaceTemp1);
+                cJSON_AddNumberToObject(data, "interfaceTemp2", yc20.interfaceTemp2);
+                cJSON_AddNumberToObject(data, "interfaceTemp3", yc20.interfaceTemp3);
+                cJSON_AddNumberToObject(data, "interfaceTemp4", yc20.interfaceTemp4);
+                cJSON_AddNumberToObject(data, "maxVoltageCellNo", yc20.maxVoltageCellNo);
+                cJSON_AddNumberToObject(data, "maxTempPointNo", yc20.maxTempPointNo);
+                cJSON_AddNumberToObject(data, "minTempPointNo", yc20.minTempPointNo);
+                cJSON_AddNumberToObject(data, "inletTemp", yc20.inletTemp);
+                cJSON_AddNumberToObject(data, "outletTemp", yc20.outletTemp);
+                cJSON_AddNumberToObject(data, "envHumidity", yc20.envHumidity);
             });
             publishData(gunNo, "yc", payload, false);
         }
