@@ -584,6 +584,10 @@ int CAN2CCUProtocol::decodeFrame(uint32_t canId, const uint8_t* data, size_t dat
         // BY ZF: 不是发给我们的，忽略
         return -1;
     }
+    // BY ZF: 多枪同总线时必须校验源地址，避免跨枪帧混入导致长帧组包错乱。
+    if (srcAddr != m_cdzAddr) {
+        return -1;
+    }
     
     // BY ZF: 根据PGN分发到对应的解码方法
     switch (pgn) {
@@ -1201,10 +1205,11 @@ int CAN2CCUProtocol::processLongFrame(uint32_t canId, const uint8_t* data, size_
         return -1;
     }
 
-    // BY ZF: 多帧超时处理（超过 2 秒则重置上下文）
+    // BY ZF: 多帧超时处理（使用配置 packet_timeout，未配置时回退 2 秒）
     if (context->isValid && context->lastFrameTime != 0) {
         const uint32_t nowSec = static_cast<uint32_t>(time(nullptr));
-        if (nowSec - context->lastFrameTime > 2) {
+        const uint32_t timeoutSec = (m_packetTimeout > 0) ? static_cast<uint32_t>(m_packetTimeout) : 2U;
+        if (nowSec - context->lastFrameTime > timeoutSec) {
             context->isValid = false;
             context->isComplete = false;
             context->totalFrames = 0;

@@ -130,6 +130,7 @@ bool MqttClient::setUsernamePassword(const std::string& username, const std::str
 
 void MqttClient::onMessage(struct mosquitto* mosq, void* userdata, const struct mosquitto_message* message)
 {
+    (void)mosq;
     if (!userdata || !message || !message->topic) {
         return;
     }

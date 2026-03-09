@@ -1,0 +1,64 @@
+@startuml
+
+title tcu_hmi 加载与状态转换 UML
+
+[*] --> AppStart
+state AppStart : main()
+AppStart --> InitWindow : HmiWindow::initialize()
+
+state InitWindow {
+  [*] --> LoadConfig
+  LoadConfig --> InitMqtt
+  InitMqtt --> Subscribe
+  Subscribe --> StartTimer
+  StartTimer --> FullScreen
+  FullScreen --> [*]
+}
+
+InitWindow --> Running
+
+state Running {
+  [*] --> WaitMessages
+
+  WaitMessages --> ApplySetConfig : tcu/plat/{gun}/event\n(type/cmd=setConfig)
+  ApplySetConfig : 更新 gunCount/cdzId/gunId
+  ApplySetConfig : 生成 qrPayload
+  ApplySetConfig --> WaitMessages
+
+  WaitMessages --> UpdateState : tcu/logic/{gun}/event\n(event=state_change)
+  UpdateState --> WaitMessages
+
+  WaitMessages --> UpdateFee : tcu/logic/{gun}/feeData
+  UpdateFee --> WaitMessages
+
+  WaitMessages --> UpdateYc : tcu/pile/{gun}/data\n(type=yc)
+  UpdateYc : 计算 power=U*I/1000
+  UpdateYc --> WaitMessages
+}
+
+state "UI状态映射" as UiState {
+  [*] --> IDLE
+  IDLE : 请插枪
+  IDLE --> PREPARE : state_change(to=PREPARE)
+
+  PREPARE : 显示二维码
+  PREPARE --> STARTING : state_change(to=STARTING)
+  PREPARE --> IDLE : state_change(to=IDLE)
+
+  STARTING : 充电启动中...
+  STARTING --> CHARGING : state_change(to=CHARGING)
+  STARTING --> STOPPING : state_change(to=STOPPING)
+
+  CHARGING : 显示 U/I/P/金额/电量/时长
+  CHARGING --> STOPPING : state_change(to=STOPPING)
+
+  STOPPING : 停止中...
+  STOPPING --> STOPPED : state_change(to=STOPPED)
+
+  STOPPED : 已完成充电\n显示最终金额与电量
+  STOPPED --> IDLE : state_change(to=IDLE)
+}
+
+Running --> UiState
+
+@enduml

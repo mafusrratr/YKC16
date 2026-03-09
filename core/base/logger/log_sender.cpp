@@ -174,6 +174,7 @@ bool LogSender::sendToQueue(const std::string& jsonData) {
                   << "), dropping log message to prevent queue overflow" << std::endl;
         return false;
     }
+
     
     return m_logQueue.send(MSG_TYPE_LOG, jsonData.c_str(), jsonData.length()) == 0;
 }
@@ -194,6 +195,18 @@ void LogSender::confirmTradeRecord(const std::string& tradeNo, int confirmFlag) 
          << "\"type\":\"record_cfm\","
          << "\"trade_no\":\"" << tradeNo << "\","
          << "\"confirm_flag\":" << confirmFlag
+         << "}";
+    sendToQueue(json.str());
+}
+
+void LogSender::requestUnconfirmedTradeRecords(int limit) {
+    if (limit <= 0) {
+        limit = 100;
+    }
+    std::ostringstream json;
+    json << "{"
+         << "\"type\":\"get_unconfirmed_record\","
+         << "\"limit\":" << limit
          << "}";
     sendToQueue(json.str());
 }

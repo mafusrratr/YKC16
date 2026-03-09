@@ -43,6 +43,12 @@
 - tcu_logic 上报平台
   - `tcu/plat/{gun}/event`
 
+### 2.5 与 logger 交互（未确认记录回放）
+- logger 上送到 tcu_logic
+  - `tcu/logger/{gun}/event`
+  - 事件类型：`unconfirmed_record`
+  - 用途：logger 从 `chargerecords.db` 读取 `platform_confirm_flag=0` 的记录并回放给 logic 缓冲
+
 **说明**：`{gun}` 为 `0/1/...`（与 pile_controller 约定一致）。
 
 ## 3. Payload 通用字段
@@ -245,6 +251,41 @@
   "orderNo": "P202602120001"
 }
 ```
+- `unconfirmed_record`（`tcu/logger/{gun}/event`）
+```json
+{
+  "ts": 1736150007000,
+  "seq": 23,
+  "source": "tcu_logger",
+  "gun": 0,
+  "event": "unconfirmed_record",
+  "data": {
+    "gunNo": 0,
+    "preTradeNo": "26403504517320119890",
+    "tradeNo": "26403504517320119890",
+    "chargeStartTime": 20260304170119,
+    "chargeEndTime": 20260304174710,
+    "startSoc": 20.0,
+    "endSoc": 35.0,
+    "reason": 8,
+    "feeModelId": "PLAT_26403504517320119",
+    "sumStart": 113.4,
+    "sumEnd": 114.475,
+    "totalElect": 1.075,
+    "totalPowerCost": 0.645,
+    "totalServCost": 0.63425,
+    "totalCost": 1.27925,
+    "timeNum": 1,
+    "startPoint": 0,
+    "crossPoints": 0,
+    "cardNumber": "00000252<<",
+    "partElect": [1.075],
+    "chargeFee": [0.645],
+    "serviceFee": [0.63425],
+    "pointsElect": []
+  }
+}
+```
 
 ## 6. feeData 规范（logic/feeData）
 用于计费/价格展示，独立 topic。时段输出与计费模型一致（`startTs/endTs` 使用 `HHMM`）。
@@ -280,12 +321,13 @@
 - `tcu/pile/{gun}/event`：QoS 2
 - `tcu/pile/{gun}/data`：QoS 0
 - `tcu/logic/{gun}/cmd`：QoS 1
-- `tcu/logic/{gun}/event`：QoS 1
+- `tcu/logic/{gun}/event`：QoS 2（retain=true）
 - `tcu/logic/{gun}/feeData`：QoS 1
 - `tcu/meter/{gun}/data`：QoS 0
 - `tcu/meter/{gun}/cmd`：QoS 1
 - `tcu/plat/{gun}/cmd`：QoS 1
 - `tcu/plat/{gun}/event`：QoS 1
+- `tcu/logger/{gun}/event`：QoS 2
 
 ## 8. 方向约定
 - `cmd` 主题：发起控制的一方发布，执行方订阅。

@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <cerrno>
+#include <cstdlib>
 #include <dirent.h>
 #include <vector>
 #include <algorithm>
@@ -91,6 +92,27 @@ static std::string getCurrentLocalTimeString() {
     char timestampStr[32];
     std::strftime(timestampStr, sizeof(timestampStr), "%Y-%m-%d %H:%M:%S", tm);
     return std::string(timestampStr);
+}
+
+// BY ZF: 解析逗号分隔浮点文本（如 "1.23,4.56"）
+static std::vector<double> parseDoubleCsv(const char* text) {
+    std::vector<double> out;
+    if (!text || !text[0]) {
+        return out;
+    }
+    std::stringstream ss(text);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        if (token.empty()) {
+            continue;
+        }
+        char* endptr = nullptr;
+        const double v = std::strtod(token.c_str(), &endptr);
+        if (endptr != token.c_str()) {
+            out.push_back(v);
+        }
+    }
+    return out;
 }
 
 // BY ZF: 文件复制的辅助函数
@@ -607,6 +629,77 @@ bool DatabaseManager::updateTradeConfirmFlag(const std::string& tradeNo, int con
     sql << "UPDATE charge_trade_info SET platform_confirm_flag=" << confirmFlag
         << " WHERE trade_no='" << safeTradeNo << "'";
     return executeSQL(DB_CHARGE, sql.str());
+}
+
+bool DatabaseManager::loadUnconfirmedTradeRecords(std::vector<TradeRecord>& outRecords, int limit)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    outRecords.clear();
+
+    sqlite3* db = getConnection(DB_CHARGE);
+    if (!db) {
+        return false;
+    }
+
+    std::stringstream sql;
+    sql << "SELECT "
+        << "gun_no, pre_trade_no, trade_no, vin_code, time_div_type, start_type, "
+        << "charge_start_time, charge_end_time, start_soc, end_soc, reason, fee_model_id, "
+        << "sum_start, sum_end, total_elect, total_power_cost, total_serv_cost, total_cost, "
+        << "time_num, part_elect_text, charge_fee_text, service_fee_text, "
+        << "start_point, cross_points, points_elect_text, card_number "
+        << "FROM charge_trade_info WHERE platform_confirm_flag=0 "
+        << "ORDER BY id ASC";
+    if (limit > 0) {
+        sql << " LIMIT " << limit;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    const int rc = sqlite3_prepare_v2(db, sql.str().c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Failed to prepare unconfirmed query: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        TradeRecord rec;
+        rec.gunNo = sqlite3_column_int(stmt, 0);
+        const unsigned char* s = sqlite3_column_text(stmt, 1);
+        rec.preTradeNo = s ? reinterpret_cast<const char*>(s) : "";
+        s = sqlite3_column_text(stmt, 2);
+        rec.tradeNo = s ? reinterpret_cast<const char*>(s) : "";
+        s = sqlite3_column_text(stmt, 3);
+        rec.vinCode = s ? reinterpret_cast<const char*>(s) : "";
+        rec.timeDivType = sqlite3_column_int(stmt, 4);
+        rec.startType = sqlite3_column_int(stmt, 5);
+        rec.chargeStartTime = static_cast<uint64_t>(sqlite3_column_int64(stmt, 6));
+        rec.chargeEndTime = static_cast<uint64_t>(sqlite3_column_int64(stmt, 7));
+        rec.startSoc = sqlite3_column_double(stmt, 8);
+        rec.endSoc = sqlite3_column_double(stmt, 9);
+        rec.reason = static_cast<unsigned int>(sqlite3_column_int(stmt, 10));
+        s = sqlite3_column_text(stmt, 11);
+        rec.feeModelId = s ? reinterpret_cast<const char*>(s) : "";
+        rec.sumStart = sqlite3_column_double(stmt, 12);
+        rec.sumEnd = sqlite3_column_double(stmt, 13);
+        rec.totalElect = sqlite3_column_double(stmt, 14);
+        rec.totalPowerCost = sqlite3_column_double(stmt, 15);
+        rec.totalServCost = sqlite3_column_double(stmt, 16);
+        rec.totalCost = sqlite3_column_double(stmt, 17);
+        rec.timeNum = sqlite3_column_int(stmt, 18);
+        rec.startPoint = sqlite3_column_int(stmt, 22);
+        rec.crossPoints = sqlite3_column_int(stmt, 23);
+        s = sqlite3_column_text(stmt, 25);
+        rec.cardNumber = s ? reinterpret_cast<const char*>(s) : "";
+
+        rec.partElect = parseDoubleCsv(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 19)));
+        rec.chargeFee = parseDoubleCsv(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 20)));
+        rec.serviceFee = parseDoubleCsv(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 21)));
+        rec.pointsElect = parseDoubleCsv(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 24)));
+        outRecords.push_back(rec);
+    }
+
+    sqlite3_finalize(stmt);
+    return true;
 }
 
 bool DatabaseManager::getFeeModel(const std::string& modelId, std::string& modelData) {

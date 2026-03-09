@@ -89,6 +89,12 @@ public:
      */
     void confirmTradeRecord(const std::string& tradeNo, int confirmFlag = 1);
 
+    /**
+     * @brief 请求 logger 进程加载未确认交易记录。
+     * @param limit 最大加载条数（<=0 表示使用默认值）
+     */
+    void requestUnconfirmedTradeRecords(int limit = 100);
+
 private:
     /**
      * 添加日志条目到缓冲区
@@ -153,4 +159,3 @@ private:
 };
 
 #endif // LOG_SENDER_H
-

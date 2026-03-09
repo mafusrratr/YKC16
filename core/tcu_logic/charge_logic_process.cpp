@@ -176,6 +176,7 @@ ChargeLogicProcess::ChargeLogicProcess()
     : BaseProcess(PROC_TCU_LOGIC, "tcu_logic")
     , m_logSender("tcu_logic")
     , m_seq(0)
+    , m_lastReplayTime(std::chrono::steady_clock::now())
 {
 }
 
@@ -198,6 +199,11 @@ bool ChargeLogicProcess::doInitialize()
 
     m_gunStates.clear();
     m_gunStates.resize(m_config.gunCount);
+    m_unconfirmedRecordBuffer.clear();
+    m_unconfirmedRecordBuffer.resize(m_config.gunCount);
+    m_lastReplayTime = std::chrono::steady_clock::now();
+    // BY ZF: 初始化时向 logger 请求未确认交易记录，由 logger 通过 MQTT 回放。
+    m_logSender.requestUnconfirmedTradeRecords(100);
     // BY ZF: 初始化完成后写入一条 info 日志，便于联调确认进程已就绪
     m_logSender.info("init_completed", std::string("gun_count=") + std::to_string(m_config.gunCount));
     return true;
@@ -267,6 +273,7 @@ void ChargeLogicProcess::doRun()
                     }
                 }
             }
+            replayBufferedUnconfirmedRecords();
             // BY ZF: doRun 主循环节流 10ms
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
@@ -318,17 +325,19 @@ bool ChargeLogicProcess::initMqtt()
             return;
         }
         for (uint8_t gun = 0; gun < m_config.gunCount; gun++) {
-            std::ostringstream t1, t2, t3, t4, t5;
+            std::ostringstream t1, t2, t3, t4, t5, t6;
             t1 << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gun) << "/cmd";
             t2 << m_config.mqttTopicPrefix << "/plat/" << static_cast<int>(gun) << "/cmd";
             t3 << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gun) << "/event";
             t4 << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gun) << "/data";
             t5 << m_config.mqttTopicPrefix << "/meter/" << static_cast<int>(gun) << "/data";
+            t6 << m_config.mqttTopicPrefix << "/logger/" << static_cast<int>(gun) << "/event";
             m_mqtt.subscribe(t1.str(), 1);
             m_mqtt.subscribe(t2.str(), 1);
             m_mqtt.subscribe(t3.str(), 2);
             m_mqtt.subscribe(t4.str(), 0);
             m_mqtt.subscribe(t5.str(), 0);
+            m_mqtt.subscribe(t6.str(), 2);
         }
     });
 
@@ -351,6 +360,7 @@ void ChargeLogicProcess::onMqttMessage(const std::string& topic, const std::stri
     std::string prefixLogic = m_config.mqttTopicPrefix + "/logic/";
     std::string prefixPlat = m_config.mqttTopicPrefix + "/plat/";
     std::string prefixPile = m_config.mqttTopicPrefix + "/pile/";
+    std::string prefixLogger = m_config.mqttTopicPrefix + "/logger/";
 
     cJSON* root = cJSON_Parse(payload.c_str());
     if (!root) {
@@ -374,6 +384,22 @@ void ChargeLogicProcess::onMqttMessage(const std::string& topic, const std::stri
             const char* type = getString(root, "type");
             cJSON* data = cJSON_GetObjectItem(root, "data");
             handlePileData(gun, type, data);
+        }
+    } else if (parseTopicGun(topic, prefixLogger, gun, tail) && tail == "event") {
+        const char* event = getString(root, "event");
+        cJSON* data = cJSON_GetObjectItem(root, "data");
+        if (event && std::strcmp(event, "unconfirmed_record") == 0) {
+            TradeRecord rec;
+            if (parseTradeRecordFromJson(data, rec)) {
+                std::lock_guard<std::mutex> lock(m_unconfirmedMutex);
+                if (gun < m_unconfirmedRecordBuffer.size()) {
+                    // BY ZF: 限制缓冲上限，避免异常消息导致内存膨胀。
+                    if (m_unconfirmedRecordBuffer[gun].size() >= 200) {
+                        m_unconfirmedRecordBuffer[gun].pop_front();
+                    }
+                    m_unconfirmedRecordBuffer[gun].push_back(rec);
+                }
+            }
         }
     } else if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/meter/", gun, tail) && tail == "data") {
         cJSON* data = cJSON_GetObjectItem(root, "data");
@@ -679,9 +705,18 @@ void ChargeLogicProcess::handleMeterData(uint8_t gun, cJSON* data)
             double deltaKwh = totalEnergyKwh - gs.feeLastEnergyKwh;
             if (deltaKwh > 0.0) {
                 applyEnergyDeltaToFee(gun, deltaKwh);
-                publishFeeData(gun);
             }
             gs.feeLastEnergyKwh = totalEnergyKwh;
+        }
+
+        // BY ZF: 计费数据变化即送（对比最近一次已发布快照）。
+        const double currEnergy = roundTo5(gs.feeTotalEnergyKwh);
+        const double currElectric = roundTo5(gs.feeTotalElectricAmount);
+        const double currService = roundTo5(gs.feeTotalServiceAmount);
+        if (currEnergy != gs.feeLastPublishedTotalEnergy ||
+            currElectric != gs.feeLastPublishedElectricAmount ||
+            currService != gs.feeLastPublishedServiceAmount) {
+            publishFeeData(gun);
         }
     }
 }
@@ -732,7 +767,7 @@ void ChargeLogicProcess::publishLogicEvent(uint8_t gun, const std::string& event
     }
     char* out = cJSON_PrintUnformatted(root);
     if (out) {
-        m_mqtt.publish(topic.str(), out, 1, false);
+        m_mqtt.publish(topic.str(), out, 2, true);
         cJSON_free(out);
     }
     cJSON_Delete(root);
@@ -744,9 +779,6 @@ void ChargeLogicProcess::publishFeeData(uint8_t gun)
         return;
     }
     const GunState& gs = m_gunStates[gun];
-    if (!gs.feeInitialized) {
-        return;
-    }
 
     std::ostringstream topic;
     topic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gun) << "/feeData";
@@ -763,6 +795,16 @@ void ChargeLogicProcess::publishFeeData(uint8_t gun)
     cJSON_AddNumberToObject(data, "totalAmount", roundTo5(gs.feeTotalElectricAmount + gs.feeTotalServiceAmount));
     cJSON_AddNumberToObject(data, "electicAmount", roundTo5(gs.feeTotalElectricAmount));
     cJSON_AddNumberToObject(data, "serviceAmount", roundTo5(gs.feeTotalServiceAmount));
+    // BY ZF: 充电时长（秒），从 startTimeMs 计算。
+    double chargedTimeSec = 0.0;
+    if (gs.startTimeMs > 0) {
+        const uint64_t nowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        if (nowMs > gs.startTimeMs) {
+            chargedTimeSec = static_cast<double>((nowMs - gs.startTimeMs) / 1000ULL);
+        }
+    }
+    cJSON_AddNumberToObject(data, "chargedTime", chargedTimeSec);
     cJSON_AddNumberToObject(data, "feeModelNo", gs.feeModelNo);
     cJSON_AddStringToObject(data, "feeModelId", gs.feeModelId.c_str());
     cJSON_AddNumberToObject(data, "sgemtentNum", gs.feeTimeNum);
@@ -789,6 +831,12 @@ void ChargeLogicProcess::publishFeeData(uint8_t gun)
         cJSON_free(out);
     }
     cJSON_Delete(root);
+
+    // BY ZF: 记录已发布快照，用于“变化即送”判定。
+    GunState& mgs = m_gunStates[gun];
+    mgs.feeLastPublishedTotalEnergy = roundTo5(mgs.feeTotalEnergyKwh);
+    mgs.feeLastPublishedElectricAmount = roundTo5(mgs.feeTotalElectricAmount);
+    mgs.feeLastPublishedServiceAmount = roundTo5(mgs.feeTotalServiceAmount);
 }
 
 void ChargeLogicProcess::publishStateChange(uint8_t gun, ChargeState from, ChargeState to, const char* reason)
@@ -857,6 +905,114 @@ void ChargeLogicProcess::publishUpdateRecordEvent(uint8_t gun, const TradeRecord
 
     publishLogicEvent(gun, "update_record", data);
     cJSON_Delete(data);
+}
+
+bool ChargeLogicProcess::parseTradeRecordFromJson(cJSON* data, TradeRecord& rec)
+{
+    if (!data || !cJSON_IsObject(data)) {
+        return false;
+    }
+    auto getIntField = [](cJSON* obj, const char* key, int& out) -> bool {
+        cJSON* v = cJSON_GetObjectItem(obj, key);
+        if (v && cJSON_IsNumber(v)) {
+            out = v->valueint;
+            return true;
+        }
+        return false;
+    };
+    auto getDoubleField = [](cJSON* obj, const char* key, double& out) -> bool {
+        cJSON* v = cJSON_GetObjectItem(obj, key);
+        if (v && cJSON_IsNumber(v)) {
+            out = v->valuedouble;
+            return true;
+        }
+        return false;
+    };
+    auto getUint64Field = [](cJSON* obj, const char* key, uint64_t& out) -> bool {
+        cJSON* v = cJSON_GetObjectItem(obj, key);
+        if (v && cJSON_IsNumber(v) && v->valuedouble >= 0.0) {
+            out = static_cast<uint64_t>(v->valuedouble);
+            return true;
+        }
+        return false;
+    };
+    auto getStringField = [](cJSON* obj, const char* key, std::string& out) -> bool {
+        cJSON* v = cJSON_GetObjectItem(obj, key);
+        if (v && cJSON_IsString(v) && v->valuestring) {
+            out = v->valuestring;
+            return true;
+        }
+        return false;
+    };
+    auto getArrayDoubles = [](cJSON* obj, const char* key, std::vector<double>& out) {
+        out.clear();
+        cJSON* arr = cJSON_GetObjectItem(obj, key);
+        if (!arr || !cJSON_IsArray(arr)) {
+            return;
+        }
+        const int size = cJSON_GetArraySize(arr);
+        out.reserve(size > 0 ? static_cast<size_t>(size) : 0U);
+        for (int i = 0; i < size; ++i) {
+            cJSON* item = cJSON_GetArrayItem(arr, i);
+            if (item && cJSON_IsNumber(item)) {
+                out.push_back(item->valuedouble);
+            }
+        }
+    };
+
+    getIntField(data, "gunNo", rec.gunNo);
+    getStringField(data, "preTradeNo", rec.preTradeNo);
+    getStringField(data, "tradeNo", rec.tradeNo);
+    getStringField(data, "vinCode", rec.vinCode);
+    getIntField(data, "timeDivType", rec.timeDivType);
+    getIntField(data, "startType", rec.startType);
+    getUint64Field(data, "chargeStartTime", rec.chargeStartTime);
+    getUint64Field(data, "chargeEndTime", rec.chargeEndTime);
+    getDoubleField(data, "startSoc", rec.startSoc);
+    getDoubleField(data, "endSoc", rec.endSoc);
+    int reason = 0;
+    if (getIntField(data, "reason", reason) && reason >= 0) {
+        rec.reason = static_cast<unsigned int>(reason);
+    }
+    getStringField(data, "feeModelId", rec.feeModelId);
+    getDoubleField(data, "sumStart", rec.sumStart);
+    getDoubleField(data, "sumEnd", rec.sumEnd);
+    getDoubleField(data, "totalElect", rec.totalElect);
+    getDoubleField(data, "totalPowerCost", rec.totalPowerCost);
+    getDoubleField(data, "totalServCost", rec.totalServCost);
+    getDoubleField(data, "totalCost", rec.totalCost);
+    getIntField(data, "timeNum", rec.timeNum);
+    getIntField(data, "startPoint", rec.startPoint);
+    getIntField(data, "crossPoints", rec.crossPoints);
+    getStringField(data, "cardNumber", rec.cardNumber);
+    getArrayDoubles(data, "partElect", rec.partElect);
+    getArrayDoubles(data, "chargeFee", rec.chargeFee);
+    getArrayDoubles(data, "serviceFee", rec.serviceFee);
+    getArrayDoubles(data, "pointsElect", rec.pointsElect);
+    return !rec.tradeNo.empty();
+}
+
+void ChargeLogicProcess::replayBufferedUnconfirmedRecords()
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (now - m_lastReplayTime < std::chrono::seconds(10)) {
+        return;
+    }
+    m_lastReplayTime = now;
+
+    std::lock_guard<std::mutex> lock(m_unconfirmedMutex);
+    for (size_t i = 0; i < m_gunStates.size() && i < m_unconfirmedRecordBuffer.size(); ++i) {
+        if (m_gunStates[i].state != STATE_IDLE) {
+            continue;
+        }
+        if (m_unconfirmedRecordBuffer[i].empty()) {
+            continue;
+        }
+        TradeRecord rec = m_unconfirmedRecordBuffer[i].front();
+        m_unconfirmedRecordBuffer[i].pop_front();
+        rec.gunNo = static_cast<int>(i);
+        publishUpdateRecordEvent(static_cast<uint8_t>(i), rec);
+    }
 }
 
 void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* source)
@@ -1287,6 +1443,8 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
     if (to == STATE_IDLE) {
         // BY ZF: 回到空闲态时清理本次充电流程上下文
         resetChargeSessionState(gun);
+        // BY ZF: 进入 IDLE 时补发一条清零 feeData。
+        publishFeeData(gun);
     }
 }
 
@@ -1344,6 +1502,9 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.feeTotalEnergyKwh = 0.0;
     gs.feeTotalElectricAmount = 0.0;
     gs.feeTotalServiceAmount = 0.0;
+    gs.feeLastPublishedTotalEnergy = -1.0;
+    gs.feeLastPublishedElectricAmount = -1.0;
+    gs.feeLastPublishedServiceAmount = -1.0;
 
     gs.hasTotalAmount = false;
     gs.lastTotalAmount = 0.0;

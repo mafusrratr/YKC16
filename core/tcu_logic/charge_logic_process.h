@@ -12,6 +12,7 @@
 #include "../base/logger/log_sender.h"
 #include <string>
 #include <vector>
+#include <deque>
 #include <atomic>
 #include <mutex>
 #include <cstdint>
@@ -133,6 +134,9 @@ private:
         double feeTotalEnergyKwh;               // 总电量(kWh)
         double feeTotalElectricAmount;          // 总电费(元)
         double feeTotalServiceAmount;           // 总服务费(元)
+        double feeLastPublishedTotalEnergy;     // 最近一次已发布总电量(kWh)
+        double feeLastPublishedElectricAmount;  // 最近一次已发布总电费(元)
+        double feeLastPublishedServiceAmount;   // 最近一次已发布总服务费(元)
 
         bool pendingStart;                      // 已收 start_charge，等待 PREPARE 窗口处理
         bool stopCompleteSeen;                  // 是否收到 stop_complete
@@ -182,6 +186,9 @@ private:
             , feeTotalEnergyKwh(0.0)
             , feeTotalElectricAmount(0.0)
             , feeTotalServiceAmount(0.0)
+            , feeLastPublishedTotalEnergy(-1.0)
+            , feeLastPublishedElectricAmount(-1.0)
+            , feeLastPublishedServiceAmount(-1.0)
             , pendingStart(false)
             , stopCompleteSeen(false)
             , startingRetrySent(false)
@@ -209,6 +216,8 @@ private:
     void publishUpdateRecordEvent(uint8_t gun, const TradeRecord& rec);
     // BY ZF: 结束充电后记录交易日志
     void logTradeRecordOnStopped(uint8_t gun, const char* reason);
+    bool parseTradeRecordFromJson(cJSON* data, TradeRecord& rec);
+    void replayBufferedUnconfirmedRecords();
     // BY ZF: 启动鉴权参数与计费模型解析
     void updateAuthBasis(uint8_t gun, cJSON* data, const char* source);
     bool parseFeeModel(uint8_t gun, cJSON* data);
@@ -231,6 +240,9 @@ private:
     LogSender m_logSender;               // 日志/交易记录发送
     std::atomic<uint64_t> m_seq;         // 本进程序列号（MQTT payload seq）
     std::thread m_mainThread;            // 主循环线程
+    std::vector<std::deque<TradeRecord> > m_unconfirmedRecordBuffer; // 未确认记录缓冲（按枪）
+    std::chrono::steady_clock::time_point m_lastReplayTime;          // 上次空闲重发时间
+    std::mutex m_unconfirmedMutex;                                    // 缓冲互斥锁
 };
 
 #endif // CHARGE_LOGIC_PROCESS_H

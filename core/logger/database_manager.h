@@ -150,6 +150,14 @@ public:
      * @return true 成功
      */
     bool updateTradeConfirmFlag(const std::string& tradeNo, int confirmFlag);
+
+    /**
+     * @brief 加载未确认交易记录（platform_confirm_flag=0）。
+     * @param outRecords 输出记录列表
+     * @param limit 最大条数（<=0 表示不限制）
+     * @return true 成功
+     */
+    bool loadUnconfirmedTradeRecords(std::vector<TradeRecord>& outRecords, int limit = 100);
     
     // ========== 计费模型相关 ==========
     

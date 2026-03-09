@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <cerrno>
 #include "../../libv2gshm/libcshm/v2gshm.h"
+#include "../base/cjson/include/cjson/cJSON.h"
 
 namespace {
 
@@ -89,6 +90,13 @@ LoggerProcess::LoggerProcess()
     , m_flushInterval(std::chrono::seconds(LOGGER_FLUSH_INTERVAL_SECONDS))  // BY ZF: 使用宏定义
     , m_logLevel(LOG_INFO)
     , m_shm(nullptr)
+    , m_mqttReady(false)
+    , m_mqttHost("127.0.0.1")
+    , m_mqttPort(1883)
+    , m_mqttKeepalive(60)
+    , m_mqttClientId("tcu_logger")
+    , m_mqttTopicPrefix("tcu")
+    , m_mqttSeq(0)
     , m_backupEnabled(false)
     , m_backupDir()
     , m_backupIntervalMinutes(0)
@@ -113,6 +121,16 @@ bool LoggerProcess::initialize(const char* config)
     if (!m_config.loadConfig(configFile)) {
         std::cerr << "Failed to load logger config: " << configFile << std::endl;
         return false;
+    }
+
+    // BY ZF: MQTT 发布配置（用于未确认交易记录回放）。
+    m_mqttHost = m_config.getString("MQTT", "mqtt_host", "127.0.0.1");
+    m_mqttPort = m_config.getInt("MQTT", "mqtt_port", 1883);
+    m_mqttKeepalive = m_config.getInt("MQTT", "mqtt_keepalive", 60);
+    m_mqttClientId = m_config.getString("MQTT", "mqtt_client_id", "tcu_logger");
+    m_mqttTopicPrefix = m_config.getString("MQTT", "mqtt_topic_prefix", "tcu");
+    if (!initMqttPublisher()) {
+        std::cerr << "Failed to initialize logger mqtt publisher" << std::endl;
     }
     // 初始化数据库管理器
     m_dbManager = &DatabaseManager::getInstance();
@@ -241,6 +259,11 @@ void LoggerProcess::stop()
     }
     if (m_dbManager) {
         m_dbManager->cleanup();
+    }
+    if (m_mqttReady) {
+        m_mqtt.loopStop(true);
+        m_mqtt.disconnect();
+        m_mqttReady = false;
     }
     // BY ZF: 清理共享内存
     if (m_shm) {
@@ -911,6 +934,36 @@ void LoggerProcess::parseAndLogMessage(const std::string& jsonData)
         }
         return;
     }
+
+    // BY ZF: 处理未确认交易记录请求（查询DB并以MQTT QoS2发布给 logic）。
+    if (msgType == "get_unconfirmed_record") {
+        auto getInt = [](const std::string &j, const std::string &key) {
+            size_t p = j.find("\"" + key + "\":");
+            if (p == std::string::npos) return 0;
+            p += key.size() + 3;
+            while (p < j.size() && (j[p] == ' ' || j[p] == '\t' || j[p] == '\n' || j[p] == '\r')) ++p;
+            long long val = 0; bool hasDigit = false;
+            while (p < j.size() && j[p] >= '0' && j[p] <= '9') { val = val * 10 + (j[p]-'0'); hasDigit = true; ++p; }
+            return hasDigit ? static_cast<int>(val) : 0;
+        };
+
+        int limit = getInt(jsonData, "limit");
+        if (limit <= 0) {
+            limit = 100;
+        }
+        std::vector<TradeRecord> records;
+        if (!m_dbManager || !m_dbManager->loadUnconfirmedTradeRecords(records, limit)) {
+            this->warn("unconfirmed_record_load", "query_failed");
+            return;
+        }
+        for (size_t i = 0; i < records.size(); ++i) {
+            publishUnconfirmedRecordToLogic(records[i]);
+        }
+        std::ostringstream oss;
+        oss << "count=" << records.size();
+        this->info("unconfirmed_record_load", oss.str());
+        return;
+    }
     
     // BY ZF: 普通运行日志处理（无type字段或type不是已知类型）
     // 期望格式：{"timestamp":...,"level":1,"module":"daemon","message":"test","details":"extra"}
@@ -1051,6 +1104,104 @@ void LoggerProcess::saveFeeModel(const FeeModel& model)
             std::cerr << "Failed to update fee model in shared memory" << std::endl;
         }
     }
+}
+
+bool LoggerProcess::initMqttPublisher()
+{
+    if (!m_mqtt.init(m_mqttClientId, true)) {
+        return false;
+    }
+    if (!m_mqtt.connect(m_mqttHost, m_mqttPort, m_mqttKeepalive)) {
+        return false;
+    }
+    if (!m_mqtt.loopStart()) {
+        return false;
+    }
+    m_mqttReady = true;
+    return true;
+}
+
+std::string LoggerProcess::buildUpdateRecordPayload(const TradeRecord& rec)
+{
+    cJSON* root = cJSON_CreateObject();
+    const uint64_t nowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    cJSON_AddNumberToObject(root, "ts", static_cast<double>(nowMs));
+    cJSON_AddNumberToObject(root, "seq", static_cast<double>(++m_mqttSeq));
+    cJSON_AddStringToObject(root, "source", "tcu_logger");
+    cJSON_AddNumberToObject(root, "gun", rec.gunNo);
+    cJSON_AddStringToObject(root, "event", "unconfirmed_record");
+
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddNumberToObject(data, "gunNo", rec.gunNo);
+    cJSON_AddStringToObject(data, "preTradeNo", rec.preTradeNo.c_str());
+    cJSON_AddStringToObject(data, "tradeNo", rec.tradeNo.c_str());
+    cJSON_AddStringToObject(data, "vinCode", rec.vinCode.c_str());
+    cJSON_AddNumberToObject(data, "timeDivType", rec.timeDivType);
+    cJSON_AddNumberToObject(data, "startType", rec.startType);
+    cJSON_AddNumberToObject(data, "chargeStartTime", static_cast<double>(rec.chargeStartTime));
+    cJSON_AddNumberToObject(data, "chargeEndTime", static_cast<double>(rec.chargeEndTime));
+    cJSON_AddNumberToObject(data, "startSoc", rec.startSoc);
+    cJSON_AddNumberToObject(data, "endSoc", rec.endSoc);
+    cJSON_AddNumberToObject(data, "reason", rec.reason);
+    cJSON_AddStringToObject(data, "feeModelId", rec.feeModelId.c_str());
+    cJSON_AddNumberToObject(data, "sumStart", rec.sumStart);
+    cJSON_AddNumberToObject(data, "sumEnd", rec.sumEnd);
+    cJSON_AddNumberToObject(data, "totalElect", rec.totalElect);
+    cJSON_AddNumberToObject(data, "totalPowerCost", rec.totalPowerCost);
+    cJSON_AddNumberToObject(data, "totalServCost", rec.totalServCost);
+    cJSON_AddNumberToObject(data, "totalCost", rec.totalCost);
+    cJSON_AddNumberToObject(data, "timeNum", rec.timeNum);
+    cJSON_AddNumberToObject(data, "startPoint", rec.startPoint);
+    cJSON_AddNumberToObject(data, "crossPoints", rec.crossPoints);
+    cJSON_AddStringToObject(data, "cardNumber", rec.cardNumber.c_str());
+
+    cJSON* partElect = cJSON_CreateArray();
+    for (size_t i = 0; i < rec.partElect.size(); ++i) {
+        cJSON_AddItemToArray(partElect, cJSON_CreateNumber(rec.partElect[i]));
+    }
+    cJSON_AddItemToObject(data, "partElect", partElect);
+
+    cJSON* chargeFee = cJSON_CreateArray();
+    for (size_t i = 0; i < rec.chargeFee.size(); ++i) {
+        cJSON_AddItemToArray(chargeFee, cJSON_CreateNumber(rec.chargeFee[i]));
+    }
+    cJSON_AddItemToObject(data, "chargeFee", chargeFee);
+
+    cJSON* serviceFee = cJSON_CreateArray();
+    for (size_t i = 0; i < rec.serviceFee.size(); ++i) {
+        cJSON_AddItemToArray(serviceFee, cJSON_CreateNumber(rec.serviceFee[i]));
+    }
+    cJSON_AddItemToObject(data, "serviceFee", serviceFee);
+
+    cJSON* pointsElect = cJSON_CreateArray();
+    for (size_t i = 0; i < rec.pointsElect.size(); ++i) {
+        cJSON_AddItemToArray(pointsElect, cJSON_CreateNumber(rec.pointsElect[i]));
+    }
+    cJSON_AddItemToObject(data, "pointsElect", pointsElect);
+    cJSON_AddItemToObject(root, "data", data);
+
+    char* out = cJSON_PrintUnformatted(root);
+    std::string payload = out ? out : "";
+    if (out) {
+        cJSON_free(out);
+    }
+    cJSON_Delete(root);
+    return payload;
+}
+
+bool LoggerProcess::publishUnconfirmedRecordToLogic(const TradeRecord& rec)
+{
+    if (!m_mqttReady) {
+        return false;
+    }
+    std::ostringstream topic;
+    topic << m_mqttTopicPrefix << "/logger/" << rec.gunNo << "/event";
+    const std::string payload = buildUpdateRecordPayload(rec);
+    if (payload.empty()) {
+        return false;
+    }
+    return m_mqtt.publish(topic.str(), payload, 2, false);
 }
 
 void LoggerProcess::feedWatchdog()

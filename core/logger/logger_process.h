@@ -10,6 +10,7 @@
 #include "../base/common/logger_types.h"
 #include "../base/common/config_manager_lite.h"
 #include "../base/common/message_queue.h"
+#include "../base/mqtt/mqtt_client.h"
 #include "database_manager.h"
 #include <thread>
 #include <atomic>
@@ -74,6 +75,12 @@ public:
     // BY ZF: 看门狗喂狗函数（供外部驱动主循环时调用）
     void feedWatchdog();
 
+    // BY ZF: 发布未确认交易记录到 tcu_logic（QoS2）。
+    bool publishUnconfirmedRecordToLogic(const TradeRecord& rec);
+
+    // BY ZF: 组装 update_record 事件 payload。
+    std::string buildUpdateRecordPayload(const TradeRecord& rec);
+
 private:
     /**
      * 处理日志消息队列
@@ -99,6 +106,7 @@ private:
      * 简单的JSON解析函数
      */
     void parseAndLogMessage(const std::string& jsonData);
+    bool initMqttPublisher();
     
     /**
      * 主循环线程函数
@@ -142,6 +150,16 @@ private:
     
     // BY ZF: 共享内存指针
     void* m_shm;
+
+    // BY ZF: MQTT 发布器（用于未确认记录回放到 logic）
+    MqttClient m_mqtt;
+    bool m_mqttReady;
+    std::string m_mqttHost;
+    int m_mqttPort;
+    int m_mqttKeepalive;
+    std::string m_mqttClientId;
+    std::string m_mqttTopicPrefix;
+    std::atomic<uint64_t> m_mqttSeq;
     
     // BY ZF: 备份相关
     bool m_backupEnabled;

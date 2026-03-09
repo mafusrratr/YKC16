@@ -186,16 +186,7 @@ bool MeterProcess::loadConfig()
         }
     }
 
-    // BY ZF: 当前版本按“多口多表”约束，串口设备号不允许重复
-    std::map<std::string, int> deviceSeen;
-    for (uint8_t i = 0; i < m_cfg.gunCount; i++) {
-        const std::string& dev = m_cfg.guns[i].serial.device;
-        if (deviceSeen.find(dev) != deviceSeen.end()) {
-            std::cerr << "[Meter] serial device duplicated across guns: " << dev << std::endl;
-            return false;
-        }
-        deviceSeen[dev] = static_cast<int>(i);
-    }
+    // BY ZF: 允许多枪复用同一串口，实际在 initMeter() 中按串口参数归并为共享端口实例。
 
     m_gunState.clear();
     m_gunState.resize(m_cfg.gunCount);
@@ -399,7 +390,7 @@ void MeterProcess::publishEvent(uint8_t gun, const std::string& event, const std
     }
     cJSON_Delete(root);
 
-    m_mqtt.publish(topic.str(), payload, 1, false);
+    m_mqtt.publish(topic.str(), payload, 1, true);
 }
 
 // BY ZF: 生成串口参数键，用于端口绑定与索引
