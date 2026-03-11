@@ -101,7 +101,6 @@ private:
         
         // 遥信数据
         uint8_t gunStatus;             // 枪工作状态（00空闲/01连接/02工作/03故障/04停止）
-        uint8_t vehicleConnectStatus;  // 车辆连接状态（0未连接/1已连接）
         uint8_t yxWorkStatus;          // 遥信-工作状态
         uint8_t yxTotalFault;          // 遥信-总故障
         uint8_t yxTotalAlarm;          // 遥信-总告警
@@ -155,7 +154,7 @@ private:
         std::string feeModelId;
         int feeTimeNum;
         std::vector<FeeSegmentData> feeSegments;
-        std::string pendingRecordTradeNo;  // 最近一次0x60上送记录的tradeNo
+        std::string pendingRecordTradeNo;  // 最近一次0x3D上送记录的tradeNo
 
         GunRuntimeData()
             : startTimeBcd{{0}}
@@ -164,7 +163,6 @@ private:
             , userStatus(0)
             , billingFlag(0)
             , gunStatus(0)
-            , vehicleConnectStatus(0)
             , yxWorkStatus(0)
             , yxTotalFault(0)
             , yxTotalAlarm(0)
@@ -189,6 +187,7 @@ private:
             , ycChargeMode(0)
             , bmsMeasuredVoltage(0.0)
             , bmsMeasuredCurrent(0.0)
+            , chargedTime(0.0)
             , estimatedRemainTime(0.0)
             , interfaceTemp1(0.0)
             , interfaceTemp2(0.0)
@@ -204,7 +203,6 @@ private:
             , totalAmount(0.0)
             , electricAmount(0.0)
             , serviceAmount(0.0)
-            , chargedTime(0.0)
             , meterEnergy(0.0)
             , meterVoltage(0.0)
             , meterCurrent(0.0)
@@ -216,7 +214,7 @@ private:
     enum PlatformLoginState {
         LOGIN_IDLE = 0,          // 已连TCP，等待发起登录认证
         LOGIN_REQ_AUTH,          // 周期发送0x01登录认证，请求0x02应答
-        LOGIN_REQ_FEE_MODEL,     // 周期发送0x09计费模型请求，等待0x0A应答
+        LOGIN_REQ_FEE_MODEL,     // 周期发送0x0D枪计费模型请求，等待0x0A应答
         LOGIN_ONLINE             // 已上线，维持0x03心跳与业务上送
     };
 
@@ -255,10 +253,11 @@ private:
 
     // BY ZF: 中石化2.0上线阶段信息体构造
     std::vector<uint8_t> buildLoginRequestBody() const;      // 0x01 登录认证请求体
-    std::vector<uint8_t> buildFeeModelRequestBody() const;   // 0x09 计费模型请求体
+    std::vector<uint8_t> buildFeeModelRequestBody(uint8_t gunNoBcd) const; // 0x0D 枪计费模型请求体
     std::vector<uint8_t> buildTimeSyncRequestBody() const;   // 0x0B 对时请求体
     std::vector<uint8_t> buildHeartbeatBody();               // 0x03 心跳请求体
     std::vector<uint8_t> buildChargeInfoBody(uint8_t gun);
+    std::vector<uint8_t> buildRemoteStartAckBody(uint8_t gun, uint8_t result) const; // 0xA7 远程启动应答体
     void reportChargeInfoPeriodic();
 
     // BY ZF: 平台来包解析
@@ -285,9 +284,9 @@ private:
     bool tryUpdateSm2PubKeyFromLoginAck(const uint8_t* body, size_t bodyLen);
 
     // BY ZF: 平台命令解析
-    bool parseRemoteStart014(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel);
-    bool parseRemoteStop015(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
-    bool parseRecordConfirm070(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
+    bool parseRemoteStart0A8(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel);
+    bool parseRemoteStop036(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
+    bool parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
     bool parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeModel& feeModel);
     bool buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data, std::vector<uint8_t>& body);
 
@@ -305,7 +304,11 @@ private:
     std::chrono::steady_clock::time_point m_lastTcpConnectTry; // 最近重连尝试时间
     std::chrono::steady_clock::time_point m_lastLoginAction;   // 最近登录动作时间
     std::chrono::steady_clock::time_point m_lastHeartbeat;     // 最近心跳发送时间
-    std::chrono::steady_clock::time_point m_lastChargeInfoReport; // 最近0x13上报时间
+
+    std::chrono::steady_clock::time_point m_lastChargeInfoReport; // reportChargeInfoPeriodic调度节拍
+    std::vector<std::chrono::steady_clock::time_point> m_lastChargeInfoReportByGun; // 每枪最近0x13上报时间
+    std::vector<uint8_t> m_runtimeChangedByGun;      // 每枪运行态变化标记（1=有变化待立即上送）
+    
     std::vector<uint8_t> m_tcpRxCache;                // TCP 粘包缓存
     std::vector<GunRuntimeData> m_gunRuntimeData;     // 来自 pile/logic 的实时业务数据缓存
     std::vector<FeeModel> m_feeModelByGun;            // 按枪保存的当前计费模型

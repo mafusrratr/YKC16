@@ -15,12 +15,26 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdio>
+#include <cctype>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/ec.h>
+#include <openssl/obj_mac.h>
+#include <openssl/rand.h>
+#include <openssl/err.h>
+#include <openssl/asn1.h>
+
+#ifndef NID_sm2
+#ifdef NID_sm2p256v1
+#define NID_sm2 NID_sm2p256v1
+#endif
+#endif
 
 namespace {
     // BY ZF: 中石化2.0平台帧类型（表4-1，固定值，不走配置）。
@@ -55,44 +69,31 @@ namespace {
     static const uint8_t kCmdRemoteStopCmd = 0x36;
     //充电记录
     static const uint8_t kCmdUploadTradeRecord = 0x3D;
-
-
-    static const uint8_t kCmdChargeRecord = 0x60;
-    static const uint8_t kCmdRecordConfirm = 0x70;
+    static const uint8_t kCmdRecordConfirm = 0x40;
 
     //固定充电桩/枪类型
     static const uint8_t kFixedChargerType = 0x01;
     static const uint8_t kFixedGunType = 0x01;
 
-    // BY ZF: 字节转HEX字符串（大写）。
-    static std::string bytesToHexUpper(const uint8_t* data, size_t len)
-    {
-        static const char* kHex = "0123456789ABCDEF";
-        std::string out;
-        out.reserve(len * 2);
-        for (size_t i = 0; i < len; ++i) {
-            out.push_back(kHex[(data[i] >> 4) & 0x0F]);
-            out.push_back(kHex[data[i] & 0x0F]);
-        }
-        return out;
-    }
-
     // BY ZF: 登录秘钥(8字节ASCII)生成（优先使用loginId，回退到cdzNo）。
+    // BY ZF: 允许字母+数字，不再仅保留数字。
     static std::string deriveLoginSecret8(const std::string& seedId)
     {
-        std::string digits;
+        std::string text;
         for (size_t i = 0; i < seedId.size(); ++i) {
-            if (seedId[i] >= '0' && seedId[i] <= '9') {
-                digits.push_back(seedId[i]);
+            if ((seedId[i] >= '0' && seedId[i] <= '9') ||
+                (seedId[i] >= 'A' && seedId[i] <= 'Z') ||
+                (seedId[i] >= 'a' && seedId[i] <= 'z')) {
+                text.push_back(seedId[i]);
             }
         }
-        if (digits.size() > 8) {
-            digits = digits.substr(digits.size() - 8);
+        if (text.size() > 8) {
+            text = text.substr(text.size() - 8);
         }
-        if (digits.size() < 8) {
-            digits.insert(digits.begin(), 8 - digits.size(), '0');
+        if (text.size() < 8) {
+            text.insert(text.begin(), 8 - text.size(), '0');
         }
-        return digits;
+        return text;
     }
 
     // BY ZF: 桩编码 -> 7字节BCD，不足7字节补0（取数字字符）。
@@ -152,29 +153,249 @@ namespace {
         return out;
     }
 
-    // BY ZF: SM2加密占位接口（先“加密”后Base64，输出长度按实际结果，不做硬截断）。
-    // BY ZF: 当前仓库未接入可链接SM2库，后续替换为真实SM2加密后二进制，再调用base64Encode。
+    static bool hexToBytes(const std::string& in, std::vector<uint8_t>& out)
+    {
+        std::string s;
+        s.reserve(in.size());
+        for (size_t i = 0; i < in.size(); ++i) {
+            if (std::isxdigit(static_cast<unsigned char>(in[i])) != 0) {
+                s.push_back(in[i]);
+            }
+        }
+        if ((s.size() % 2U) != 0U) {
+            return false;
+        }
+        out.clear();
+        out.reserve(s.size() / 2U);
+        for (size_t i = 0; i < s.size(); i += 2U) {
+            const char hc = s[i];
+            const char lc = s[i + 1U];
+            const int hi = (hc >= '0' && hc <= '9') ? (hc - '0') :
+                           (hc >= 'A' && hc <= 'F') ? (hc - 'A' + 10) :
+                           (hc >= 'a' && hc <= 'f') ? (hc - 'a' + 10) : -1;
+            const int lo = (lc >= '0' && lc <= '9') ? (lc - '0') :
+                           (lc >= 'A' && lc <= 'F') ? (lc - 'A' + 10) :
+                           (lc >= 'a' && lc <= 'f') ? (lc - 'a' + 10) : -1;
+            if (hi < 0 || lo < 0) {
+                return false;
+            }
+            out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+        }
+        return !out.empty();
+    }
+
+    static EVP_PKEY* loadSm2PublicKey(const std::string& sm2PubKey)
+    {
+        if (sm2PubKey.empty()) {
+            return nullptr;
+        }
+
+        BIO* mem = BIO_new_mem_buf(sm2PubKey.data(), static_cast<int>(sm2PubKey.size()));
+        if (mem) {
+            EVP_PKEY* pkey = PEM_read_bio_PUBKEY(mem, nullptr, nullptr, nullptr);
+            BIO_free(mem);
+            if (pkey) {
+#ifdef EVP_PKEY_SM2
+                // BY ZF: OpenSSL 1.1.1 上将 EC 公钥别名为 SM2，确保 EVP_PKEY_encrypt 可用。
+                EVP_PKEY_set_alias_type(pkey, EVP_PKEY_SM2);
+#endif
+                return pkey;
+            }
+        }
+
+        std::vector<uint8_t> raw;
+        if (!hexToBytes(sm2PubKey, raw)) {
+            return nullptr;
+        }
+        if (raw.size() == 64U) {
+            raw.insert(raw.begin(), 0x04U); // BY ZF: 兼容仅X||Y格式公钥。
+        }
+        if (raw.size() < 65U || raw[0] != 0x04U) {
+            return nullptr;
+        }
+
+        EC_KEY* ec = EC_KEY_new_by_curve_name(NID_sm2);
+        if (!ec) {
+            return nullptr;
+        }
+        const EC_GROUP* group = EC_KEY_get0_group(ec);
+        EC_POINT* point = EC_POINT_new(group);
+        BN_CTX* bctx = BN_CTX_new();
+        if (!point || !bctx ||
+            EC_POINT_oct2point(group, point, raw.data(), raw.size(), bctx) != 1 ||
+            EC_KEY_set_public_key(ec, point) != 1) {
+            if (point) {
+                EC_POINT_free(point);
+            }
+            if (bctx) {
+                BN_CTX_free(bctx);
+            }
+            EC_KEY_free(ec);
+            return nullptr;
+        }
+
+        EC_POINT_free(point);
+        BN_CTX_free(bctx);
+
+        EVP_PKEY* pkey = EVP_PKEY_new();
+        if (!pkey || EVP_PKEY_assign_EC_KEY(pkey, ec) != 1) {
+            if (pkey) {
+                EVP_PKEY_free(pkey);
+            } else {
+                EC_KEY_free(ec);
+            }
+            return nullptr;
+        }
+#ifdef EVP_PKEY_SM2
+        // BY ZF: OpenSSL 1.1.1 上将 EC 公钥别名为 SM2，确保 EVP_PKEY_encrypt 可用。
+        EVP_PKEY_set_alias_type(pkey, EVP_PKEY_SM2);
+#endif
+        return pkey;
+    }
+
+    // BY ZF: SM2加密（输出Base64 ASCII）。
     static std::string sm2EncryptToAscii(const std::vector<uint8_t>& plain,
                                          const std::string& sm2PubKey)
     {
-        std::string seed = sm2PubKey;
-        seed.push_back('|');
-        seed += bytesToHexUpper(plain.data(), plain.size());
-
-        uint32_t x = 0x13572468U;
-        for (size_t i = 0; i < seed.size(); ++i) {
-            x = (x * 131U) + static_cast<uint8_t>(seed[i]);
+        if (plain.empty()) {
+            return std::string();
+        }
+        EVP_PKEY* pkey = loadSm2PublicKey(sm2PubKey);
+        if (!pkey) {
+            return std::string();
         }
 
-        // BY ZF: 占位“密文”二进制长度与明文相关（后续替换为真实SM2输出）。
-        const size_t cipherLen = plain.size() + 96U;
-        std::vector<uint8_t> cipher;
-        cipher.reserve(cipherLen);
-        for (size_t i = 0; i < cipherLen; ++i) {
-            x = x * 1103515245U + 12345U + static_cast<uint32_t>(i);
-            cipher.push_back(static_cast<uint8_t>((x >> 16) & 0xFF));
+        EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new(pkey, nullptr);
+        if (!pctx) {
+            EVP_PKEY_free(pkey);
+            return std::string();
         }
-        return base64Encode(cipher);
+
+        std::string out;
+        if (EVP_PKEY_encrypt_init(pctx) == 1) {
+            size_t outLen = 0;
+            if (EVP_PKEY_encrypt(pctx, nullptr, &outLen, plain.data(), plain.size()) == 1 && outLen > 0U) {
+                std::vector<uint8_t> derCipher(outLen);
+                if (EVP_PKEY_encrypt(pctx, derCipher.data(), &outLen, plain.data(), plain.size()) == 1 && outLen > 0U) {
+                    derCipher.resize(outLen);
+
+                    // BY ZF: OpenSSL SM2默认产物是ASN.1 DER，这里转换为平台要求的C1C3C2再做Base64。
+                    const unsigned char* pp = derCipher.data();
+                    STACK_OF(ASN1_TYPE)* seq = d2i_ASN1_SEQUENCE_ANY(nullptr, &pp, static_cast<long>(derCipher.size()));
+                    if (seq && sk_ASN1_TYPE_num(seq) == 4) {
+                        ASN1_TYPE* t0 = sk_ASN1_TYPE_value(seq, 0); // x
+                        ASN1_TYPE* t1 = sk_ASN1_TYPE_value(seq, 1); // y
+                        ASN1_TYPE* t2 = sk_ASN1_TYPE_value(seq, 2); // c3
+                        ASN1_TYPE* t3 = sk_ASN1_TYPE_value(seq, 3); // c2
+                        if (t0 && t1 && t2 && t3 &&
+                            t0->type == V_ASN1_INTEGER &&
+                            t1->type == V_ASN1_INTEGER &&
+                            t2->type == V_ASN1_OCTET_STRING &&
+                            t3->type == V_ASN1_OCTET_STRING) {
+                            std::vector<uint8_t> raw;
+                            raw.reserve(1U + 32U + 32U + static_cast<size_t>(t2->value.octet_string->length) +
+                                        static_cast<size_t>(t3->value.octet_string->length));
+                            raw.push_back(0x04U); // C1未压缩点前缀
+
+                            BIGNUM* bx = ASN1_INTEGER_to_BN(t0->value.integer, nullptr);
+                            BIGNUM* by = ASN1_INTEGER_to_BN(t1->value.integer, nullptr);
+                            uint8_t xy[64] = {0};
+                            const int okx = bx ? BN_bn2binpad(bx, xy, 32) : -1;
+                            const int oky = by ? BN_bn2binpad(by, xy + 32, 32) : -1;
+                            if (bx) BN_free(bx);
+                            if (by) BN_free(by);
+                            if (okx == 32 && oky == 32) {
+                                raw.insert(raw.end(), xy, xy + 64); // C1
+
+                                const unsigned char* c3 = ASN1_STRING_get0_data(t2->value.octet_string);
+                                const int c3len = ASN1_STRING_length(t2->value.octet_string);
+                                const unsigned char* c2 = ASN1_STRING_get0_data(t3->value.octet_string);
+                                const int c2len = ASN1_STRING_length(t3->value.octet_string);
+                                if (c3 && c2 && c3len > 0 && c2len >= 0) {
+                                    raw.insert(raw.end(), c3, c3 + c3len); // C3
+                                    raw.insert(raw.end(), c2, c2 + c2len); // C2
+                                    out = base64Encode(raw);
+                                }
+                            }
+                        }
+                    }
+                    if (seq) {
+                        sk_ASN1_TYPE_pop_free(seq, ASN1_TYPE_free);
+                    }
+                }
+            }
+        }
+
+        EVP_PKEY_CTX_free(pctx);
+        EVP_PKEY_free(pkey);
+        return out;
+    }
+
+    static bool sm4CbcEncryptPkcs7(const uint8_t key[16], const std::vector<uint8_t>& plain, std::vector<uint8_t>& out)
+    {
+        out.clear();
+        EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) {
+            return false;
+        }
+        int ok = EVP_EncryptInit_ex(ctx, EVP_sm4_cbc(), nullptr, key, key);
+        if (ok != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
+
+        std::vector<uint8_t> buf(plain.size() + 32U, 0U);
+        int outLen1 = 0;
+        ok = EVP_EncryptUpdate(ctx, buf.data(), &outLen1, plain.data(), static_cast<int>(plain.size()));
+        if (ok != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
+
+        int outLen2 = 0;
+        ok = EVP_EncryptFinal_ex(ctx, buf.data() + outLen1, &outLen2);
+        EVP_CIPHER_CTX_free(ctx);
+        if (ok != 1) {
+            return false;
+        }
+        buf.resize(static_cast<size_t>(outLen1 + outLen2));
+        out.swap(buf);
+        return true;
+    }
+
+    static bool sm4CbcDecryptPkcs7(const uint8_t key[16], const uint8_t* in, size_t inLen, std::vector<uint8_t>& out)
+    {
+        out.clear();
+        if (!in || inLen == 0U) {
+            return true;
+        }
+        EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+        if (!ctx) {
+            return false;
+        }
+        int ok = EVP_DecryptInit_ex(ctx, EVP_sm4_cbc(), nullptr, key, key);
+        if (ok != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
+
+        std::vector<uint8_t> buf(inLen + 32U, 0U);
+        int outLen1 = 0;
+        ok = EVP_DecryptUpdate(ctx, buf.data(), &outLen1, in, static_cast<int>(inLen));
+        if (ok != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return false;
+        }
+
+        int outLen2 = 0;
+        ok = EVP_DecryptFinal_ex(ctx, buf.data() + outLen1, &outLen2);
+        EVP_CIPHER_CTX_free(ctx);
+        if (ok != 1) {
+            return false;
+        }
+        buf.resize(static_cast<size_t>(outLen1 + outLen2));
+        out.swap(buf);
+        return true;
     }
 
     // BY ZF: 按帧类型判断消息体是否需要SM4加密。
@@ -193,26 +414,44 @@ namespace {
         }
     }
 
-    // BY ZF: SM4加密占位，待接入真实SM4实现后替换。
-    static std::vector<uint8_t> encryptBodyByCmd(uint8_t cmd, const std::vector<uint8_t>& plain)
+    static bool encryptBodyByCmd(uint8_t cmd,
+                                 const std::vector<uint8_t>& plain,
+                                 const std::array<uint8_t, 16>& key,
+                                 bool keyReady,
+                                 std::vector<uint8_t>& out,
+                                 uint8_t& encryptFlag)
     {
         if (!shouldEncryptBody(cmd)) {
-            return plain;
+            encryptFlag = 0x00;
+            out = plain;
+            return true;
         }
-        return plain;
+        if (!keyReady) {
+            return false;
+        }
+        encryptFlag = 0x01;
+        return sm4CbcEncryptPkcs7(key.data(), plain, out);
     }
 
-    // BY ZF: SM4解密占位，待接入真实SM4实现后替换。
-    static std::vector<uint8_t> decryptBodyByFlag(uint8_t encryptFlag, const uint8_t* body, size_t bodyLen)
+    static bool decryptBodyByFlag(uint8_t encryptFlag,
+                                  const uint8_t* body,
+                                  size_t bodyLen,
+                                  const std::array<uint8_t, 16>& key,
+                                  bool keyReady,
+                                  std::vector<uint8_t>& out)
     {
-        if (!body || bodyLen == 0) {
-            return std::vector<uint8_t>();
+        if (!body || bodyLen == 0U) {
+            out.clear();
+            return true;
         }
-        std::vector<uint8_t> out(body, body + bodyLen);
-        if (encryptFlag == 0x01) {
-            return out;
+        if (encryptFlag == 0x00) {
+            out.assign(body, body + bodyLen);
+            return true;
         }
-        return out;
+        if (encryptFlag != 0x01 || !keyReady) {
+            return false;
+        }
+        return sm4CbcDecryptPkcs7(key.data(), body, bodyLen, out);
     }
 
     static std::vector<std::string> split(const std::string& s, char ch)
@@ -229,34 +468,6 @@ namespace {
         }
         out.push_back(cur);
         return out;
-    }
-
-    static int hexNibble(char c)
-    {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        return -1;
-    }
-
-    // BY ZF: 单字节BCD转整数（非法BCD按0处理）。
-    static int bcdToInt(uint8_t b)
-    {
-        const int hi = (b >> 4) & 0x0F;
-        const int lo = b & 0x0F;
-        if (hi > 9 || lo > 9) {
-            return 0;
-        }
-        return hi * 10 + lo;
-    }
-
-    static void appendAsciiFixed(std::vector<uint8_t>& out, const std::string& s, size_t width)
-    {
-        const size_t n = (s.size() < width) ? s.size() : width;
-        out.insert(out.end(), s.begin(), s.begin() + static_cast<std::ptrdiff_t>(n));
-        if (width > n) {
-            out.insert(out.end(), width - n, 0x00);
-        }
     }
 
     // BY ZF: 任意位数字字符串按固定BCD字节长度写入（左侧补0，超长截断高位）。
@@ -343,6 +554,52 @@ namespace {
         return static_cast<uint32_t>(v * scale + 0.5);
     }
 
+    // BY ZF: 小端序追加工具（中石化BIN字段按小端组织）。
+    static void appendU16LE(std::vector<uint8_t>& out, uint16_t v)
+    {
+        out.push_back(static_cast<uint8_t>(v & 0xFF));
+        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    }
+
+    static void appendU32LE(std::vector<uint8_t>& out, uint32_t v)
+    {
+        out.push_back(static_cast<uint8_t>(v & 0xFF));
+        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+        out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+        out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+    }
+
+    static void appendU64LE(std::vector<uint8_t>& out, uint64_t v)
+    {
+        for (int i = 0; i < 8; ++i) {
+            out.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF));
+        }
+    }
+
+    // BY ZF: YYYYMMDDhhmmss 转 CP56Time2a(7)；毫秒未知时按整秒。
+    static void appendCp56Time2aFromYmdHms(std::vector<uint8_t>& out, uint64_t ymdhms)
+    {
+        char buf[15] = {0};
+        std::snprintf(buf, sizeof(buf), "%014llu", static_cast<unsigned long long>(ymdhms));
+        auto d2 = [](char a, char b) -> int {
+            if (a < '0' || a > '9' || b < '0' || b > '9') return 0;
+            return (a - '0') * 10 + (b - '0');
+        };
+        const int year = d2(buf[2], buf[3]);    // YY
+        const int month = d2(buf[4], buf[5]);
+        const int day = d2(buf[6], buf[7]);
+        const int hour = d2(buf[8], buf[9]);
+        const int minute = d2(buf[10], buf[11]);
+        const int second = d2(buf[12], buf[13]);
+        const uint16_t ms = static_cast<uint16_t>((second < 0 ? 0 : second) * 1000);
+        appendU16LE(out, ms);
+        out.push_back(static_cast<uint8_t>(minute & 0x3F));
+        out.push_back(static_cast<uint8_t>(hour & 0x1F));
+        out.push_back(static_cast<uint8_t>(day & 0x1F));
+        out.push_back(static_cast<uint8_t>(month & 0x0F));
+        out.push_back(static_cast<uint8_t>(year & 0x7F));
+    }
+
     // BY ZF: 平台命令字转名称，便于TCP调试输出。
     static const char* platformCmdName(uint8_t cmd)
     {
@@ -358,7 +615,8 @@ namespace {
         case 0x0D: return "gun_fee_model_req";
         case 0x13: return "charge_info";
         case 0x2D: return "start_result";
-        case 0x60: return "charge_record";
+        case 0x3D: return "upload_trade_record";
+        case 0x40: return "record_confirm";
         case 0xA1: return "merge_charge_apply";
         case 0xA2: return "merge_charge_apply_ack";
         case 0xA3: return "merge_start_reply";
@@ -369,8 +627,6 @@ namespace {
         case 0xA8: return "remote_start_cmd";
         case 0x35: return "remote_stop_ack";
         case 0x36: return "remote_stop_cmd";
-        case 0x3D: return "upload_trade_record";
-        case 0x70: return "record_confirm";
         default: return "unknown";
         }
     }
@@ -404,6 +660,8 @@ bool CommProcess::doInitialize()
     if (!initMqtt()) {
         return false;
     }
+    m_lastChargeInfoReportByGun.assign(static_cast<size_t>(m_config.gunCount), std::chrono::steady_clock::now());
+    m_runtimeChangedByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
     m_logSender.info("init_completed", std::string("gun_count=") + std::to_string(m_config.gunCount));
     return true;
 }
@@ -457,7 +715,7 @@ bool CommProcess::loadConfig()
     // BY ZF: 按中石化2.0联调要求，心跳周期固定20秒。
     m_config.tcpHeartbeatSec = 20;
     m_config.loginRetrySec = cfg.getInt(section, "login_retry_sec", 10);
-    m_config.debugTcp = (cfg.getInt(section, "debug_tcp", 0) != 0);
+    m_config.debugTcp = (cfg.getInt(section, "debug", 0) != 0);
 
     m_config.gunIdList.clear();
     m_config.gunTypeList.clear();
@@ -622,13 +880,13 @@ bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& pa
                     m_gunRuntimeData[gun].gunStatus = mappedStatus;
                 }
             }
-            // BY ZF: 充电记录上报事件 -> 平台0x60充电记录包请求。
+            // BY ZF: 充电记录上报事件 -> 平台0x3D上传交易记录。
             if (cJSON_IsString(evt) &&
                 std::strcmp(evt->valuestring, "update_record") == 0 &&
                 cJSON_IsObject(data)) {
                 std::vector<uint8_t> body;
                 if (buildChargeRecordBodyFromUpdateRecord(gun, data, body) && !body.empty()) {
-                    sendPlatformFrame(kCmdChargeRecord, body);
+                    sendPlatformFrame(kCmdUploadTradeRecord, body);
                 }
             }
             cJSON_Delete(root);
@@ -745,15 +1003,24 @@ bool CommProcess::handlePileDataForPlatform(uint8_t gun, const std::string& payl
             cJSON* data = cJSON_GetObjectItem(root, "data");
             if (cJSON_IsString(type) && std::strcmp(type->valuestring, "yx") == 0 && cJSON_IsObject(data)) {
                 GunRuntimeData& rd = m_gunRuntimeData[gun];
-                auto updateU8 = [data](const char* key, uint8_t& dst) {
+                bool changed = false;
+
+                // BY ZF: 遥信字段更新辅助：仅当新值与缓存值不同才写入，并标记changed=true用于触发“变位即送”。
+                auto updateU8 = [data, &changed](const char* key, uint8_t& dst) {
                     cJSON* v = cJSON_GetObjectItem(data, key);
                     if (v && cJSON_IsNumber(v)) {
                         int n = v->valueint;
                         if (n < 0) n = 0;
                         if (n > 255) n = 255;
-                        dst = static_cast<uint8_t>(n);
+                        const uint8_t nv = static_cast<uint8_t>(n);
+                        if (dst != nv) {
+                            dst = nv;
+                            changed = true;
+                        }
                     }
                 };
+
+                
                 updateU8("workStatus", rd.yxWorkStatus);
                 updateU8("totalFault", rd.yxTotalFault);
                 updateU8("totalAlarm", rd.yxTotalAlarm);
@@ -764,9 +1031,9 @@ bool CommProcess::handlePileDataForPlatform(uint8_t gun, const std::string& payl
                 updateU8("electronicLockStatus", rd.yxElectronicLockStatus);
                 updateU8("dcContactorStatus", rd.yxDcContactorStatus);
                 updateU8("otherFault", rd.yxOtherFault);
-
-                // BY ZF: 兼容旧字段，保持同步。
-                rd.vehicleConnectStatus = (rd.yxVehicleConnectStatus != 0) ? 0x01 : 0x00;
+                if (changed && gun < m_runtimeChangedByGun.size()) {
+                    m_runtimeChangedByGun[gun] = 1;
+                }
             }
             // BY ZF: 缓存遥测电压/电流（来自 yc）。
             if (cJSON_IsString(type) && std::strcmp(type->valuestring, "yc") == 0 && cJSON_IsObject(data)) {
@@ -914,12 +1181,17 @@ bool CommProcess::handlePileEventForPlatform(uint8_t gun, const std::string& pay
 
 bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data, std::vector<uint8_t>& body)
 {
-    if (!data || gun >= m_config.gunIdList.size()) {
+    if (!data || gun >= m_gunRuntimeData.size()) {
         return false;
     }
 
     const std::string tradeNo = jsonGetString(data, "tradeNo");
+    const std::string vinCode = jsonGetString(data, "vinCode");
+    const std::string cardNumber = jsonGetString(data, "cardNumber");
+    int startType = 1;
+    (void)jsonGetInt(data, "startType", startType);
     const double totalElect = [&](){ double v = 0.0; jsonGetNumber(data, "totalElect", v); return v; }();
+    const double totalPowerCost = [&](){ double v = 0.0; jsonGetNumber(data, "totalPowerCost", v); return v; }();
     const double totalCost = [&](){ double v = 0.0; jsonGetNumber(data, "totalCost", v); return v; }();
     const double totalServCost = [&](){ double v = 0.0; jsonGetNumber(data, "totalServCost", v); return v; }();
     const double sumStart = [&](){ double v = 0.0; jsonGetNumber(data, "sumStart", v); return v; }();
@@ -928,44 +1200,79 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
     const uint64_t startTime = [&](){ cJSON* n = cJSON_GetObjectItem(data, "chargeStartTime"); return (n && cJSON_IsNumber(n)) ? static_cast<uint64_t>(n->valuedouble) : 0ULL; }();
     const uint64_t endTime = [&](){ cJSON* n = cJSON_GetObjectItem(data, "chargeEndTime"); return (n && cJSON_IsNumber(n)) ? static_cast<uint64_t>(n->valuedouble) : 0ULL; }();
 
-    // BY ZF: 1 枪ID
-    appendU32BE(body, m_config.gunIdList[gun]);
-    // BY ZF: 2 IC卡卡号(8字节BCD)，当前固定0。
-    for (int i = 0; i < 8; ++i) body.push_back(0x00);
-    // BY ZF: 3 订单ID(10字节BCD)
-    appendOrderIdBcd10(body, tradeNo);
-    // BY ZF: 缓存本次上送的交易号，供0x70应答使用（协议不带订单号时回填）。
+    // BY ZF: 0x3D 上传交易记录（按中石化2.0字段顺序组帧）。
+    // 1) 交易流水号 BCD16
+    appendBcdFixed(body, tradeNo, 16);
+    // 2) 桩编号 BCD7
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    // 3) 枪号 BCD1（1..n）
+    const int gunNo = static_cast<int>(gun) + 1;
+    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
+    // 4) 开始时间 CP56Time2a 7字节
+    appendCp56Time2aFromYmdHms(body, startTime);
+    // 5) 结束时间 CP56Time2a 7字节
+    appendCp56Time2aFromYmdHms(body, endTime);
+    // 6) 电表表号 BCD6（无则补0）
+    body.insert(body.end(), 6, 0x00);
+    // 7) 电表协议版本 BIN2（无则补0）
+    appendU16LE(body, 0U);
+    // 8) 启动电表值 BIN8（精确到1e-4）
+    appendU64LE(body, static_cast<uint64_t>(scaleToU32(sumStart, 10000.0)));
+    // 9) 结束电表值 BIN8（精确到1e-4）
+    appendU64LE(body, static_cast<uint64_t>(scaleToU32(sumEnd, 10000.0)));
+    // 10) 总电量 BIN4（精确到1e-4）
+    appendU32LE(body, scaleToU32(totalElect, 10000.0));
+    // 11) 计损总电量 BIN4（按要求与总电量一致）
+    appendU32LE(body, scaleToU32(totalElect, 10000.0));
+    // 12) 清算金额 BIN4（精确到1e-4，包含电费+服务费）
+    appendU32LE(body, scaleToU32(totalCost, 10000.0));
+    // 13) VIN ASCII17（不足补'.'）
+    std::string vin = vinCode;
+    if (vin.size() > 17U) vin = vin.substr(0, 17U);
+    if (vin.size() < 17U) vin.append(17U - vin.size(), '.');
+    body.insert(body.end(), vin.begin(), vin.end());
+    // 14) 交易标识 BIN1
+    uint8_t tradeFlag = 0x01; // app启动
+    if (startType == 2) tradeFlag = 0x02;      // 卡启动
+    else if (startType == 4) tradeFlag = 0x04; // 离线卡启动
+    else if (startType == 5) tradeFlag = 0x05; // VIN码启动
+    body.push_back(tradeFlag);
+    // 15) 交易时间 CP56Time2a 7字节（取结束时间）
+    appendCp56Time2aFromYmdHms(body, endTime);
+    // 16) 停止原因 BIN2
+    appendU16LE(body, static_cast<uint16_t>(reason < 0 ? 0 : reason));
+    // 17) 物理卡号 BIN8（不足补0，优先十六进制串）
+    std::string hexDigits;
+    for (size_t i = 0; i < cardNumber.size(); ++i) {
+        const char c = cardNumber[i];
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')) {
+            hexDigits.push_back(c);
+        }
+    }
+    if (hexDigits.size() % 2U != 0U) {
+        hexDigits.insert(hexDigits.begin(), '0');
+    }
+    if (hexDigits.size() > 16U) {
+        hexDigits = hexDigits.substr(0, 16U);
+    }
+    while (hexDigits.size() < 16U) {
+        hexDigits.push_back('0');
+    }
+    for (size_t i = 0; i < 16U; i += 2U) {
+        const std::string b = hexDigits.substr(i, 2U);
+        body.push_back(static_cast<uint8_t>(std::strtoul(b.c_str(), nullptr, 16)));
+    }
+
+    // BY ZF: 缓存本次上送的交易号，供0x40应答使用（协议不带订单号时回填）。
     if (gun < m_gunRuntimeData.size()) {
         m_gunRuntimeData[gun].pendingRecordTradeNo = tradeNo;
     }
-    // BY ZF: 4~8 电量与金额。
-    appendU32BE(body, scaleToU32(totalElect, 100.0));     // totalEnergy 0.01kWh
-    appendU32BE(body, scaleToU32(totalCost, 100.0));      // totalAmount 0.01元
-    appendU32BE(body, scaleToU32(totalServCost, 100.0));  // serviceFee 0.01元
-    appendU32BE(body, scaleToU32(sumStart, 100.0));       // startEnergy 0.01kWh
-    appendU32BE(body, scaleToU32(sumEnd, 100.0));         // endEnergy 0.01kWh
 
-    // BY ZF: 9~10 起止时间BCD。
-    uint8_t startBcd[8];
-    uint8_t endBcd[8];
-    ymdHmsToBcd8(startTime, startBcd);
-    ymdHmsToBcd8(endTime, endBcd);
-    body.insert(body.end(), startBcd, startBcd + 8);
-    body.insert(body.end(), endBcd, endBcd + 8);
-
-    // BY ZF: 11 停止原因（当前按正常上送0x01）。
-    (void)reason;
-    body.push_back(0x00);
-    // BY ZF: 12 停止异常代码（暂置0）。
-    appendU32BE(body, 0U);
-    // BY ZF: 13 计费标志（来自启动指令缓存）。
-    const uint8_t billingFlag = (gun < m_gunRuntimeData.size()) ? m_gunRuntimeData[gun].billingFlag : 0x00;
-    body.push_back(billingFlag);
-
-    // BY ZF: 14~15 时段费用明细。
+    // 18~: 费率时段明细。
     cJSON* partElectArr = cJSON_GetObjectItem(data, "partElect");
     cJSON* chargeFeeArr = cJSON_GetObjectItem(data, "chargeFee");
     cJSON* serviceFeeArr = cJSON_GetObjectItem(data, "serviceFee");
+    const std::string feeModelIdFromRecord = jsonGetString(data, "feeModelId");
 
     int timeNum = 0;
     jsonGetInt(data, "timeNum", timeNum);
@@ -980,42 +1287,124 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
         periodCount = std::min(periodCount, cJSON_GetArraySize(serviceFeeArr));
     }
     if (periodCount < 0) periodCount = 0;
-    if (periodCount > 24) periodCount = 24;
-    body.push_back(static_cast<uint8_t>(periodCount));
-
-    for (int i = 0; i < periodCount; ++i) {
-        std::string startTs;
-        std::string endTs;
-        if (gun < m_gunRuntimeData.size() &&
-            i < static_cast<int>(m_gunRuntimeData[gun].feeSegments.size())) {
-            startTs = m_gunRuntimeData[gun].feeSegments[i].startTs;
-            endTs = m_gunRuntimeData[gun].feeSegments[i].endTs;
+    if (periodCount > 48) periodCount = 48;
+    
+    const FeeModel* matchedFeeModel = nullptr;
+    if (gun < m_feeModelByGun.size()) {
+        const FeeModel& localFeeModel = m_feeModelByGun[gun];
+        if (!feeModelIdFromRecord.empty() &&
+            !localFeeModel.feeModelId.empty() &&
+            feeModelIdFromRecord == localFeeModel.feeModelId &&
+            static_cast<int>(localFeeModel.timeNum) == periodCount &&
+            localFeeModel.segFlag.size() >= static_cast<size_t>(periodCount)) {
+            matchedFeeModel = &localFeeModel;
         }
-
-        body.push_back(hhmmToBcdHour(startTs)); // 开始时间（1字节）
-        body.push_back(hhmmToBcdHour(endTs));   // 结束时间（1字节）
-
-        double periodChargeFee = 0.0;
-        double periodServiceFee = 0.0;
-        double periodEnergy = 0.0;
-        if (cJSON_IsArray(chargeFeeArr)) {
-            cJSON* n = cJSON_GetArrayItem(chargeFeeArr, i);
-            if (n && cJSON_IsNumber(n)) periodChargeFee = n->valuedouble;
-        }
-        if (cJSON_IsArray(serviceFeeArr)) {
-            cJSON* n = cJSON_GetArrayItem(serviceFeeArr, i);
-            if (n && cJSON_IsNumber(n)) periodServiceFee = n->valuedouble;
-        }
-        if (cJSON_IsArray(partElectArr)) {
-            cJSON* n = cJSON_GetArrayItem(partElectArr, i);
-            if (n && cJSON_IsNumber(n)) periodEnergy = n->valuedouble;
-        }
-
-        appendU32BE(body, scaleToU32(periodChargeFee, 100.0));  // 0.01元
-        appendU32BE(body, scaleToU32(periodServiceFee, 100.0)); // 0.01元
-        appendU32BE(body, scaleToU32(periodEnergy, 100.0));     // 0.01kWh
     }
 
+    // BY ZF: 统一封装单条费率明细，避免重复拼包逻辑。
+    auto appendRateDetail = [&body](uint8_t rateNo,
+                                    uint32_t chargePrice,
+                                    uint32_t servicePrice,
+                                    uint32_t energy,
+                                    uint32_t chargeFeeVal,
+                                    uint32_t serviceFeeVal) {
+        const uint32_t lossEnergy = energy; // BY ZF: 计损电量与电量一致
+
+        body.push_back(rateNo);          // N费率时段号
+        appendU32LE(body, chargePrice);  // N费率电费单价(1e-5元)
+        appendU32LE(body, servicePrice); // N费率服务费单价(1e-5元)
+        appendU32LE(body, energy);       // N费率电量(1e-4kWh)
+        appendU32LE(body, lossEnergy);   // N费率计损电量(1e-4kWh)
+        appendU32LE(body, chargeFeeVal); // N费率电费(1e-4元)
+        appendU32LE(body, serviceFeeVal);// N费率服务费(1e-4元)
+    };
+
+    if (matchedFeeModel) {
+        // BY ZF: 计费模型一致时，按 segFlag 聚合后再上送（费率号维度）。
+        std::vector<uint64_t> energyByRate(256, 0ULL);
+        std::vector<uint64_t> chargeByRate(256, 0ULL);
+        std::vector<uint64_t> serviceByRate(256, 0ULL);
+        std::vector<uint32_t> chargePriceByRate(256, 0U);
+        std::vector<uint32_t> servicePriceByRate(256, 0U);
+        std::vector<uint8_t> rateSeen(256, 0U);
+        uint8_t maxRateNo = 0;
+
+        for (int i = 0; i < periodCount; ++i) {
+            double periodChargeFee = 0.0;
+            double periodServiceFee = 0.0;
+            double periodEnergy = 0.0;
+            if (cJSON_IsArray(chargeFeeArr)) {
+                cJSON* n = cJSON_GetArrayItem(chargeFeeArr, i);
+                if (n && cJSON_IsNumber(n)) periodChargeFee = n->valuedouble;
+            }
+            if (cJSON_IsArray(serviceFeeArr)) {
+                cJSON* n = cJSON_GetArrayItem(serviceFeeArr, i);
+                if (n && cJSON_IsNumber(n)) periodServiceFee = n->valuedouble;
+            }
+            if (cJSON_IsArray(partElectArr)) {
+                cJSON* n = cJSON_GetArrayItem(partElectArr, i);
+                if (n && cJSON_IsNumber(n)) periodEnergy = n->valuedouble;
+            }
+
+            unsigned int rawFlag = matchedFeeModel->segFlag[static_cast<size_t>(i)];
+            if (rawFlag > 255U) {
+                rawFlag = 255U;
+            }
+            const uint8_t rateNo = static_cast<uint8_t>(rawFlag);
+
+            energyByRate[rateNo] += static_cast<uint64_t>(scaleToU32(periodEnergy, 10000.0));
+            chargeByRate[rateNo] += static_cast<uint64_t>(scaleToU32(periodChargeFee, 10000.0));
+            serviceByRate[rateNo] += static_cast<uint64_t>(scaleToU32(periodServiceFee, 10000.0));
+            // BY ZF: 单价按计费模型发送，不根据金额/电量反算。
+            if (static_cast<size_t>(i) < matchedFeeModel->chargeFee.size()) {
+                chargePriceByRate[rateNo] = static_cast<uint32_t>(matchedFeeModel->chargeFee[static_cast<size_t>(i)] * 100U); // 0.001元 -> 1e-5元
+            }
+            if (static_cast<size_t>(i) < matchedFeeModel->serviceFee.size()) {
+                servicePriceByRate[rateNo] = static_cast<uint32_t>(matchedFeeModel->serviceFee[static_cast<size_t>(i)] * 100U); // 0.001元 -> 1e-5元
+            }
+            rateSeen[rateNo] = 1U;
+            if (rateNo > maxRateNo) {
+                maxRateNo = rateNo;
+            }
+        }
+
+        // BY ZF: 费率总数按费率号最大值推导（zero-based => count=max+1）。
+        const uint8_t rateCount = static_cast<uint8_t>(maxRateNo + 1U);
+        body.push_back(rateCount);
+        for (uint16_t rateNo = 0; rateNo < static_cast<uint16_t>(rateCount); ++rateNo) {
+            const uint64_t energy64 = energyByRate[rateNo];
+            const uint64_t charge64 = chargeByRate[rateNo];
+            const uint64_t service64 = serviceByRate[rateNo];
+            const uint32_t energy = static_cast<uint32_t>(std::min<uint64_t>(energy64, 0xFFFFFFFFULL));
+            const uint32_t chargeFeeVal = static_cast<uint32_t>(std::min<uint64_t>(charge64, 0xFFFFFFFFULL));
+            const uint32_t serviceFeeVal = static_cast<uint32_t>(std::min<uint64_t>(service64, 0xFFFFFFFFULL));
+            const uint32_t chargePrice = rateSeen[rateNo] ? chargePriceByRate[rateNo] : 0U;
+            const uint32_t servicePrice = rateSeen[rateNo] ? servicePriceByRate[rateNo] : 0U;
+            appendRateDetail(static_cast<uint8_t>(rateNo), chargePrice, servicePrice, energy, chargeFeeVal, serviceFeeVal);
+        }
+    } else {
+        // BY ZF: 计费模型不一致时，按单费率上送总和数据。
+        body.push_back(1U);
+        const uint32_t energy = scaleToU32(totalElect, 10000.0);
+        const uint32_t chargeFeeVal = scaleToU32(totalPowerCost, 10000.0);
+        const uint32_t serviceFeeVal = scaleToU32(totalServCost, 10000.0);
+        // BY ZF: 模型不一致时，单价由总费用/总电量反算。
+        const uint32_t chargePrice = (energy > 0U)
+            ? static_cast<uint32_t>((static_cast<uint64_t>(chargeFeeVal) * 10ULL + energy / 2U) / energy)
+            : 0U;
+        const uint32_t servicePrice = (energy > 0U)
+            ? static_cast<uint32_t>((static_cast<uint64_t>(serviceFeeVal) * 10ULL + energy / 2U) / energy)
+            : 0U;
+        appendRateDetail(0U, chargePrice, servicePrice, energy, chargeFeeVal, serviceFeeVal);
+    }
+
+    // BY ZF: 在线模式产生（0x00）+ 离线验证码(BCD3,填0)。
+    body.push_back(0x00);
+    body.push_back(0x00);
+    body.push_back(0x00);
+    body.push_back(0x00);
+
+    (void)totalServCost;
     return true;
 }
 
@@ -1085,6 +1474,8 @@ bool CommProcess::connectPlatformTcp()
     m_lastLoginAction = std::chrono::steady_clock::now();
     m_lastHeartbeat = std::chrono::steady_clock::now();
     m_lastChargeInfoReport = std::chrono::steady_clock::now();
+    m_lastChargeInfoReportByGun.assign(static_cast<size_t>(m_config.gunCount), m_lastChargeInfoReport);
+    m_runtimeChangedByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
     m_tcpRxCache.clear();
     resetCryptoSession();
     m_logSender.info("platform_tcp_connected", m_config.masterHost + ":" + std::to_string(m_config.masterPort));
@@ -1288,9 +1679,11 @@ void CommProcess::prepareLoginCryptoContext()
         return;
     }
     // BY ZF: 上电/离线恢复后生成16字节会话密钥A（后续用于SM4）。
-    std::random_device rd;
-    for (size_t i = 0; i < m_sm4SessionKey.size(); ++i) {
-        m_sm4SessionKey[i] = static_cast<uint8_t>(rd() & 0xFF);
+    if (RAND_bytes(m_sm4SessionKey.data(), static_cast<int>(m_sm4SessionKey.size())) != 1) {
+        std::random_device rd;
+        for (size_t i = 0; i < m_sm4SessionKey.size(); ++i) {
+            m_sm4SessionKey[i] = static_cast<uint8_t>(rd() & 0xFF);
+        }
     }
     m_sm4SessionKeyReady = false;
     m_loginCryptoPrepared = true;
@@ -1306,6 +1699,9 @@ bool CommProcess::tryUpdateSm2PubKeyFromLoginAck(const uint8_t* body, size_t bod
     std::string key(reinterpret_cast<const char*>(body + 8), 130U);
     if (key.empty()) {
         return false;
+    }
+    if (m_config.debugTcp) {
+        std::cout << "[Comm][TCP][LOGIN_ACK_PUBKEY] " << key << std::endl;
     }
     if (key != m_sm2PublicKeyActive) {
         m_sm2PublicKeyActive = key;
@@ -1323,11 +1719,21 @@ std::vector<uint8_t> CommProcess::buildPlatformFrame(uint8_t cmd, const std::vec
     frame.reserve(32 + body.size());
     frame.push_back(0x68);
     frame.push_back(0x01); // deviceType: 0x01 直流充电桩
-    frame.push_back(0x14); // protocolVersion byte0: V2.0 -> 0x14
-    frame.push_back(0x01);
+    // BY ZF: 按平台联调样例：
+    // BY ZF: 登录认证(0x01)使用 0x01 0x15，其它业务帧使用 0x14 0x01。
+    if (cmd == kCmdLoginReq) {
+        frame.push_back(0x01);
+        frame.push_back(0x15);
+    } else {
+        frame.push_back(0x14);
+        frame.push_back(0x01);
+    }
 
-    const std::vector<uint8_t> payload = encryptBodyByCmd(cmd, body);
-    const uint8_t encryptFlag = shouldEncryptBody(cmd) ? 0x01 : 0x00;
+    std::vector<uint8_t> payload;
+    uint8_t encryptFlag = 0x00;
+    if (!encryptBodyByCmd(cmd, body, m_sm4SessionKey, m_sm4SessionKeyReady, payload, encryptFlag)) {
+        return std::vector<uint8_t>();
+    }
     const uint16_t seq = static_cast<uint16_t>((++m_seq) & 0xFFFF);
     const uint16_t totalLen = static_cast<uint16_t>(2 + 7 + 1 + 1 + payload.size()); // seq+time+enc+cmd+payload
     // BY ZF: 数据长度小端序。
@@ -1357,7 +1763,9 @@ std::vector<uint8_t> CommProcess::buildPlatformFrame(uint8_t cmd, const std::vec
     frame.insert(frame.end(), payload.begin(), payload.end());
 
     const uint16_t crc = calcCrc16Modbus(frame.data() + 6, static_cast<size_t>(totalLen));
-    appendU16BE(frame, crc);
+    // BY ZF: 帧尾CRC按协议和旧实现使用小端序（低字节在前）。
+    frame.push_back(static_cast<uint8_t>(crc & 0xFF));
+    frame.push_back(static_cast<uint8_t>((crc >> 8) & 0xFF));
     return frame;
 }
 
@@ -1367,6 +1775,9 @@ bool CommProcess::sendPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& bod
         return false;
     }
     const std::vector<uint8_t> frame = buildPlatformFrame(cmd, body);
+    if (frame.empty()) {
+        return false;
+    }
     if (m_config.debugTcp) {
         std::cout << "[Comm][TCP][TX_FRAME] cmd=0x" << std::hex << static_cast<int>(cmd) << std::dec
                   << "(" << platformCmdName(cmd) << ")"
@@ -1399,6 +1810,9 @@ std::vector<uint8_t> CommProcess::buildLoginRequestBody() const
     // BY ZF: 1) 随机秘钥A明文（16字节BIN）取当前会话SM4密钥。
     std::vector<uint8_t> randomSecretPlain(m_sm4SessionKey.begin(), m_sm4SessionKey.end());
     const std::string randomCipher = sm2EncryptToAscii(randomSecretPlain, m_sm2PublicKeyActive);
+    if (randomCipher.empty()) {
+        return std::vector<uint8_t>();
+    }
     body.insert(body.end(), randomCipher.begin(), randomCipher.end());
 
     // BY ZF: 2) 登录秘钥明文（8字节ASCII）并加密。
@@ -1406,6 +1820,9 @@ std::vector<uint8_t> CommProcess::buildLoginRequestBody() const
     const std::string loginSecret = deriveLoginSecret8(loginSeed);
     std::vector<uint8_t> loginSecretPlain(loginSecret.begin(), loginSecret.end());
     const std::string loginCipher = sm2EncryptToAscii(loginSecretPlain, m_sm2PublicKeyActive);
+    if (loginCipher.empty()) {
+        return std::vector<uint8_t>();
+    }
     body.insert(body.end(), loginCipher.begin(), loginCipher.end());
 
     // BY ZF: 3) 桩编码BCD(7)。
@@ -1450,11 +1867,12 @@ std::vector<uint8_t> CommProcess::buildLoginRequestBody() const
     return body;
 }
 
-std::vector<uint8_t> CommProcess::buildFeeModelRequestBody() const
+std::vector<uint8_t> CommProcess::buildFeeModelRequestBody(uint8_t gunNoBcd) const
 {
-    // BY ZF: 中石化2.0 0x09 计费模型请求信息体：仅桩编号BCD(10字节)。
+    // BY ZF: 中石化2.0 0x0D 枪计费模型请求信息体：桩编号BCD(7字节) + 枪号BCD(1字节)。
     std::vector<uint8_t> body;
-    appendOrderIdBcd10(body, m_config.cdzNo);
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    body.push_back(gunNoBcd);
     return body;
 }
 
@@ -1471,6 +1889,21 @@ std::vector<uint8_t> CommProcess::buildHeartbeatBody()
     // BY ZF: 按当前联调要求，心跳信息体仅上送桩编号（BCD 7字节）。
     std::vector<uint8_t> body;
     appendPileCodeBcd7(body, m_config.cdzNo);
+    return body;
+}
+
+std::vector<uint8_t> CommProcess::buildRemoteStartAckBody(uint8_t gun, uint8_t result) const
+{
+    std::vector<uint8_t> body;
+    if (gun >= m_gunRuntimeData.size()) {
+        return body;
+    }
+    // BY ZF: 0xA7 远程启动充电应答：交易流水号BCD16 + 桩编号BCD7 + 枪号BCD1 + 接收结果BCD1。
+    appendBcdFixed(body, m_gunRuntimeData[gun].orderNo, 16);
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    const int gunNo = static_cast<int>(gun) + 1;
+    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
+    body.push_back(static_cast<uint8_t>(result));
     return body;
 }
 
@@ -1575,15 +2008,23 @@ std::vector<uint8_t> CommProcess::buildChargeInfoBody(uint8_t gun)
 
 void CommProcess::reportChargeInfoPeriodic()
 {
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
     const uint8_t count = static_cast<uint8_t>(m_gunRuntimeData.size());
     for (uint8_t gun = 0; gun < count; ++gun) {
-        // BY ZF: 仅在充电中上送（当前映射 0x03）。
-        if (m_gunRuntimeData[gun].gunStatus != 0x03) {
+        if (gun >= m_lastChargeInfoReportByGun.size() || gun >= m_runtimeChangedByGun.size()) {
+            continue;
+        }
+        const bool forceSend = (m_runtimeChangedByGun[gun] != 0);
+        const bool charging = (m_gunRuntimeData[gun].gunStatus == 0x03);
+        const std::chrono::seconds interval = charging ? std::chrono::seconds(15) : std::chrono::seconds(300);
+        if (!forceSend && (now - m_lastChargeInfoReportByGun[gun] < interval)) {
             continue;
         }
         const std::vector<uint8_t> body = buildChargeInfoBody(gun);
         if (!body.empty()) {
             sendPlatformFrame(kCmdChargeInfo, body);
+            m_lastChargeInfoReportByGun[gun] = now;
+            m_runtimeChangedByGun[gun] = 0;
         }
     }
 }
@@ -1602,8 +2043,17 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
         break;
     case LOGIN_REQ_FEE_MODEL: {
         if (now - m_lastLoginAction >= std::chrono::seconds(m_config.loginRetrySec)) {
-            if (sendPlatformFrame(kCmdFeeModelReq, buildFeeModelRequestBody())) {
-                m_logSender.info("platform_login_step", "fee_model_req_sent");
+            bool allSent = true;
+            const uint8_t gunCount = (m_config.gunCount == 0) ? 1 : m_config.gunCount;
+            for (uint8_t i = 0; i < gunCount; ++i) {
+                const uint8_t gunNoBcd = static_cast<uint8_t>(i + 1); // BY ZF: 枪号按 01/02... 发送
+                if (!sendPlatformFrame(kCmdGunFeeModelReq, buildFeeModelRequestBody(gunNoBcd))) {
+                    allSent = false;
+                    break;
+                }
+            }
+            if (allSent) {
+                m_logSender.info("platform_login_step", "gun_fee_model_req_sent");
             } else {
                 closePlatformTcp();
             }
@@ -1613,7 +2063,10 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
     }
     case LOGIN_REQ_AUTH:
         if (now - m_lastLoginAction >= std::chrono::seconds(m_config.loginRetrySec)) {
-            if (sendPlatformFrame(kCmdLoginReq, buildLoginRequestBody())) {
+            const std::vector<uint8_t> loginBody = buildLoginRequestBody();
+            if (loginBody.empty()) {
+                m_logSender.warn("platform_login_step", "login_req_build_fail");
+            } else if (sendPlatformFrame(kCmdLoginReq, loginBody)) {
                 m_logSender.info("platform_login_step", "login_req_sent");
             } else {
                 closePlatformTcp();
@@ -1621,7 +2074,7 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
             m_lastLoginAction = now;
         }
         break;
-    case LOGIN_ONLINE:
+    case LOGIN_ONLINE: {
         if (now - m_lastHeartbeat >= std::chrono::seconds(m_config.tcpHeartbeatSec)) {
             if (!sendPlatformFrame(kCmdHeartbeat, buildHeartbeatBody())) {
                 closePlatformTcp();
@@ -1629,11 +2082,20 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
                 m_lastHeartbeat = now;
             }
         }
-        if (now - m_lastChargeInfoReport >= std::chrono::seconds(10)) {
+        bool hasRuntimeChange = false;
+        for (size_t i = 0; i < m_runtimeChangedByGun.size(); ++i) {
+            if (m_runtimeChangedByGun[i] != 0) {
+                hasRuntimeChange = true;
+                break;
+            }
+        }
+        // BY ZF: 外层每15秒调度一次；任一枪运行态变化时立即触发一次调度。
+        if (hasRuntimeChange || now - m_lastChargeInfoReport >= std::chrono::seconds(15)) {
             reportChargeInfoPeriodic();
             m_lastChargeInfoReport = now;
         }
         break;
+    }
     default:
         break;
     }
@@ -1712,9 +2174,17 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     if (frameLen != static_cast<size_t>(8 + totalLen)) {
         return;
     }
-    const uint16_t recvCrc = readU16BE(frame + frameLen - 2);
+    // BY ZF: 帧尾CRC按小端序读取。
+    const uint16_t recvCrc = static_cast<uint16_t>(
+                static_cast<uint16_t>(frame[frameLen - 2]) |
+                (static_cast<uint16_t>(frame[frameLen - 1]) << 8));
     const uint16_t calcCrc = calcCrc16Modbus(frame + 6, static_cast<size_t>(totalLen));
     if (recvCrc != calcCrc) {
+        if (m_config.debugTcp) {
+            std::cout << "[Comm][TCP][RX_CRC_FAIL] recv=0x" << std::hex << recvCrc
+                      << " calc=0x" << calcCrc << std::dec
+                      << " len=" << frameLen << std::endl;
+        }
         return;
     }
     const uint8_t encryptFlag = frame[15];
@@ -1729,11 +2199,38 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     }
     const size_t bodyLen = static_cast<size_t>(totalLen - 11);
     const uint8_t* bodyRaw = (bodyLen > 0) ? (frame + 17) : nullptr;
-    const std::vector<uint8_t> decBody = decryptBodyByFlag(encryptFlag, bodyRaw, bodyLen);
+    std::vector<uint8_t> decBody;
+    const bool keyAvailable = m_sm4SessionKeyReady || m_loginCryptoPrepared;
+    if (!decryptBodyByFlag(encryptFlag, bodyRaw, bodyLen, m_sm4SessionKey, keyAvailable, decBody)) {
+        if (m_config.debugTcp) {
+            std::cout << "[Comm][TCP][RX_BODY_DEC_FAIL] cmd=0x" << std::hex << static_cast<int>(cmd) << std::dec
+                      << " encFlag=0x" << std::hex << static_cast<int>(encryptFlag) << std::dec
+                      << " bodyLen=" << bodyLen
+                      << " keyReady=" << (keyAvailable ? 1 : 0)
+                      << std::endl;
+        }
+        m_logSender.warn("platform_rx_decrypt_fail", std::string("cmd=") + std::to_string(cmd));
+        return;
+    }
+    if (m_config.debugTcp && bodyLen > 0) {
+        std::cout << "[Comm][TCP][RX_BODY_DEC] cmd=0x" << std::hex << static_cast<int>(cmd) << std::dec
+                  << " encFlag=0x" << std::hex << static_cast<int>(encryptFlag) << std::dec
+                  << " rawLen=" << bodyLen
+                  << " decLen=" << decBody.size()
+                  << " decHex=" << (decBody.empty() ? "" : toHex(decBody.data(), decBody.size()))
+                  << std::endl;
+    }
     const uint8_t* body = decBody.empty() ? nullptr : decBody.data();
     const size_t decBodyLen = decBody.size();
 
     if (cmd == kCmdFeeModelAck) {
+        // BY ZF: 仅在全枪均非充电中时更新计费模型，避免充电过程中切换费率。
+        for (size_t i = 0; i < m_gunRuntimeData.size(); ++i) {
+            if (m_gunRuntimeData[i].gunStatus == 0x03) {
+                m_logSender.warn("platform_login_step", "fee_model_ack_ignored_charging");
+                return;
+            }
+        }
         FeeModel feeModel;
         if (!parseFeeModelAck00A(body, decBodyLen, feeModel)) {
             m_logSender.warn("platform_login_step", "fee_model_ack_parse_fail");
@@ -1804,14 +2301,32 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         uint8_t gun = 0;
         cJSON* startData = nullptr;
         FeeModel parsedFeeModel;
-        if (parseRemoteStart014(body, decBodyLen, gun, &startData, parsedFeeModel)) {
-            if (gun < m_feeModelByGun.size()) {
+        if (parseRemoteStart0A8(body, decBodyLen, gun, &startData, parsedFeeModel)) {
+            if (!parsedFeeModel.feeModelId.empty() && gun < m_feeModelByGun.size()) {
                 m_feeModelByGun[gun] = parsedFeeModel;
             }
             if (!parsedFeeModel.feeModelId.empty()) {
                 m_logSender.saveFeeModel(parsedFeeModel);
             }
             publishPlatCommand(gun, "start_charge", startData);
+
+            // BY ZF: 0xA8 下发后立即回复 0xA7 远程启动应答（当前联调口径固定成功0x01）。
+            const std::vector<uint8_t> ackBody = buildRemoteStartAckBody(gun, 0x01);
+            if (!ackBody.empty()) {
+                (void)sendPlatformFrame(kCmdRemoteStartAck, ackBody);
+            }
+        } else {
+            // BY ZF: 启动命令解析失败（常见为计费模型未就绪）：
+            // BY ZF: 回复0xA7失败，并立即重发0x0D枪计费模型请求。
+            const std::vector<uint8_t> nackBody = buildRemoteStartAckBody(gun, 0x00);
+            if (!nackBody.empty()) {
+                (void)sendPlatformFrame(kCmdRemoteStartAck, nackBody);
+            }
+            const uint8_t gunCount = (m_config.gunCount == 0) ? 1 : m_config.gunCount;
+            for (uint8_t i = 0; i < gunCount; ++i) {
+                (void)sendPlatformFrame(kCmdGunFeeModelReq, buildFeeModelRequestBody(static_cast<uint8_t>(i + 1)));
+            }
+            m_logSender.warn("platform_start_reject", "fee_model_not_ready_requery");
         }
         if (startData) {
             cJSON_Delete(startData);
@@ -1822,7 +2337,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     if (cmd == kCmdRemoteStopCmd) {
         uint8_t gun = 0;
         cJSON* stopData = nullptr;
-        if (parseRemoteStop015(body, decBodyLen, gun, &stopData)) {
+        if (parseRemoteStop036(body, decBodyLen, gun, &stopData)) {
             publishPlatCommand(gun, "stop_charge", stopData);
         }
         if (stopData) {
@@ -1834,7 +2349,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     if (cmd == kCmdRecordConfirm) {
         uint8_t gun = 0;
         cJSON* cfmData = nullptr;
-        if (parseRecordConfirm070(body, decBodyLen, gun, &cfmData)) {
+        if (parseRecordConfirm040(body, decBodyLen, gun, &cfmData)) {
             publishPlatCommand(gun, "record_cfm", cfmData);
         }
         if (cfmData) {
@@ -1876,8 +2391,17 @@ bool CommProcess::parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeMo
 
     size_t pos = 11;
     for (uint8_t i = 0; i < feeCount; ++i) {
-        chargeRateRaw.push_back(readU32BE(body + pos));
-        serviceRateRaw.push_back(readU32BE(body + pos + 4));
+        // BY ZF: 0x0A 费率字段按小端序编码（与平台示例一致）。
+        const uint32_t c = static_cast<uint32_t>(body[pos]) |
+                           (static_cast<uint32_t>(body[pos + 1]) << 8) |
+                           (static_cast<uint32_t>(body[pos + 2]) << 16) |
+                           (static_cast<uint32_t>(body[pos + 3]) << 24);
+        const uint32_t s = static_cast<uint32_t>(body[pos + 4]) |
+                           (static_cast<uint32_t>(body[pos + 5]) << 8) |
+                           (static_cast<uint32_t>(body[pos + 6]) << 16) |
+                           (static_cast<uint32_t>(body[pos + 7]) << 24);
+        chargeRateRaw.push_back(c);
+        serviceRateRaw.push_back(s);
         pos += 8;
     }
 
@@ -1895,16 +2419,17 @@ bool CommProcess::parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeMo
     feeModel.chargeFee.clear();
     feeModel.serviceFee.clear();
 
-    // BY ZF: 将48个半小时映射压缩为连续时段，内部费率按0.001元保存。
+    // BY ZF: 先缓存 feeCount 个费率组，再按48个半小时位图逐段切换生成时段。
+    // BY ZF: 中石化协议按 zero-based 编码：0..feeCount-1（0表示第1组）。
+    int prevFeeIdx = -1;
     for (int slot = 0; slot < 48; ++slot) {
-        const uint8_t idxByte = slotMap[static_cast<size_t>(slot)];
-        const bool newSeg = (slot == 0) || (idxByte != slotMap[static_cast<size_t>(slot - 1)]);
-        if (!newSeg) {
-            continue;
+        int feeIdx = static_cast<int>(slotMap[static_cast<size_t>(slot)]); // 0x00 => 第1组
+        if (feeIdx < 0 || feeIdx >= static_cast<int>(feeCount)) {
+            feeIdx = 0; // BY ZF: 异常值兜底到第1组
         }
 
-        const int feeIdx = static_cast<int>(idxByte); // 0x00 表示第1组
-        if (feeIdx < 0 || feeIdx >= static_cast<int>(feeCount)) {
+        const bool isNewSeg = (slot == 0) || (feeIdx != prevFeeIdx);
+        if (!isNewSeg) {
             continue;
         }
 
@@ -1921,6 +2446,8 @@ bool CommProcess::parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeMo
         const unsigned int serviceMilli = static_cast<unsigned int>((serviceRateRaw[static_cast<size_t>(feeIdx)] + 50U) / 100U);
         feeModel.chargeFee.push_back(chargeMilli);
         feeModel.serviceFee.push_back(serviceMilli);
+
+        prevFeeIdx = feeIdx;
     }
 
     if (feeModel.timeSeg.empty()) {
@@ -1930,86 +2457,105 @@ bool CommProcess::parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeMo
     return true;
 }
 
-bool CommProcess::parseRemoteStart014(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel)
+bool CommProcess::parseRemoteStart0A8(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel)
 {
     if (!body || !outData) {
         return false;
     }
-    // BY ZF: 0x14 最小长度：枪ID4 + 订单10 + 用户5 + 用户状态1 + 余额4 + 计费标志1 + 时段数1
-    if (bodyLen < 26) {
+    // BY ZF: 0xA8 最小长度：交易流水号16 + 桩编号7 + 枪号1 + 逻辑卡号8 + 物理卡号8 + 账户余额4 + 最大功率2
+    if (bodyLen < 46) {
         return false;
     }
 
-    const uint32_t gunId = readU32BE(body);
-    const uint8_t* orderBcd = body + 4;
-    const uint8_t* userBcd = body + 14;
-    const uint8_t userStatus = body[19];
-    const uint32_t energyBlock = readU32BE(body + 20);  //预充金额
-    const uint8_t billingFlag = body[24];
-    const uint8_t periodCount = body[25];
+    const uint8_t* tradeBcd = body;          // 16
+    const uint8_t* pileBcd = body + 16;      // 7
+    const uint8_t gunBcd = body[23];         // 1
+    const uint8_t* logicCardBcd = body + 24; // 8
+    const uint8_t* phyCardBin = body + 32;   // 8
+    const uint32_t balanceRaw = static_cast<uint32_t>(body[40]) |
+                                (static_cast<uint32_t>(body[41]) << 8) |
+                                (static_cast<uint32_t>(body[42]) << 16) |
+                                (static_cast<uint32_t>(body[43]) << 24);
+    const uint16_t maxPowerKw = static_cast<uint16_t>(body[44]) |
+                                (static_cast<uint16_t>(body[45]) << 8);
 
-    int gunIndex = -1;
-    for (size_t i = 0; i < m_config.gunIdList.size(); ++i) {
-        if (m_config.gunIdList[i] == gunId) {
-            gunIndex = static_cast<int>(i);
-            break;
-        }
+    const int gunNo = ((gunBcd >> 4) & 0x0F) * 10 + (gunBcd & 0x0F);
+    if (gunNo <= 0) {
+        return false;
     }
-    if (gunIndex < 0) {
+    const int gunIndex = gunNo - 1;
+    if (gunIndex < 0 || gunIndex >= static_cast<int>(m_gunRuntimeData.size())) {
         return false;
     }
     gun = static_cast<uint8_t>(gunIndex);
 
-    const std::string orderNo = bcdToDigitString(orderBcd, 10);
-    const std::string chargeUserNo = bcdToDigitString(userBcd, 5);
+    const std::string orderNo = bcdToDigitString(tradeBcd, 16);
+    const std::string chargeUserNo = bcdToDigitString(logicCardBcd, 8);
+    const std::string pileNo = bcdToDigitString(pileBcd, 7);
+    (void)pileNo;
 
-    feeModel.feeModelId = std::string("PLAT_") + orderNo.substr(0, orderNo.size() > 17 ? 17 : orderNo.size());
-    feeModel.timeNum = periodCount;
-    feeModel.timeSeg.clear();
-    feeModel.segFlag.clear();
-    feeModel.chargeFee.clear();
-    feeModel.serviceFee.clear();
-    feeModel.timeSeg.reserve(periodCount);
-    feeModel.segFlag.reserve(periodCount);
-    feeModel.chargeFee.reserve(periodCount);
-    feeModel.serviceFee.reserve(periodCount);
+    // BY ZF: 0xA8不携带时段费率，使用该枪已同步缓存的计费模型。
+    if (gun < m_feeModelByGun.size()) {
+        feeModel = m_feeModelByGun[gun];
+    } else {
+        feeModel.feeModelId.clear();
+        feeModel.timeNum = 0;
+        feeModel.timeSeg.clear();
+        feeModel.segFlag.clear();
+        feeModel.chargeFee.clear();
+        feeModel.serviceFee.clear();
+    }
+    // BY ZF: 无可用计费模型时拒绝启动（由上层回复0xA7失败并重发0x0D）。
+    const bool feeModelReady =
+            (!feeModel.feeModelId.empty()) &&
+            (feeModel.timeNum > 0) &&
+            (feeModel.timeSeg.size() >= static_cast<size_t>(feeModel.timeNum)) &&
+            (feeModel.chargeFee.size() >= static_cast<size_t>(feeModel.timeNum)) &&
+            (feeModel.serviceFee.size() >= static_cast<size_t>(feeModel.timeNum));
+    if (!feeModelReady) {
+        // BY ZF: 仅缓存订单号，供0xA7失败应答使用。
+        if (gun < m_gunRuntimeData.size()) {
+            m_gunRuntimeData[gun].orderNo = orderNo;
+        }
+        return false;
+    }
 
     cJSON* data = cJSON_CreateObject();
     cJSON_AddNumberToObject(data, "startTime", static_cast<double>(std::time(nullptr)) * 1000.0);
     cJSON_AddStringToObject(data, "chargeUserNo", chargeUserNo.c_str());
     cJSON_AddStringToObject(data, "orderNo", orderNo.c_str());
-    cJSON_AddNumberToObject(data, "chargeMode", 2);
-    cJSON_AddNumberToObject(data, "prechargeAmount", static_cast<double>(energyBlock) / 100.0);
+
+    cJSON_AddStringToObject(data, "logicCardNo", chargeUserNo.c_str());
+    cJSON_AddStringToObject(data, "physicalCardHex", toHex(phyCardBin, 8).c_str());
+    
+    cJSON_AddNumberToObject(data, "chargeMode", 0x60);
+    cJSON_AddNumberToObject(data, "prechargeAmount", static_cast<double>(balanceRaw) / 100.0);
+    cJSON_AddNumberToObject(data, "maxPowerKw", maxPowerKw);
     cJSON_AddNumberToObject(data, "feeModelNo", 0);
     cJSON_AddStringToObject(data, "feeModelId", feeModel.feeModelId.c_str());
-    cJSON_AddNumberToObject(data, "billingFlag", billingFlag);
-    cJSON_AddNumberToObject(data, "userStatus", userStatus);
-    cJSON_AddNumberToObject(data, "timeNum", periodCount);
+    cJSON_AddNumberToObject(data, "billingFlag", 0);
+    cJSON_AddNumberToObject(data, "userStatus", 0);
+    // BY ZF: 补充启动充电控制参数，供 tcu_logic/pile_controller 透传使用。
+    cJSON_AddNumberToObject(data, "loadControlSwitch", 0x02);
+    cJSON_AddNumberToObject(data, "plugAndChargeFlag", 0x01);
+    cJSON_AddNumberToObject(data, "auxPowerVoltage", 0x0C);
+    cJSON_AddNumberToObject(data, "mergeChargeFlag", 0x00);
 
+
+    // BY ZF: 费率相关字段（沿用已缓存计费模型）。
+    cJSON_AddNumberToObject(data, "timeNum", static_cast<int>(feeModel.timeNum));
     cJSON* timeSeg = cJSON_CreateArray();
     cJSON* chargeFee = cJSON_CreateArray();
     cJSON* serviceFee = cJSON_CreateArray();
-
-    const uint8_t* p = body + 26;
-    for (uint8_t i = 0; i < periodCount; ++i) {
-        const std::string startSeg = bcdHourToHhmm(p[0]);
-        const std::string endSeg = bcdHourToHhmm(p[1]);
-        const uint16_t chargeFeeCent = readU16BE(p + 2);
-        const uint16_t serviceFeeCent = readU16BE(p + 4);
-
-        feeModel.timeSeg.push_back(startSeg);
-        feeModel.segFlag.push_back(0);
-        feeModel.chargeFee.push_back(static_cast<unsigned int>(chargeFeeCent) * 10U);
-        feeModel.serviceFee.push_back(static_cast<unsigned int>(serviceFeeCent) * 10U);
-
-        cJSON_AddItemToArray(timeSeg, cJSON_CreateString(startSeg.c_str()));
-        cJSON_AddItemToArray(chargeFee, cJSON_CreateNumber(static_cast<double>(chargeFeeCent) / 100.0));
-        cJSON_AddItemToArray(serviceFee, cJSON_CreateNumber(static_cast<double>(serviceFeeCent) / 100.0));
-        p += 6;
-
-        (void)endSeg;
+    for (size_t i = 0; i < feeModel.timeSeg.size(); ++i) {
+        cJSON_AddItemToArray(timeSeg, cJSON_CreateString(feeModel.timeSeg[i].c_str()));
     }
-
+    for (size_t i = 0; i < feeModel.chargeFee.size(); ++i) {
+        cJSON_AddItemToArray(chargeFee, cJSON_CreateNumber(static_cast<double>(feeModel.chargeFee[i]) / 1000.0));
+    }
+    for (size_t i = 0; i < feeModel.serviceFee.size(); ++i) {
+        cJSON_AddItemToArray(serviceFee, cJSON_CreateNumber(static_cast<double>(feeModel.serviceFee[i]) / 1000.0));
+    }
     cJSON_AddItemToObject(data, "timeSeg", timeSeg);
     cJSON_AddItemToObject(data, "chargeFee", chargeFee);
     cJSON_AddItemToObject(data, "serviceFee", serviceFee);
@@ -2032,15 +2578,16 @@ bool CommProcess::parseRemoteStart014(const uint8_t* body, size_t bodyLen, uint8
 
         rd.chargeUserNo = chargeUserNo;
         rd.orderNo = orderNo;
-        rd.chargeMode = 2;
-        rd.prechargeAmount = static_cast<double>(energyBlock) / 100.0;
-        rd.userStatus = static_cast<int>(userStatus);
-        rd.billingFlag = billingFlag;
+        rd.chargeMode = 0x60;
+        rd.prechargeAmount = static_cast<double>(balanceRaw) / 100.0;
+        rd.userStatus = 0;
+        rd.billingFlag = 0;
         rd.feeModelId = feeModel.feeModelId;
-        rd.feeTimeNum = static_cast<int>(periodCount);
+        rd.feeTimeNum = static_cast<int>(feeModel.timeNum);
         rd.feeSegments.clear();
+        const size_t periodCount = feeModel.timeSeg.size();
         rd.feeSegments.reserve(periodCount);
-        for (uint8_t i = 0; i < periodCount; ++i) {
+        for (size_t i = 0; i < periodCount; ++i) {
             FeeSegmentData seg;
             seg.startTs = feeModel.timeSeg[i];
             seg.endTs = (i + 1 < periodCount) ? feeModel.timeSeg[i + 1] : "2400";
@@ -2055,7 +2602,7 @@ bool CommProcess::parseRemoteStart014(const uint8_t* body, size_t bodyLen, uint8
     return true;
 }
 
-bool CommProcess::parseRemoteStop015(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData)
+bool CommProcess::parseRemoteStop036(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData)
 {
     if (!body || !outData) {
         return false;
@@ -2094,54 +2641,47 @@ bool CommProcess::parseRemoteStop015(const uint8_t* body, size_t bodyLen, uint8_
     return true;
 }
 
-bool CommProcess::parseRecordConfirm070(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData)
+bool CommProcess::parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData)
 {
     if (!body || !outData) {
         return false;
     }
-    // BY ZF: 0x70 最小长度：枪ID4 + 反馈结果1
-    if (bodyLen < 5) {
+    // BY ZF: 0x40 最小长度：交易流水号BCD16 + 确认结果1
+    if (bodyLen < 17) {
         return false;
     }
 
-    const uint32_t gunId = readU32BE(body);
-    const uint8_t feedbackResult = body[4];
-    const bool ackOk = (feedbackResult == 0x00 || feedbackResult == 0x04);
+    const std::string tradeNo = bcdToDigitString(body, 16);
+    const uint8_t feedbackResult = body[16];
+    const bool ackOk = (feedbackResult == 0x00);
 
-    int gunIndex = -1;
-    for (size_t i = 0; i < m_config.gunIdList.size(); ++i) {
-        if (m_config.gunIdList[i] == gunId) {
+    // BY ZF: 协议无枪号，按 tradeNo 在待确认缓存中反查所属枪。
+    int gunIndex = 0;
+    bool foundGun = false;
+    for (size_t i = 0; i < m_gunRuntimeData.size(); ++i) {
+        if (m_gunRuntimeData[i].pendingRecordTradeNo == tradeNo) {
             gunIndex = static_cast<int>(i);
+            foundGun = true;
             break;
         }
     }
-    if (gunIndex < 0) {
-        return false;
-    }
+    // BY ZF: 若未命中缓存，兜底归到0号枪，避免丢失确认消息。
+    (void)foundGun;
     gun = static_cast<uint8_t>(gunIndex);
 
-    // BY ZF: 0x70协议不带订单号，使用按枪缓存的最近上送tradeNo。
-    std::string tradeNo;
-    if (gun < m_gunRuntimeData.size()) {
-        tradeNo = m_gunRuntimeData[gun].pendingRecordTradeNo;
-    }
-
     cJSON* data = cJSON_CreateObject();
-    cJSON_AddNumberToObject(data, "gunId", static_cast<double>(gunId));
+    cJSON_AddStringToObject(data, "tradeNo", tradeNo.c_str());
     cJSON_AddNumberToObject(data, "confirmFlag", ackOk ? 1 : 0);
     cJSON_AddNumberToObject(data, "result", feedbackResult);
-    if (!tradeNo.empty()) {
-        cJSON_AddStringToObject(data, "tradeNo", tradeNo.c_str());
-    }
     *outData = data;
 
-    // BY ZF: 直接完成交易记录确认
-    if (ackOk) {
+    // BY ZF: 直接完成交易记录确认（0x00=上传成功）。
+    if (ackOk && !tradeNo.empty()) {
         m_logSender.confirmTradeRecord(tradeNo, 1);
     }
 
     // BY ZF: 成功应答后清理缓存，避免后续回包误关联旧记录。
-    if (ackOk && gun < m_gunRuntimeData.size()) {
+    if (ackOk && foundGun && gun < m_gunRuntimeData.size()) {
         m_gunRuntimeData[gun].pendingRecordTradeNo.clear();
     }
     return true;

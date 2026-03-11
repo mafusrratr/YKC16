@@ -247,7 +247,7 @@ bool CommProcess::loadConfig()
     m_config.tcpReconnectSec = cfg.getInt(section, "tcp_reconnect_sec", 3);
     m_config.tcpHeartbeatSec = cfg.getInt(section, "tcp_heartbeat_sec", 5);
     m_config.loginRetrySec = cfg.getInt(section, "login_retry_sec", 10);
-    m_config.debugTcp = (cfg.getInt(section, "debug_tcp", 0) != 0);
+    m_config.debugTcp = (cfg.getInt(section, "debug", 0) != 0);
 
     m_config.gunIdList.clear();
     m_config.gunTypeList.clear();
@@ -650,8 +650,6 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
     if (cJSON_IsArray(serviceFeeArr)) {
         periodCount = std::min(periodCount, cJSON_GetArraySize(serviceFeeArr));
     }
-    if (periodCount < 0) periodCount = 0;
-    if (periodCount > 24) periodCount = 24;
     body.push_back(static_cast<uint8_t>(periodCount));
 
     for (int i = 0; i < periodCount; ++i) {
@@ -1333,7 +1331,7 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
                 m_lastHeartbeat = now;
             }
         }
-        if (now - m_lastChargeInfoReport >= std::chrono::seconds(10)) {
+        if (now - m_lastChargeInfoReport >= std::chrono::seconds(15)) {
             reportChargeInfoPeriodic();
             m_lastChargeInfoReport = now;
         }

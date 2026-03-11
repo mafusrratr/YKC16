@@ -1,0 +1,65 @@
+# BY ZF: tcu_hmi 交叉编译 Makefile（Qt4.8.6）
+
+CROSS_COMPILE ?=
+CXX := $(CROSS_COMPILE)g++
+
+# BY ZF: 根据实际环境调整 Qt4 安装路径
+QT_ROOT ?= /opt/qt-4.8.6
+MOC ?= $(QT_ROOT)/bin/moc
+
+CCFLAGS := -Wall -O2 -std=c++11
+INCLUDES := -I../base -I../interfaces -I../base/mqtt -I../base/mqtt/include -I../base/cjson/include \
+            -I$(QT_ROOT)/include -I$(QT_ROOT)/include/QtCore -I$(QT_ROOT)/include/QtGui
+
+LDFLAGS := -L$(QT_ROOT)/lib -lQtGui -lQtCore -lpthread -lmosquitto -lcjson
+
+OBJ_DIR := obj
+RELEASE_DIR := release
+TARGET := $(RELEASE_DIR)/tcu_hmi
+
+SOURCES := main.cpp hmi_window.cpp ../base/common/config_manager_lite.cpp ../base/mqtt/mqtt_client.cpp moc_hmi_window.cpp
+OBJECTS := $(OBJ_DIR)/main.o \
+           $(OBJ_DIR)/hmi_window.o \
+           $(OBJ_DIR)/config_manager_lite.o \
+           $(OBJ_DIR)/mqtt_client.o \
+           $(OBJ_DIR)/moc_hmi_window.o
+
+.PHONY: all clean info
+
+all: $(TARGET)
+	@echo "Build completed: $(TARGET)"
+
+$(TARGET): $(OBJECTS)
+	@mkdir -p $(RELEASE_DIR)
+	$(CXX) $(OBJECTS) -o $@ $(LDFLAGS) -s
+
+$(OBJ_DIR)/main.o: main.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CCFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/hmi_window.o: hmi_window.cpp hmi_window.h
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CCFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/config_manager_lite.o: ../base/common/config_manager_lite.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CCFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/mqtt_client.o: ../base/mqtt/mqtt_client.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CCFLAGS) $(INCLUDES) -c $< -o $@
+
+moc_hmi_window.cpp: hmi_window.h
+	$(MOC) $< -o $@
+
+$(OBJ_DIR)/moc_hmi_window.o: moc_hmi_window.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CCFLAGS) $(INCLUDES) -c $< -o $@
+
+clean:
+	rm -rf $(OBJ_DIR) $(RELEASE_DIR) moc_hmi_window.cpp
+
+info:
+	@echo "CXX=$(CXX)"
+	@echo "QT_ROOT=$(QT_ROOT)"
+	@echo "MOC=$(MOC)"

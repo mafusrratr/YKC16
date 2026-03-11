@@ -69,7 +69,7 @@ struct FeeModel {
     std::string feeModelId;                              // 计费模型编号（最大17字符）
     unsigned char timeNum = 0;                          // 时段数（1-96）
     std::vector<std::string> timeSeg;                   // 时段开始时间点（每个4字符，如"0630"表示6点30分）
-    std::vector<unsigned int> segFlag;                  // 时段标志数组（长度必须等于 timeNum）
+    std::vector<unsigned int> segFlag;                  // 时段标志数组
     std::vector<unsigned int> chargeFee;                 // 电费数组（单位：0.001元，长度timeNum）
     std::vector<unsigned int> serviceFee;                // 服务费数组（单位：0.001元，长度timeNum）
 };
