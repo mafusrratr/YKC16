@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "../base/mqtt/mqtt_client.h"
+#include "../../base/mqtt/mqtt_client.h"
 
 struct HmiConfig {
     // BY ZF: 基础显示配置

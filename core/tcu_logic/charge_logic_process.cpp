@@ -134,6 +134,7 @@ namespace {
         uint8_t plugAndChargeFlag = 0x01;
         uint8_t auxPowerVoltage = 0x0C;
         uint8_t mergeChargeFlag = 0x00; // 0: 非合并充电, 1: 合并充电（后续由 pile 侧实现）
+        uint8_t v2g = 0x00; // BY ZF: 0=充电模式,1=放电模式
 
         if (src) {
             cJSON* v = cJSON_GetObjectItem(src, "loadControlSwitch");
@@ -148,12 +149,19 @@ namespace {
             if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(src, "mergedChargeFlag");
             if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(src, "combineChargeFlag");
             if (cJSON_IsNumber(v)) mergeChargeFlag = static_cast<uint8_t>(v->valueint);
+
+            // BY ZF: V2G 放电标志，透传给 pile_controller。
+            v = cJSON_GetObjectItem(src, "v2g");
+            if (cJSON_IsNumber(v) && v->valueint != 0) {
+                v2g = 0x01;
+            }
         }
 
         cJSON_AddNumberToObject(out, "loadControlSwitch", loadControlSwitch);
         cJSON_AddNumberToObject(out, "plugAndChargeFlag", plugAndChargeFlag);
         cJSON_AddNumberToObject(out, "auxPowerVoltage", auxPowerVoltage);
         cJSON_AddNumberToObject(out, "mergeChargeFlag", mergeChargeFlag);
+        cJSON_AddNumberToObject(out, "v2g", v2g);
         return out;
     }
 }

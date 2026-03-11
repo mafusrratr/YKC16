@@ -22,11 +22,11 @@ isEmpty(QRPATH) {
 
 INCLUDEPATH += $$PWD
 INCLUDEPATH += $$PWD/..
-INCLUDEPATH += $$PWD/../base
-INCLUDEPATH += $$PWD/../base/common
-INCLUDEPATH += $$PWD/../base/mqtt
-INCLUDEPATH += $$PWD/../base/mqtt/include
-INCLUDEPATH += $$PWD/../base/cjson/include
+INCLUDEPATH += $$PWD/../../base
+INCLUDEPATH += $$PWD/../../base/common
+INCLUDEPATH += $$PWD/../../base/mqtt
+INCLUDEPATH += $$PWD/../../base/mqtt/include
+INCLUDEPATH += $$PWD/../../base/cjson/include
 
 # BY ZF: qrencode 路径兼容（优先源码目录，找不到时允许外部 QRPATH 覆盖）。
 exists($$QRPATH/qrencode.h) {
@@ -49,16 +49,17 @@ exists($$QRPATH/qrencode.h) {
 SOURCES += \
     main.cpp \
     hmi_window.cpp \
-    ../base/common/config_manager_lite.cpp \
-    ../base/mqtt/mqtt_client.cpp
+    ../../base/common/config_manager_lite.cpp \
+    ../../base/mqtt/mqtt_client.cpp
 
 HEADERS += \
     hmi_window.h \
-    ../base/common/config_manager_lite.h \
-    ../base/mqtt/mqtt_client.h
+    ../../base/common/config_manager_lite.h \
+    ../../base/mqtt/mqtt_client.h
 
 LIBS += -lpthread -lmosquitto -lcjson -lm
-LIBS += -L$$PWD/../../extraLib
+LIBS += -L$$PWD/../../../extraLib/imx6ul
+LIBS += -L$$PWD/../../../extraLib
 
 DESTDIR = release
 OBJECTS_DIR = obj

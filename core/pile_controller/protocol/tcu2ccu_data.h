@@ -27,6 +27,7 @@ struct TCU2CCU_CmdStartChargeData {
     uint8_t plugAndChargeFlag;     // 即插即充标识，01H 非即插即充 02H 即插即充
     uint8_t auxPowerVoltage;       // 辅助电源电压，0CH 12V 18H 24V
     uint8_t mergeChargeFlag;       // 合并充电标志
+    uint8_t v2g;                   // BY ZF: 充放电模式标志，0=充电，1=放电
 };
 
 /**

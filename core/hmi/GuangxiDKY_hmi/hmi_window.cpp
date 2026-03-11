@@ -2,6 +2,7 @@
 
 #include <QPainter>
 #include <QPaintEvent>
+#include <QMouseEvent>
 #include <QDateTime>
 #include <QString>
 #include <QMutexLocker>
@@ -10,12 +11,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 
-#include "../base/common/config_manager_lite.h"
-#include "../base/cjson/include/cjson/cJSON.h"
-#include <qrencode.h>
+#include "../../base/common/config_manager_lite.h"
+#include "../../base/cjson/include/cjson/cJSON.h"
 
 namespace {
+
+static const int BTN_CHARGE_START = 0;
+static const int BTN_DISCHARGE_START = 1;
+static const int BTN_STOP = 2;
 
 // BY ZF: 将状态码映射为中文显示文本。
 static QString stateMessage(const std::string& state)
@@ -24,7 +29,7 @@ static QString stateMessage(const std::string& state)
         return QString::fromUtf8("请插枪");
     }
     if (state == "PREPARE") {
-        return QString::fromUtf8("请扫码启动");
+        return QString::fromUtf8("请点击启动按钮");
     }
     if (state == "STARTING") {
         return QString::fromUtf8("充电启动中...");
@@ -128,13 +133,8 @@ bool HmiWindow::loadConfig()
     m_config.mqttUsername = cfg.getString(section, "mqtt_username", "");
     m_config.mqttPassword = cfg.getString(section, "mqtt_password", "");
 
-    m_gunCount = cfg.getInt(section, "gun_count", 1);
-    if (m_gunCount < 1) {
-        m_gunCount = 1;
-    }
-    if (m_gunCount > 2) {
-        m_gunCount = 2;
-    }
+    // BY ZF: 广西DKY HMI 固定单枪显示。
+    m_gunCount = 1;
 
     return true;
 }
@@ -180,8 +180,6 @@ void HmiWindow::onMqttConnected(int rc)
     m_mqtt.subscribe(p + "/logic/+/event", 2);
     m_mqtt.subscribe(p + "/logic/+/feeData", 1);
     m_mqtt.subscribe(p + "/pile/+/data", 0);
-    m_mqtt.subscribe(p + "/plat/+/event", 1);
-    m_mqtt.subscribe(p + "/plat/+/setConfig", 1);
 }
 
 void HmiWindow::onMqttMessage(const std::string& topic, const std::string& payload)
@@ -205,12 +203,6 @@ void HmiWindow::onMqttMessage(const std::string& topic, const std::string& paylo
         return;
     }
 
-    if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/plat/", gun, tail)) {
-        if (gun <= 1 && (tail == "event" || tail == "setConfig")) {
-            handlePlatEvent(gun, payload);
-        }
-        return;
-    }
 }
 
 void HmiWindow::handleLogicEvent(uint8_t gun, const std::string& payload)
@@ -280,138 +272,6 @@ void HmiWindow::handlePileData(uint8_t gun, const std::string& payload)
     QMetaObject::invokeMethod(this, "onRefreshUi", Qt::QueuedConnection);
 }
 
-void HmiWindow::handlePlatEvent(uint8_t gun, const std::string& payload)
-{
-    (void)gun;
-
-    cJSON* root = cJSON_Parse(payload.c_str());
-    if (!root) {
-        return;
-    }
-
-    cJSON* type = cJSON_GetObjectItem(root, "type");
-    cJSON* cmd = cJSON_GetObjectItem(root, "cmd");
-    cJSON* data = cJSON_GetObjectItem(root, "data");
-
-    const bool isSetConfigType = (type && cJSON_IsString(type) && type->valuestring && std::strcmp(type->valuestring, "setConfig") == 0);
-    const bool isSetConfigCmd = (cmd && cJSON_IsString(cmd) && cmd->valuestring && std::strcmp(cmd->valuestring, "setConfig") == 0);
-    if ((!isSetConfigType && !isSetConfigCmd) || !cJSON_IsObject(data)) {
-        cJSON_Delete(root);
-        return;
-    }
-
-    QMutexLocker locker(&m_dataMutex);
-
-    // BY ZF: 读取枪数量并限制在 1~2。
-    cJSON* gunCount = cJSON_GetObjectItem(data, "gunCount");
-    if (gunCount && cJSON_IsNumber(gunCount)) {
-        int gc = gunCount->valueint;
-        if (gc < 1) {
-            gc = 1;
-        }
-        if (gc > 2) {
-            gc = 2;
-        }
-        m_gunCount = gc;
-    }
-
-    // BY ZF: 保存桩编号。
-    cJSON* cdzId = cJSON_GetObjectItem(data, "cdzId");
-    if (cdzId) {
-        if (cJSON_IsString(cdzId) && cdzId->valuestring) {
-            m_cdzId = cdzId->valuestring;
-        } else if (cJSON_IsNumber(cdzId)) {
-            char tmp[64] = {0};
-            std::snprintf(tmp, sizeof(tmp), "%.0f", cdzId->valuedouble);
-            m_cdzId = tmp;
-        }
-    }
-
-    // BY ZF: 保存运营商 ID（二维码规则使用）。
-    cJSON* operatorId = cJSON_GetObjectItem(data, "operatorId");
-    if (operatorId) {
-        if (cJSON_IsString(operatorId) && operatorId->valuestring) {
-            m_operatorId = operatorId->valuestring;
-        } else if (cJSON_IsNumber(operatorId)) {
-            char tmp[64] = {0};
-            std::snprintf(tmp, sizeof(tmp), "%.0f", operatorId->valuedouble);
-            m_operatorId = tmp;
-        }
-    }
-
-    // BY ZF: 保存 MAC 地址（优先 macAddr，兼容 mac）。
-    cJSON* macAddr = cJSON_GetObjectItem(data, "macAddr");
-    if (!macAddr) {
-        macAddr = cJSON_GetObjectItem(data, "mac");
-    }
-    if (macAddr) {
-        if (cJSON_IsString(macAddr) && macAddr->valuestring) {
-            m_macAddr = macAddr->valuestring;
-        } else if (cJSON_IsNumber(macAddr)) {
-            char tmp[64] = {0};
-            std::snprintf(tmp, sizeof(tmp), "%.0f", macAddr->valuedouble);
-            m_macAddr = tmp;
-        }
-    }
-
-    // BY ZF: 读取每枪 gunId。
-    cJSON* guns = cJSON_GetObjectItem(data, "guns");
-    if (guns && cJSON_IsArray(guns)) {
-        const int n = cJSON_GetArraySize(guns);
-        for (int i = 0; i < n; ++i) {
-            cJSON* item = cJSON_GetArrayItem(guns, i);
-            if (!cJSON_IsObject(item)) {
-                continue;
-            }
-            cJSON* g = cJSON_GetObjectItem(item, "gun");
-            if (!g || !cJSON_IsNumber(g)) {
-                continue;
-            }
-            const int idx = g->valueint;
-            if (idx < 0 || idx > 1) {
-                continue;
-            }
-
-            cJSON* gid = cJSON_GetObjectItem(item, "gunId");
-            if (gid) {
-                if (cJSON_IsString(gid) && gid->valuestring) {
-                    m_guns[idx].gunId = gid->valuestring;
-                } else if (cJSON_IsNumber(gid)) {
-                    char tmp[64] = {0};
-                    std::snprintf(tmp, sizeof(tmp), "%.0f", gid->valuedouble);
-                    m_guns[idx].gunId = tmp;
-                }
-            }
-
-            m_guns[idx].configured = true;
-            rebuildQrPayload(idx);
-        }
-    }
-
-    // BY ZF: 保障在仅更新运营商/MAC时，二维码也会随之刷新。
-    for (int i = 0; i < 2; ++i) {
-        rebuildQrPayload(i);
-    }
-
-    cJSON_Delete(root);
-    // BY ZF: 配置变化后主动刷新（跨线程使用队列调用）。
-    QMetaObject::invokeMethod(this, "onRefreshUi", Qt::QueuedConnection);
-}
-
-void HmiWindow::rebuildQrPayload(int gun)
-{
-    if (gun < 0 || gun > 1) {
-        return;
-    }
-
-    const std::string gunId = m_guns[gun].gunId.empty() ? std::to_string(gun) : m_guns[gun].gunId;
-    const std::string operatorId = m_operatorId.empty() ? std::string("0") : m_operatorId;
-    const std::string macAddr = m_macAddr.empty() ? std::string("000000000000000000000000") : m_macAddr;
-
-    // BY ZF: PREPARE 阶段二维码规则：hlht://[枪ID].[运营商ID]/[MAC地址]
-    m_guns[gun].qrPayload = std::string("hlht://") + gunId + "." + operatorId + "/" + macAddr;
-}
-
 bool HmiWindow::parseTopicGun(const std::string& topic,
                               const std::string& prefix,
                               uint8_t& gun,
@@ -466,6 +326,7 @@ void HmiWindow::paintEvent(QPaintEvent* event)
             gunCount = 2;
         }
         snapshot = m_guns;
+        m_clickAreas.clear();
     }
 
     const int w = width();
@@ -507,10 +368,7 @@ void HmiWindow::drawGunPanel(QPainter& painter, const QRect& rect, const GunUiDa
     painter.setFont(bodyFont);
     painter.drawText(rect.adjusted(16, 44, -16, -12), Qt::AlignLeft | Qt::TextWordWrap, stateMessage(data.state));
 
-    if (data.state == "PREPARE") {
-        const QRect qrRect(rect.left() + 16, rect.top() + 90, rect.width() - 32, rect.height() - 150);
-        drawQrPlaceholder(painter, qrRect, data.qrPayload);
-    } else if (data.state == "CHARGING") {
+    if (data.state == "CHARGING") {
         const double chargedMinutes = data.chargedTime / 60.0;
         // BY ZF: 直接用 Qt 字符串拼接中文，避免 std::string 转码导致乱码。
         const QString detail = QString::fromUtf8(
@@ -536,6 +394,8 @@ void HmiWindow::drawGunPanel(QPainter& painter, const QRect& rect, const GunUiDa
         painter.drawText(rect.adjusted(16, 120, -16, -16), Qt::AlignLeft | Qt::AlignTop, detail);
     }
 
+    drawActionButtons(painter, rect, data, static_cast<uint8_t>(data.gun));
+
     painter.setFont(smallFont);
     const QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
     painter.drawText(rect.adjusted(16, 0, -16, -10), Qt::AlignLeft | Qt::AlignBottom, ts);
@@ -543,43 +403,128 @@ void HmiWindow::drawGunPanel(QPainter& painter, const QRect& rect, const GunUiDa
     painter.restore();
 }
 
-void HmiWindow::drawQrPlaceholder(QPainter& painter, const QRect& rect, const std::string& payload)
+bool HmiWindow::buttonVisible(const std::string& state, int btnType) const
 {
-    painter.save();
+    if (btnType == BTN_CHARGE_START || btnType == BTN_DISCHARGE_START) {
+        return (state == "IDLE" || state == "PREPARE" || state == "STOPPED");
+    }
+    if (btnType == BTN_STOP) {
+        return (state == "STARTING" || state == "CHARGING" || state == "STOPPING");
+    }
+    return false;
+}
 
-    const int side = std::min(rect.width(), rect.height() - 32);
-    const QRect codeRect(rect.left() + (rect.width() - side) / 2, rect.top(), side, side);
+QRect HmiWindow::buttonRect(const QRect& panelRect, int index, int total) const
+{
+    const int btnW = (panelRect.width() - 16 * (total + 1)) / total;
+    const int btnH = 60;
+    const int y = panelRect.bottom() - btnH - 20;
+    const int x = panelRect.left() + 16 + index * (btnW + 16);
+    return QRect(x, y, btnW, btnH);
+}
 
-    painter.fillRect(codeRect, Qt::white);
-    painter.setPen(Qt::NoPen);
+void HmiWindow::drawActionButtons(QPainter& painter, const QRect& rect, const GunUiData& data, uint8_t gun)
+{
+    struct BtnDef {
+        int type;
+        QString text;
+        QColor color;
+    };
+    std::vector<BtnDef> defs;
+    if (buttonVisible(data.state, BTN_CHARGE_START)) {
+        BtnDef d;
+        d.type = BTN_CHARGE_START;
+        d.text = QString::fromUtf8("充电启动");
+        d.color = QColor(34, 139, 34);
+        defs.push_back(d);
+    }
+    if (buttonVisible(data.state, BTN_DISCHARGE_START)) {
+        BtnDef d;
+        d.type = BTN_DISCHARGE_START;
+        d.text = QString::fromUtf8("放电启动");
+        d.color = QColor(30, 110, 200);
+        defs.push_back(d);
+    }
+    if (buttonVisible(data.state, BTN_STOP)) {
+        BtnDef d;
+        d.type = BTN_STOP;
+        d.text = QString::fromUtf8("停止");
+        d.color = QColor(210, 70, 50);
+        defs.push_back(d);
+    }
+    if (defs.empty()) {
+        return;
+    }
 
-    // BY ZF: 使用 qrencode 生成真实二维码矩阵并绘制。
-    QRcode* qr = QRcode_encodeString8bit(payload.c_str(), 0, QR_ECLEVEL_L);
-    if (qr && qr->width > 0 && qr->data) {
-        const int modules = qr->width;
-        const int cell = std::max(1, side / modules);
-        const int drawSide = cell * modules;
-        const int ox = codeRect.left() + (codeRect.width() - drawSide) / 2;
-        const int oy = codeRect.top() + (codeRect.height() - drawSide) / 2;
+    QFont btnFont("WenQuanYi Zen Hei", rect.width() >= 600 ? 26 : 20, QFont::Bold);
+    painter.setFont(btnFont);
+    painter.setPen(Qt::white);
+    for (size_t i = 0; i < defs.size(); ++i) {
+        QRect br = buttonRect(rect, static_cast<int>(i), static_cast<int>(defs.size()));
+        painter.setBrush(defs[i].color);
+        painter.drawRoundedRect(br, 10, 10);
+        painter.drawText(br, Qt::AlignCenter, defs[i].text);
+        ButtonClickArea area;
+        area.gun = gun;
+        area.type = defs[i].type;
+        area.rect = br;
+        m_clickAreas.push_back(area);
+    }
+}
 
-        const unsigned char* p = qr->data;
-        for (int y = 0; y < modules; ++y) {
-            for (int x = 0; x < modules; ++x, ++p) {
-                if ((*p & 0x1U) != 0U) {
-                    painter.fillRect(ox + x * cell, oy + y * cell, cell, cell, Qt::black);
-                }
-            }
+void HmiWindow::publishLogicCmd(uint8_t gun, const char* cmd, bool v2g)
+{
+    if (!m_mqttReady || !cmd) {
+        return;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "cmd", cmd);
+    cJSON* data = cJSON_CreateObject();
+    if (std::strcmp(cmd, "start_charge") == 0) {
+        cJSON_AddNumberToObject(data, "v2g", v2g ? 1 : 0);
+    }
+    cJSON_AddItemToObject(root, "data", data);
+    char* txt = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!txt) {
+        return;
+    }
+
+    std::ostringstream topic;
+    topic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gun) << "/cmd";
+    m_mqtt.publish(topic.str(), txt, 1, false);
+    cJSON_free(txt);
+}
+
+void HmiWindow::mousePressEvent(QMouseEvent* event)
+{
+    if (!event) {
+        return;
+    }
+    if (event->button() != Qt::LeftButton) {
+        return;
+    }
+
+    const QPoint pt = event->pos();
+    std::vector<ButtonClickArea> areas;
+    {
+        QMutexLocker locker(&m_dataMutex);
+        areas = m_clickAreas;
+    }
+
+    for (size_t i = 0; i < areas.size(); ++i) {
+        const ButtonClickArea& a = areas[i];
+        if (!a.rect.contains(pt)) {
+            continue;
         }
+        if (a.type == BTN_CHARGE_START) {
+            publishLogicCmd(a.gun, "start_charge", false);
+        } else if (a.type == BTN_DISCHARGE_START) {
+            publishLogicCmd(a.gun, "start_charge", true);
+        } else if (a.type == BTN_STOP) {
+            publishLogicCmd(a.gun, "stop_charge", false);
+        }
+        break;
     }
-
-    if (qr) {
-        QRcode_free(qr);
-    }
-
-    painter.setPen(QColor(20, 35, 55));
-    painter.setFont(QFont("WenQuanYi Zen Hei", 10, QFont::Normal));
-    painter.drawText(QRect(rect.left(), codeRect.bottom() + 6, rect.width(), 24), Qt::AlignCenter,
-                     QString::fromStdString(payload));
-
-    painter.restore();
 }

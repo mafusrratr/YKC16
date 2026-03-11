@@ -11,8 +11,8 @@
 #include <cstring>
 #include <iostream>
 
-#include "../base/common/config_manager_lite.h"
-#include "../base/cjson/include/cjson/cJSON.h"
+#include "../../base/common/config_manager_lite.h"
+#include "../../base/cjson/include/cjson/cJSON.h"
 #include <qrencode.h>
 
 namespace {

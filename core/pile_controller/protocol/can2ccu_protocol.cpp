@@ -361,6 +361,8 @@ int CAN2CCUProtocol::encodeStartCharge()
         m_cmdStartChargeData.loadControlSwitch = 0x02;  // 默认关闭功率分配
         m_cmdStartChargeData.plugAndChargeFlag = 0x01;  // 默认非即插即充
         m_cmdStartChargeData.auxPowerVoltage   = 0x0C;  // 默认12V
+        m_cmdStartChargeData.mergeChargeFlag   = 0x00;  // 默认非并充
+        m_cmdStartChargeData.v2g               = 0x00;  // 默认充电模式
         m_cmdStartChargeDataValid = true;
     }
     
@@ -382,11 +384,15 @@ int CAN2CCUProtocol::encodeStartChargeFrame()
     //       字节2=负荷控制开关 01H 启用 02H 关闭
     //       字节3=即插即充标识 01H 非即插即充 02H 即插即充 05H/06H 双枪
     //       字节4=辅助电源电压 0CH 12V 18H 24V
-    uint8_t businessData[3];
+    // BY ZF: 业务约定扩展：CAN 数据第8字节（canFrame[7]）01=充电, 02=放电。
+    uint8_t businessData[7];
+    memset(businessData, 0, sizeof(businessData));
     businessData[0] = m_cmdStartChargeData.loadControlSwitch;
     businessData[1] = m_cmdStartChargeData.plugAndChargeFlag;
     businessData[2] = m_cmdStartChargeData.auxPowerVoltage;
-    return sendSingleFrame(0x10, PGN_START_CHARGE, businessData, 3);
+    businessData[3] = (m_cmdStartChargeData.mergeChargeFlag!= 0) ? 0x02 : 0x01;
+    businessData[6] = (m_cmdStartChargeData.v2g != 0) ? 0x02 : 0x01;
+    return sendSingleFrame(0x10, PGN_START_CHARGE, businessData, 7);
 }
 
 int CAN2CCUProtocol::encodeStopCharge()

@@ -220,8 +220,20 @@ int CANPileController::startCharge()
         return -1;
     }
 
-    if (!m_versionOk.load() || !m_chargeParamOk.load()) {
-        std::cerr << "[CANPileController] Start charge blocked: version/charge params not ready\n";
+    const bool versionOk = m_versionOk.load();
+    const bool chargeParamOk = m_chargeParamOk.load();
+    if (!versionOk || !chargeParamOk) {
+        // BY ZF: 输出细分阻塞原因，便于定位是握手未完成还是已完成后被超时清零。
+        const bool versionRespValid = isVersionCheckResponseValid();
+        const bool chargeParamRespValid = isChargeParamResponseValid();
+        const bool commTimeout = m_commTimeoutActive.load();
+        std::cerr << "[CANPileController] Start charge blocked:"
+                  << " versionOk=" << (versionOk ? 1 : 0)
+                  << ", chargeParamOk=" << (chargeParamOk ? 1 : 0)
+                  << ", versionRespValid=" << (versionRespValid ? 1 : 0)
+                  << ", chargeParamRespValid=" << (chargeParamRespValid ? 1 : 0)
+                  << ", commTimeout=" << (commTimeout ? 1 : 0)
+                  << "\n";
         return -1;
     }
     

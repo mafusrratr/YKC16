@@ -4,11 +4,12 @@
 #include <QWidget>
 #include <QMutex>
 #include <QTimer>
+#include <QRect>
 #include <stdint.h>
 #include <string>
 #include <vector>
 
-#include "../base/mqtt/mqtt_client.h"
+#include "../../base/mqtt/mqtt_client.h"
 
 struct HmiConfig {
     // BY ZF: 基础显示配置
@@ -49,6 +50,7 @@ public:
 
 protected:
     virtual void paintEvent(QPaintEvent* event);
+    virtual void mousePressEvent(QMouseEvent* event);
 
 private slots:
     void onRefreshUi();
@@ -68,9 +70,6 @@ private:
         double totalAmount;
         double totalEnergy;
         double chargedTime;
-
-        // BY ZF: PREPARE 阶段二维码载荷
-        std::string qrPayload;
 
         GunUiData()
             : configured(false)
@@ -95,9 +94,7 @@ private:
     void handleLogicEvent(uint8_t gun, const std::string& payload);
     void handleFeeData(uint8_t gun, const std::string& payload);
     void handlePileData(uint8_t gun, const std::string& payload);
-    void handlePlatEvent(uint8_t gun, const std::string& payload);
-
-    void rebuildQrPayload(int gun);
+    void publishLogicCmd(uint8_t gun, const char* cmd, bool v2g);
 
     static bool parseTopicGun(const std::string& topic,
                               const std::string& prefix,
@@ -105,9 +102,17 @@ private:
                               std::string& tail);
 
     void drawGunPanel(QPainter& painter, const QRect& rect, const GunUiData& data);
-    void drawQrPlaceholder(QPainter& painter, const QRect& rect, const std::string& payload);
+    void drawActionButtons(QPainter& painter, const QRect& rect, const GunUiData& data, uint8_t gun);
+    bool buttonVisible(const std::string& state, int btnType) const;
+    QRect buttonRect(const QRect& panelRect, int index, int total) const;
 
 private:
+    struct ButtonClickArea {
+        uint8_t gun;
+        int type; // 0=charge_start, 1=discharge_start, 2=stop
+        QRect rect;
+    };
+
     HmiConfig m_config;
     MqttClient m_mqtt;
     bool m_mqttReady;
@@ -120,6 +125,7 @@ private:
     std::string m_operatorId;
     std::string m_macAddr;
     std::vector<GunUiData> m_guns;
+    std::vector<ButtonClickArea> m_clickAreas;
 };
 
 #endif // HMI_WINDOW_H

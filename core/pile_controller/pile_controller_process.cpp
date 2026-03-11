@@ -767,6 +767,8 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
         startCmd.loadControlSwitch = 0x02;
         startCmd.plugAndChargeFlag = 0x01;
         startCmd.auxPowerVoltage = 0x0C;
+        startCmd.mergeChargeFlag = 0x00;
+        startCmd.v2g = 0x00;
         if (cJSON_IsObject(data)) {
             cJSON* v = cJSON_GetObjectItem(data, "loadControlSwitch");
             if (cJSON_IsNumber(v)) startCmd.loadControlSwitch = static_cast<uint8_t>(v->valueint);
@@ -774,6 +776,15 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
             if (cJSON_IsNumber(v)) startCmd.plugAndChargeFlag = static_cast<uint8_t>(v->valueint);
             v = cJSON_GetObjectItem(data, "auxPowerVoltage");
             if (cJSON_IsNumber(v)) startCmd.auxPowerVoltage = static_cast<uint8_t>(v->valueint);
+            v = cJSON_GetObjectItem(data, "mergeChargeFlag");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(data, "mergedChargeFlag");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(data, "combineChargeFlag");
+            if (cJSON_IsNumber(v)) startCmd.mergeChargeFlag = static_cast<uint8_t>(v->valueint);
+            // BY ZF: v2g=1 时通过协议层将启动帧第8字节改为 0x02。
+            v = cJSON_GetObjectItem(data, "v2g");
+            if (cJSON_IsNumber(v) && v->valueint != 0) {
+                startCmd.v2g = 0x01;
+            }
         }
         can->setStartChargeData(&startCmd);
         can->startCharge();
