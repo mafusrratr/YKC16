@@ -47,6 +47,7 @@ private:
         uint16_t readStartReg;
         uint16_t readRegCount;
         uint16_t powerCtrlReg;
+        uint16_t startStopReg;
         uint8_t gunType;
         bool debugModbus;
 
@@ -64,7 +65,8 @@ private:
             , modbusAddr(1)
             , readStartReg(0x0000)
             , readRegCount(13)
-            , powerCtrlReg(0x1001)
+            , powerCtrlReg(0x2000)
+            , startStopReg(0x3000)
             , gunType(1)
             , debugModbus(false)
         {}
@@ -78,7 +80,7 @@ private:
         uint16_t soc;
         uint16_t connectStatus;
         uint16_t voltageDeciV;
-        uint16_t currentDeciA;
+        int16_t currentDeciA;
         uint16_t powerDeciKw;
         uint16_t chargeTimeSec;
         uint32_t chargedTimeBaseRaw;
@@ -130,12 +132,14 @@ private:
     uint16_t getRegisterValue(uint16_t reg) const;
     uint8_t selectedGun() const;
 
-    void publishPowerControlCommand(uint16_t deciKw);
+    bool publishPowerLimitCommand(uint16_t deciKw);
+    bool publishStartStopCommand(uint16_t value);
 
     static uint16_t crc16Modbus(const uint8_t* data, size_t len);
     static uint16_t readU16BE(const uint8_t* p);
     static void appendU16BE(std::vector<uint8_t>& out, uint16_t v);
     static uint16_t clampU16(double v, double scale);
+    static int16_t clampS16(double v, double scale);
 
 private:
     CommConfig m_cfg;

@@ -33,13 +33,13 @@
 ### 步骤3：发送地址一致的 0x06 写请求
 请求帧（HEX）：
 - `01 06 10 01 00 64 DD 21`
-  - 含义：地址=1，写寄存器0x1001，值=0x0064（10.0kW）
+  - 含义：地址=1，写寄存器0x2000，值=0x0064（10.0kW）
 
 期望结果：
 - 串口有响应
 - 响应帧应为（HEX）：`01 06 10 01 00 64 DD 21`
 - MQTT 发布主题：`tcu/plat/0/cmd`
-- MQTT 载荷中：`cmd=set_power_limit` 且 `data.powerLimitKw=10.0`
+- MQTT 载荷中：`cmd=power_ctrl` 且 `data.maxChargePowerKw=10.0`
 
 ## 判定标准
 - 步骤1、步骤3响应成功，步骤2无响应，则通过。

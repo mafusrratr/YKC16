@@ -39,6 +39,7 @@ struct CommConfig {
     std::string loginId;              // 登录ID（用于生成8字节登录秘钥）
     std::string macAddr;              // 24位十六进制 MAC（ASCII）
     std::string factoryCreditCode;    // 企业信用代码
+    std::vector<std::string> gunQrCodeList; // 每枪二维码配置
     std::string sm2PublicKey;         // 平台提供的初始SM2公钥（HEX/ASCII）
     uint8_t chargerType;              // 桩类型（固定0x01：直流）
     std::vector<uint32_t> gunIdList;  // 枪ID列表（每枪4字节）
@@ -73,6 +74,65 @@ public:
     void doCleanup() override;
 
 private:
+    // BY ZF: 启动完成(start_complete)缓存，供0x2D/0x15组帧复用。
+    struct StartCompleteData {
+        uint8_t successFlag;
+        uint8_t failReason;
+        std::array<uint8_t, 3> pileBmsVersion;
+        uint8_t batteryType;
+        uint16_t ratedCapacity;
+        uint16_t ratedTotalVoltage;
+        uint16_t cellMaxChargeVoltage;
+        uint16_t bmsMaxChargeVoltage;
+        uint16_t maxAllowChargeCurrent;
+        uint16_t currentTotalVoltage;
+        uint8_t maxAllowTemp;
+        uint16_t pileMaxOutputVoltage;
+        uint16_t pileMinOutputVoltage;
+        uint16_t pileMaxOutputCurrent;
+        uint16_t pileMinOutputCurrent;
+        std::string batteryManufacturer;
+        std::array<uint8_t, 4> batterySerial;
+        uint8_t batteryPropertyFlag;
+        uint8_t batteryProdYear;
+        uint8_t batteryProdMonth;
+        uint8_t batteryProdDay;
+        std::array<uint8_t, 3> batteryChargeCount;
+        uint8_t nominalEnergy;
+        uint8_t soc;
+        std::string vin;
+        std::array<uint8_t, 8> bmsSoftwareVersion;
+        uint8_t insulationFault;
+
+        StartCompleteData()
+            : successFlag(1)
+            , failReason(0)
+            , pileBmsVersion{{0}}
+            , batteryType(0)
+            , ratedCapacity(0)
+            , ratedTotalVoltage(0)
+            , cellMaxChargeVoltage(0)
+            , bmsMaxChargeVoltage(0)
+            , maxAllowChargeCurrent(0)
+            , currentTotalVoltage(0)
+            , maxAllowTemp(0)
+            , pileMaxOutputVoltage(0)
+            , pileMinOutputVoltage(0)
+            , pileMaxOutputCurrent(0)
+            , pileMinOutputCurrent(0)
+            , batterySerial{{0}}
+            , batteryPropertyFlag(0)
+            , batteryProdYear(0)
+            , batteryProdMonth(0)
+            , batteryProdDay(0)
+            , batteryChargeCount{{0}}
+            , nominalEnergy(0)
+            , soc(0)
+            , bmsSoftwareVersion{{0}}
+            , insulationFault(0)
+        {}
+    };
+
     // BY ZF: 分时段计费缓存项。
     struct FeeSegmentData {
         std::string startTs;
@@ -98,6 +158,8 @@ private:
         double prechargeAmount;
         int userStatus;
         uint8_t billingFlag;
+        
+        StartCompleteData startCompleteData;
         
         // 遥信数据
         uint8_t gunStatus;             // 枪工作状态（00空闲/01连接/02工作/03故障/04停止）
@@ -234,6 +296,7 @@ private:
     bool handlePileDataForPlatform(uint8_t gun, const std::string& payload);
     bool handlePileEventForPlatform(uint8_t gun, const std::string& payload);
     bool handleMeterDataForPlatform(uint8_t gun, const std::string& payload);
+    void publishInitialSetConfig();
 
     std::string ensureGunField(const std::string& payload, uint8_t gun) const; // 确保 payload 含 gun 字段
     std::string buildTopic(const char* module, uint8_t gun, const char* leaf) const;
@@ -257,7 +320,14 @@ private:
     std::vector<uint8_t> buildTimeSyncRequestBody() const;   // 0x0B 对时请求体
     std::vector<uint8_t> buildHeartbeatBody();               // 0x03 心跳请求体
     std::vector<uint8_t> buildChargeInfoBody(uint8_t gun);
+    std::vector<uint8_t> buildStartChargeResultBody(uint8_t gun) const; // 0x2D 启动完成结果体
+    std::vector<uint8_t> buildBrmBody(uint8_t gun) const; // 0x15 BRM上送体
+    std::vector<uint8_t> buildBcpBody(uint8_t gun) const; // 0x17 BCP参数配置上送体
+    std::vector<uint8_t> buildBstBody(uint8_t gun, cJSON* stopCompleteData) const; // 0x1D BST停止上送体
+    std::vector<uint8_t> buildCstBody(uint8_t gun) const; // 0x21 CST充电中止上送体
+    std::vector<uint8_t> buildBsmBody(uint8_t gun) const; // 0x25 BSM充电中止BMS信息体
     std::vector<uint8_t> buildRemoteStartAckBody(uint8_t gun, uint8_t result) const; // 0xA7 远程启动应答体
+    std::vector<uint8_t> buildQrCodeSetAckBody(uint8_t gunNoBcd, uint8_t result) const; // 0x5B 二维码设置应答体
     void reportChargeInfoPeriodic();
 
     // BY ZF: 平台来包解析
@@ -287,11 +357,14 @@ private:
     bool parseRemoteStart0A8(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel);
     bool parseRemoteStop036(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
     bool parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
+    bool parseQrCodeSet05A(const uint8_t* body, size_t bodyLen, uint8_t& gun, uint8_t& gunNoBcd, cJSON** outData) const;
     bool parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeModel& feeModel);
     bool buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data, std::vector<uint8_t>& body);
 
     // BY ZF: 平台命令发布
     bool publishPlatCommand(uint8_t gun, const char* cmd, cJSON* dataObj);
+    bool publishSetConfig(uint8_t gun, cJSON* dataObj);
+    bool persistGunQrCodeToIni(uint8_t gun, const std::string& qrCode);
 
 private:
     CommConfig m_config;                              // 运行配置

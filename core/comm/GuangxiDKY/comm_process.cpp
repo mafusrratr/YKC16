@@ -378,15 +378,9 @@ void CommProcess::handlePileData(uint8_t gun, const std::string& payload)
     if (!root) {
         return;
     }
+    cJSON* type = cJSON_GetObjectItem(root, "type");
     cJSON* data = cJSON_GetObjectItem(root, "data");
     if (data && cJSON_IsObject(data)) {
-        double v = 0.0;
-        if (getNumber(data, "voltage", v) || getNumber(data, "outputVoltage", v)) {
-            m_gunData[gun].voltageDeciV = clampU16(v, 10.0);
-        }
-        if (getNumber(data, "current", v) || getNumber(data, "outputCurrent", v)) {
-            m_gunData[gun].currentDeciA = clampU16(v, 10.0);
-        }
         int connect = 0;
         if (getInt(data, "yxVehicleConnectStatus", connect) || getInt(data, "vehicleConnectStatus", connect)) {
             m_gunData[gun].connectStatus = (connect == 1) ? 1 : 2;
@@ -402,9 +396,27 @@ void CommProcess::handlePileData(uint8_t gun, const std::string& payload)
             m_gunData[gun].soc = static_cast<uint16_t>(soc);
         }
 
-        const double powerKw = (static_cast<double>(m_gunData[gun].voltageDeciV) / 10.0) *
-                               (static_cast<double>(m_gunData[gun].currentDeciA) / 10.0) / 1000.0;
-        m_gunData[gun].powerDeciKw = clampU16(powerKw, 10.0);
+        // BY ZF: pile/yc 支持有符号电流（放电为负值）。
+        if (type && cJSON_IsString(type) && type->valuestring &&
+                std::strcmp(type->valuestring, "yc") == 0) {
+            double v = 0.0;
+            if (getNumber(data, "outputVoltage", v)) {
+                m_gunData[gun].voltageDeciV = clampU16(v, 10.0);
+            }
+
+            double c = 0.0;
+            if (getNumber(data, "outputCurrent", c)) {
+                m_gunData[gun].currentDeciA = clampS16(c, 10.0);
+            } else if (getNumber(data, "bmsMeasuredCurrent", c)) {
+                m_gunData[gun].currentDeciA = clampS16(c, 10.0);
+            } else if (getNumber(data, "bmsReqCurrent", c)) {
+                m_gunData[gun].currentDeciA = clampS16(c, 10.0);
+            }
+
+            const double powerKw = (static_cast<double>(m_gunData[gun].voltageDeciV) / 10.0) *
+                                   (static_cast<double>(m_gunData[gun].currentDeciA) / 10.0) / 1000.0;
+            m_gunData[gun].powerDeciKw = clampU16(std::fabs(powerKw), 10.0);
+        }
     }
     cJSON_Delete(root);
 }
@@ -442,6 +454,7 @@ void CommProcess::handleMeterData(uint8_t gun, const std::string& payload)
                           << " meterDeciKwh=" << m_gunData[gun].meterDeciKwh << std::endl;
             }
         }
+        // BY ZF: 电压/电流/功率统一使用 pile/yc 遥测，不再由 meter 覆盖。
     }
     cJSON_Delete(root);
 }
@@ -517,8 +530,19 @@ void CommProcess::processRequest(const std::vector<uint8_t>& frame)
         const uint16_t reg = readU16BE(&frame[2]);
         const uint16_t value = readU16BE(&frame[4]);
         if (reg == m_cfg.powerCtrlReg) {
-            publishPowerControlCommand(value);
-            resp = buildWriteEchoResponse(m_cfg.modbusAddr, reg, value);
+            if (publishPowerLimitCommand(value)) {
+                resp = buildWriteEchoResponse(m_cfg.modbusAddr, reg, value);
+            } else {
+                // BY ZF: 数据值非法或命令发布失败。
+                resp = buildExceptionResponse(m_cfg.modbusAddr, func, 0x03);
+            }
+        } else if (reg == m_cfg.startStopReg) {
+            if (publishStartStopCommand(value)) {
+                resp = buildWriteEchoResponse(m_cfg.modbusAddr, reg, value);
+            } else {
+                // BY ZF: 数据值非法或命令发布失败。
+                resp = buildExceptionResponse(m_cfg.modbusAddr, func, 0x03);
+            }
         } else {
             resp = buildExceptionResponse(m_cfg.modbusAddr, func, 0x02);
         }
@@ -595,7 +619,7 @@ uint16_t CommProcess::getRegisterValue(uint16_t reg) const
     case 0x0004: return rd.soc;
     case 0x0005: return rd.connectStatus;
     case 0x0006: return rd.voltageDeciV;
-    case 0x0007: return rd.currentDeciA;
+    case 0x0007: return static_cast<uint16_t>(rd.currentDeciA);
     case 0x0008: return rd.powerDeciKw;
     case 0x0009: return rd.chargeTimeSec;
     case 0x000A: return rd.chargeEnergyDeciKwh;
@@ -613,7 +637,7 @@ uint8_t CommProcess::selectedGun() const
     return static_cast<uint8_t>(std::min<size_t>(m_cfg.exportGun, m_gunData.size() - 1));
 }
 
-void CommProcess::publishPowerControlCommand(uint16_t deciKw)
+bool CommProcess::publishPowerLimitCommand(uint16_t deciKw)
 {
     const uint8_t gun = selectedGun();
 
@@ -622,21 +646,72 @@ void CommProcess::publishPowerControlCommand(uint16_t deciKw)
     cJSON_AddNumberToObject(root, "seq", static_cast<double>(++m_seq));
     cJSON_AddStringToObject(root, "source", "tcu_comm");
     cJSON_AddNumberToObject(root, "gun", gun);
-    cJSON_AddStringToObject(root, "cmd", "set_power_limit");
+    cJSON_AddStringToObject(root, "cmd", "power_ctrl");
 
     cJSON* data = cJSON_CreateObject();
-    cJSON_AddNumberToObject(data, "powerLimitKw", static_cast<double>(deciKw) / 10.0);
+    cJSON_AddNumberToObject(data, "maxChargePowerKw", static_cast<double>(deciKw) / 10.0);
     cJSON_AddNumberToObject(data, "powerLimitRaw", deciKw);
     cJSON_AddItemToObject(root, "data", data);
 
     char* out = cJSON_PrintUnformatted(root);
+    bool ok = false;
     if (out) {
         std::ostringstream topic;
         topic << m_cfg.mqttTopicPrefix << "/plat/" << static_cast<int>(gun) << "/cmd";
-        (void)m_mqtt.publish(topic.str(), out, 1, false);
+        ok = m_mqtt.publish(topic.str(), out, 1, false);
         free(out);
     }
     cJSON_Delete(root);
+    return ok;
+}
+
+bool CommProcess::publishStartStopCommand(uint16_t value)
+{
+    const uint8_t mode = static_cast<uint8_t>((value >> 8) & 0xFF);   // BY ZF: byte0 充放电标识
+    const uint8_t action = static_cast<uint8_t>(value & 0xFF);        // BY ZF: byte1 启停标识
+    if (m_cfg.debugModbus) {
+        std::cout << "[GuangxiDKY][CTRL] reg=0x" << std::hex << m_cfg.startStopReg
+                  << " value=0x" << value
+                  << " mode=0x" << static_cast<int>(mode)
+                  << " action=0x" << static_cast<int>(action)
+                  << std::dec << std::endl;
+    }
+    if (!((mode == 0x01) || (mode == 0x02))) {
+        return false;
+    }
+    if (!((action == 0x55) || (action == 0xAA))) {
+        return false;
+    }
+
+    const uint8_t gun = selectedGun();
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "ts", static_cast<double>(std::time(nullptr)) * 1000.0);
+    cJSON_AddNumberToObject(root, "seq", static_cast<double>(++m_seq));
+    cJSON_AddStringToObject(root, "source", "tcu_comm");
+    cJSON_AddNumberToObject(root, "gun", gun);
+    cJSON_AddStringToObject(root, "cmd", (action == 0xAA) ? "start_charge" : "stop_charge");
+
+    cJSON* data = cJSON_CreateObject();
+    
+    if (action == 0xAA) {
+        // BY ZF: mode=0x02 表示放电，透传 v2g=1 给 tcu_logic/pile_controller。
+        cJSON_AddNumberToObject(data, "v2g", (mode == 0x02) ? 1 : 0);
+    } else {
+        cJSON_AddNumberToObject(data, "stopReason", 1);
+    }
+    cJSON_AddItemToObject(root, "data", data);
+
+    char* out = cJSON_PrintUnformatted(root);
+    bool ok = false;
+    if (out) {
+        std::ostringstream topic;
+        topic << m_cfg.mqttTopicPrefix << "/plat/" << static_cast<int>(gun) << "/cmd";
+        ok = m_mqtt.publish(topic.str(), out, 1, false);
+        free(out);
+    }
+    cJSON_Delete(root);
+    return ok;
 }
 
 uint16_t CommProcess::crc16Modbus(const uint8_t* data, size_t len)
@@ -677,4 +752,19 @@ uint16_t CommProcess::clampU16(double v, double scale)
         return 65535;
     }
     return static_cast<uint16_t>(t);
+}
+
+int16_t CommProcess::clampS16(double v, double scale)
+{
+    if (scale <= 0.0) {
+        return 0;
+    }
+    const double t = std::floor(v * scale + (v >= 0.0 ? 0.5 : -0.5));
+    if (t >= 32767.0) {
+        return 32767;
+    }
+    if (t <= -32768.0) {
+        return -32768;
+    }
+    return static_cast<int16_t>(t);
 }

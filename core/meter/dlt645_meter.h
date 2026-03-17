@@ -31,11 +31,13 @@ struct MeterSerialConfig {
 
 struct MeterReading {
     double totalEnergy; // kWh
+    double reverseEnergy; // kWh
     double voltage;     // V
     double current;     // A
 
     MeterReading()
         : totalEnergy(0.0)
+        , reverseEnergy(0.0)
         , voltage(0.0)
         , current(0.0)
     {}

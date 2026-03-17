@@ -44,8 +44,10 @@ public:
 
     int setStartChargeData(const TCU2CCU_CmdStartChargeData* cmd);
     int setStopChargeData(const TCU2CCU_CmdStopChargeData* cmd);
+    int setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmd);
     int setVersionCheckData(const TCU2CCU_CmdVersionCheckData* cmd);
     int setChargeParamData(const TCU2CCU_CmdChargeParamData* cmd);
+    int powerAdjust();
 
     int getStartChargeResponse(TCU2CCU_StartChargeResponseData* out) const;
     bool isStartChargeResponseValid() const;
@@ -153,6 +155,7 @@ private:
     std::mutex m_protocolMutex;
     RetryState m_startReqRetry;
     RetryState m_stopReqRetry;
+    RetryState m_powerAdjustRetry;
     // BY ZF: 启动完成和停止完成状态
     uint8_t m_startCompleteLoadSwitch;
     uint8_t m_stopCompleteReason;

@@ -10,6 +10,7 @@
 #include <thread>
 #include <sstream>
 #include <cstring>
+#include <cmath>
 #include <cjson/cJSON.h>
 
 // BY ZF: 包含具体的IPileController实现类
@@ -377,7 +378,7 @@ void PileControllerProcess::updateStatusFromController()
             std::string payload = buildDataPayload(gunNo, "yc", [&yc20](cJSON* data) {
                 // BY ZF: 协议原始单位为 0.1V/0.1A，MQTT 上送按 V/A。
                 cJSON_AddNumberToObject(data, "outputVoltage", static_cast<double>(yc20.outputVoltage) / 10.0);
-                cJSON_AddNumberToObject(data, "outputCurrent", static_cast<double>(yc20.outputCurrent) / 10.0);
+                cJSON_AddNumberToObject(data, "outputCurrent", static_cast<double>(static_cast<int16_t>(yc20.outputCurrent)) / 10.0);
                 cJSON_AddNumberToObject(data, "soc", yc20.soc);
                 cJSON_AddNumberToObject(data, "batteryMinTemp", yc20.batteryMinTemp);
                 cJSON_AddNumberToObject(data, "batteryMaxTemp", yc20.batteryMaxTemp);
@@ -386,10 +387,10 @@ void PileControllerProcess::updateStatusFromController()
                 cJSON_AddNumberToObject(data, "pileEnvTemp", yc20.pileEnvTemp);
                 cJSON_AddNumberToObject(data, "guideVoltage", static_cast<double>(yc20.guideVoltage) / 10.0);
                 cJSON_AddNumberToObject(data, "bmsReqVoltage", static_cast<double>(yc20.bmsReqVoltage) / 10.0);
-                cJSON_AddNumberToObject(data, "bmsReqCurrent", static_cast<double>(yc20.bmsReqCurrent) / 10.0);
+                cJSON_AddNumberToObject(data, "bmsReqCurrent", static_cast<double>(static_cast<int16_t>(yc20.bmsReqCurrent)) / 10.0);
                 cJSON_AddNumberToObject(data, "chargeMode", yc20.chargeMode);
                 cJSON_AddNumberToObject(data, "bmsMeasuredVoltage", static_cast<double>(yc20.bmsMeasuredVoltage) / 10.0);
-                cJSON_AddNumberToObject(data, "bmsMeasuredCurrent", static_cast<double>(yc20.bmsMeasuredCurrent) / 10.0);
+                cJSON_AddNumberToObject(data, "bmsMeasuredCurrent", static_cast<double>(static_cast<int16_t>(yc20.bmsMeasuredCurrent)) / 10.0);
                 cJSON_AddNumberToObject(data, "estimatedRemainTime", yc20.estimatedRemainTime);
                 cJSON_AddNumberToObject(data, "interfaceTemp1", yc20.interfaceTemp1);
                 cJSON_AddNumberToObject(data, "interfaceTemp2", yc20.interfaceTemp2);
@@ -803,6 +804,32 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
         can->stopCharge();
     } else if (cmdStr == "clear_fault") {
         can->clearFault(static_cast<uint8_t>(gun));
+    } else if (cmdStr == "power_ctrl") {
+        double powerKw = 0.0;
+        bool hasPowerKw = false;
+        if (cJSON_IsNumber(data)) {
+            powerKw = data->valuedouble;
+            hasPowerKw = true;
+        } else if (cJSON_IsObject(data)) {
+            cJSON* v = cJSON_GetObjectItem(data, "maxChargePowerKw");
+            if (cJSON_IsNumber(v)) {
+                powerKw = v->valuedouble;
+                hasPowerKw = true;
+            }
+        }
+
+        if (hasPowerKw) {
+            // BY ZF: 仅处理绝对值方式功率控制，协议量纲 0.1kW/位，偏移 -1000.0kW。
+            if (powerKw < -1000.0) powerKw = -1000.0;
+            if (powerKw > 1000.0) powerKw = 1000.0;
+
+            TCU2CCU_CmdPowerAdjustData adjustCmd;
+            memset(&adjustCmd, 0, sizeof(adjustCmd));
+            adjustCmd.adjustType = 0x01;
+            adjustCmd.adjustParam = static_cast<uint16_t>(std::lround((powerKw + 1000.0) * 10.0));
+            can->setPowerAdjustData(&adjustCmd);
+            can->powerAdjust();
+        }
     }
 
     cJSON_Delete(root);

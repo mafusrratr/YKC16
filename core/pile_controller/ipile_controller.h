@@ -16,7 +16,7 @@
 struct PileStatus {
     uint8_t gunNo;              // 枪号
     uint16_t outputVoltage;     // 输出电压（0.1V）
-    uint16_t outputCurrent;     // 输出电流（0.1A）
+    int16_t outputCurrent;      // 输出电流（0.1A，含符号）
     uint32_t outputPower;       // 输出功率（W）
     uint32_t cumulativeEnergy;  // 累计电量（Wh）
     uint8_t workStatus;         // 工作状态
@@ -82,5 +82,4 @@ public:
 };
 
 #endif // IPILE_CONTROLLER_H
-
 

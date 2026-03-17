@@ -324,6 +324,7 @@ bool MeterProcess::readGunMeter(uint8_t gun, MeterReading& out, std::string& err
                       << " portIndex=" << portIdx
                       << " serial=" << m_ports[portIdx].serial.device
                       << " energy=" << out.totalEnergy
+                      << " reverseEnergy=" << out.reverseEnergy
                       << " voltage=" << out.voltage
                       << " current=" << out.current << std::endl;
         } else {
@@ -351,6 +352,8 @@ void MeterProcess::publishData(uint8_t gun, const MeterReading& value)
 
     cJSON* data = cJSON_CreateObject();
     cJSON_AddNumberToObject(data, "totalEnergy", value.totalEnergy);
+    // BY ZF: 增加反向有功总电能，供 V2G 场景使用
+    cJSON_AddNumberToObject(data, "ReverseEnergy", value.reverseEnergy);
     cJSON_AddNumberToObject(data, "voltage", value.voltage);
     cJSON_AddNumberToObject(data, "current", value.current);
     cJSON_AddItemToObject(root, "data", data);

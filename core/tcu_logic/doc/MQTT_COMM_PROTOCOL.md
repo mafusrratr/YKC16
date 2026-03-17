@@ -10,6 +10,7 @@
 ### 2.1 与 pile_controller 交互
 - 下发命令（由 tcu_logic → pile_controller）
   - `tcu/pile/{gun}/cmd`
+  - 支持命令：`start_charge` / `stop_charge` / `power_ctrl`
 - 上送命令/流程事件（由 pile_controller → tcu_logic）
   - `tcu/pile/{gun}/event`
   - 事件类型：`start_response/start_complete/stop_response/stop_complete/deviceErr_on/deviceErr_off`
@@ -39,9 +40,9 @@
 ### 2.4 与平台交互
 - 平台下发到 tcu_logic
   - `tcu/plat/{gun}/cmd`
-  - `tcu/plat/{gun}/setConfig`
 - tcu_logic 上报平台
   - `tcu/plat/{gun}/event`
+  - 其中配置类消息统一使用 `type=setConfig`，并由 `tcu_comm` 以 retain 方式发布
 
 ### 2.5 与 logger 交互（未确认记录回放）
 - logger 上送到 tcu_logic
@@ -81,6 +82,10 @@
 - `stop_charge`
 - `reset_error`
 - `set_policy`
+- `power_ctrl`
+
+说明：
+- `tcu/plat/{gun}/cmd` 统一使用 `cmd` 字段表示操作类型（与 `start_charge` 入口一致）。
 
 平台鉴权类 cmd（plat/cmd）：
 - `auth_result`：通用结果（`data.result == 1` 通过，其他失败）
@@ -117,6 +122,48 @@
 }
 ```
 
+平台功率控制命令（plat/cmd）：
+- `power_ctrl`：平台下发最大充电功率（kW），logic 透传到 pile
+```json
+{
+  "ts": 1736150005500,
+  "seq": 22,
+  "source": "platform",
+  "gun": 0,
+  "cmd": "power_ctrl",
+  "data": {
+    "maxChargePowerKw": 30.0
+  }
+}
+```
+
+处理规则：
+- logic 仅识别 `cmd=power_ctrl`（不再兼容 `type` 作为命令字段）
+- `data` 支持对象或数字：
+  - 对象优先读取 `maxChargePowerKw`（兼容 `powerLimitKw` / `powerKw` / `kw`）
+  - 数字：视为 `maxChargePowerKw`
+- 解析成功后发布到 `tcu/pile/{gun}/cmd`：
+```json
+{
+  "cmd": "power_ctrl",
+  "data": {
+    "maxChargePowerKw": 30.0
+  }
+}
+```
+- pile_controller 处理规则：
+  - 仅按“绝对值功率控制”处理
+  - `maxChargePowerKw` 转 CAN 业务数据：
+    - `adjustType = 0x01`
+    - `adjustParam = round((maxChargePowerKw + 1000.0) * 10.0)`
+  - 使用 `0x10/0x0F` 下发功率调节
+  - 在收到 `0x10` 应答前，按 250ms 周期重发
+  - 5s 未收到应答则停止重发，并打印超时日志
+- 解析失败时，发布 `tcu/logic/{gun}/event`：
+  - `event=cmd_reject`
+  - `data.cmd=power_ctrl`
+  - `data.reason=missing_max_charge_power_kw`
+
 平台记录确认命令（plat/cmd）：
 - `record_cfm`：平台确认某条充电记录已入平台账单
 ```json
@@ -133,30 +180,31 @@
 }
 ```
 
-平台配置确认下发（plat/setConfig）：
+平台配置下发（plat/event，retain）：
 ```json
 {
   "ts": 1772200000000,
   "seq": 12,
   "source": "tcu_comm",
   "gun": 0,
-  "cmd": "setConfig",
+  "type": "setConfig",
   "data": {
-    "cdzId": 58050010904022,
-    "feeModel": {
-      "timeNum": 2,
-      "timeSeg": ["0000", "1200"],
-      "chargeFee": [0.7, 0.9],
-      "serviceFee": [0.15, 0.15]
-    },
-    "gunCount": 2,
-    "guns": [
-      {"gun": 0, "gunId": 4294967295, "gunType": 1},
-      {"gun": 1, "gunId": 4294967295, "gunType": 1}
-    ]
+    "gunId": 4294967295,
+    "gunNo": 1,
+    "cdzNo": "46010003275590",
+    "factoryCreditCode": "FFFFFFFFF",
+    "macAddr": "251134003202671000000000",
+    "qrCode": "xxx"
   }
 }
 ```
+
+说明：
+- `tcu_comm` 在 MQTT 重连成功后会主动发布一次每枪 `setConfig`（retain）。
+- 中石化平台 `0x5A` 二维码下发解析成功后，`tcu_comm` 会：
+  1) 更新 `/usr/app/config/tcu_comm.ini` 中 `gun{N}_qrcode`；
+  2) 发布对应枪 `tcu/plat/{gun}/event` 的 `type=setConfig`（retain）；
+  3) 向平台回 `0x5B` 设置结果。
 
 `start_charge.data`（鉴权基础信息）建议字段：
 - `startTime`：启动时间戳（ms）

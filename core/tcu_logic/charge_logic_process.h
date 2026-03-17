@@ -144,6 +144,7 @@ private:
         std::string lastStartCmdData;           // 最近一次下发给 pile 的启动参数
         bool startingRetrySent;                 // STARTING 30s 重发是否已执行
         std::chrono::steady_clock::time_point startingEnterTime;  // 进入 STARTING 时间
+        std::chrono::steady_clock::time_point chargingEnterTime;  // 进入 CHARGING 时间（用于 chargedTime）
         std::chrono::steady_clock::time_point stoppingEnterTime;  // 进入 STOPPING 时间
         std::chrono::steady_clock::time_point lastMeterMsgTime;   // 最近电表消息时间
         std::chrono::steady_clock::time_point lastMeterValueTime; // 最近电量变化时间

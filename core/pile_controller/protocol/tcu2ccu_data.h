@@ -264,7 +264,7 @@ struct TCU2CCU_StatusVehicleIdData {
  */
 struct TCU2CCU_DataYC20 {
     uint16_t outputVoltage;             // 充电输出电压（0.1V，低字节在前）
-    uint16_t outputCurrent;               // 充电输出电流（0.1A，低字节在前）
+    int16_t outputCurrent;                // 充电输出电流（0.1A，低字节在前，含符号）
     uint8_t soc;                         // SOC（%）
     int16_t batteryMinTemp;               // 电池组最低温度（℃，已做-50偏移）
     int16_t batteryMaxTemp;               // 电池组最高温度（℃，已做-50偏移）
@@ -273,10 +273,10 @@ struct TCU2CCU_DataYC20 {
     int16_t pileEnvTemp;                 // 充电机环境温度（℃，已做-50偏移）
     uint16_t guideVoltage;               // 充电导引电压（0.1V，低字节在前）
     uint16_t bmsReqVoltage;              // BMS需求电压（0.1V，低字节在前）
-    uint16_t bmsReqCurrent;               // BMS需求电流（0.1A，低字节在前）
+    int16_t bmsReqCurrent;               // BMS需求电流（0.1A，低字节在前，含符号）
     uint8_t chargeMode;                   // 充电模式
     uint16_t bmsMeasuredVoltage;          // BMS充电电压测量值（0.1V，低字节在前）
-    uint16_t bmsMeasuredCurrent;           // BMS充电电流测量值（0.1A，低字节在前）
+    int16_t bmsMeasuredCurrent;          // BMS充电电流测量值（0.1A，低字节在前，含符号）
     uint16_t estimatedRemainTime;        // 估算剩余充电时间（min，低字节在前）
     int16_t interfaceTemp1;               // 充电接口温度探头1温度（充电接口1 DC+，℃，已做-50偏移）
     int16_t interfaceTemp2;              // 充电接口温度探头2温度（充电接口1 DC-，℃，已做-50偏移）

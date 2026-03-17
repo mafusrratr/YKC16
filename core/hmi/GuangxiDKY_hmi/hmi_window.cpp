@@ -23,7 +23,7 @@ static const int BTN_DISCHARGE_START = 1;
 static const int BTN_STOP = 2;
 
 // BY ZF: 将状态码映射为中文显示文本。
-static QString stateMessage(const std::string& state)
+static QString stateMessage(const std::string& state, bool dischargeMode)
 {
     if (state == "IDLE") {
         return QString::fromUtf8("请插枪");
@@ -32,9 +32,15 @@ static QString stateMessage(const std::string& state)
         return QString::fromUtf8("请点击启动按钮");
     }
     if (state == "STARTING") {
+        if (dischargeMode) {
+            return QString::fromUtf8("放电启动中...");
+        }
         return QString::fromUtf8("充电启动中...");
     }
     if (state == "CHARGING") {
+        if (dischargeMode) {
+            return QString::fromUtf8("放电进行中");
+        }
         return QString::fromUtf8("充电进行中");
     }
     if (state == "STOPPING") {
@@ -42,6 +48,9 @@ static QString stateMessage(const std::string& state)
     }
     if (state == "STOPPED") {
         return QString::fromUtf8("已完成充电，如需再次充电请重新插拔充电枪");
+    }
+    if (state == "ERROR") {
+        return QString::fromUtf8("充电桩故障");
     }
     return QString::fromUtf8("状态未知");
 }
@@ -180,6 +189,7 @@ void HmiWindow::onMqttConnected(int rc)
     m_mqtt.subscribe(p + "/logic/+/event", 2);
     m_mqtt.subscribe(p + "/logic/+/feeData", 1);
     m_mqtt.subscribe(p + "/pile/+/data", 0);
+    m_mqtt.subscribe(p + "/meter/+/data", 0);
 }
 
 void HmiWindow::onMqttMessage(const std::string& topic, const std::string& payload)
@@ -203,6 +213,13 @@ void HmiWindow::onMqttMessage(const std::string& topic, const std::string& paylo
         return;
     }
 
+    if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/meter/", gun, tail)) {
+        if (gun <= 1 && tail == "data") {
+            handleMeterData(gun, payload);
+        }
+        return;
+    }
+
 }
 
 void HmiWindow::handleLogicEvent(uint8_t gun, const std::string& payload)
@@ -220,6 +237,16 @@ void HmiWindow::handleLogicEvent(uint8_t gun, const std::string& payload)
         if (to && cJSON_IsString(to) && to->valuestring) {
             QMutexLocker locker(&m_dataMutex);
             m_guns[gun].state = to->valuestring;
+            if (m_guns[gun].state == "IDLE" || m_guns[gun].state == "STOPPED") {
+                m_guns[gun].dischargeMode = false;
+            }
+        }
+    } else if (evt && cJSON_IsString(evt) && evt->valuestring &&
+               std::strcmp(evt->valuestring, "auth_basis") == 0 && cJSON_IsObject(data)) {
+        cJSON* v2g = cJSON_GetObjectItem(data, "v2g");
+        if (v2g && cJSON_IsNumber(v2g)) {
+            QMutexLocker locker(&m_dataMutex);
+            m_guns[gun].dischargeMode = (v2g->valueint != 0);
         }
     }
 
@@ -259,17 +286,34 @@ void HmiWindow::handlePileData(uint8_t gun, const std::string& payload)
     cJSON* data = cJSON_GetObjectItem(root, "data");
 
     if (type && cJSON_IsString(type) && type->valuestring && std::strcmp(type->valuestring, "yc") == 0 && cJSON_IsObject(data)) {
-        const double v = getNumber(data, "outputVoltage", 0.0);
-        const double c = getNumber(data, "outputCurrent", 0.0);
         QMutexLocker locker(&m_dataMutex);
-        m_guns[gun].voltage = v;
-        m_guns[gun].current = c;
-        m_guns[gun].power = (v * c) / 1000.0;
+        // BY ZF: 支持 pile/yc 有符号电流；若 meter 未覆盖时也可直接显示。
+        m_guns[gun].voltage = getNumber(data, "outputVoltage", m_guns[gun].voltage);
+        m_guns[gun].current = getNumber(data, "outputCurrent",
+                             getNumber(data, "bmsMeasuredCurrent",
+                             getNumber(data, "bmsReqCurrent", m_guns[gun].current)));
+        m_guns[gun].power = (m_guns[gun].voltage * m_guns[gun].current) / 1000.0;
+        m_guns[gun].soc = static_cast<int>(getNumber(data, "soc", static_cast<double>(m_guns[gun].soc)));
+        const int conn = static_cast<int>(getNumber(data, "yxVehicleConnectStatus",
+                                                    getNumber(data, "vehicleConnectStatus",
+                                                              static_cast<double>(m_guns[gun].connectStatus))));
+        m_guns[gun].connectStatus = conn;
     }
 
     cJSON_Delete(root);
     // BY ZF: 遥测变化后主动刷新（跨线程使用队列调用）。
     QMetaObject::invokeMethod(this, "onRefreshUi", Qt::QueuedConnection);
+}
+
+void HmiWindow::handleMeterData(uint8_t gun, const std::string& payload)
+{
+    cJSON* root = cJSON_Parse(payload.c_str());
+    if (!root) {
+        return;
+    }
+    (void)gun;
+    // BY ZF: HMI 电压/电流/功率统一使用 pile/yc 数据，meter 消息不再覆盖显示值。
+    cJSON_Delete(root);
 }
 
 bool HmiWindow::parseTopicGun(const std::string& topic,
@@ -366,24 +410,40 @@ void HmiWindow::drawGunPanel(QPainter& painter, const QRect& rect, const GunUiDa
     painter.drawText(rect.adjusted(16, 12, -16, -12), Qt::AlignLeft | Qt::AlignTop, title);
 
     painter.setFont(bodyFont);
-    painter.drawText(rect.adjusted(16, 44, -16, -12), Qt::AlignLeft | Qt::TextWordWrap, stateMessage(data.state));
+    painter.drawText(rect.adjusted(16, 44, -16, -12), Qt::AlignLeft | Qt::TextWordWrap, stateMessage(data.state, data.dischargeMode));
 
     if (data.state == "CHARGING") {
         const double chargedMinutes = data.chargedTime / 60.0;
-        // BY ZF: 直接用 Qt 字符串拼接中文，避免 std::string 转码导致乱码。
-        const QString detail = QString::fromUtf8(
-                                   "充电电压: %1 V\n"
-                                   "充电电流: %2 A\n"
-                                   "实时功率: %3 kW\n"
-                                   "实时金额: %4 元\n"
-                                   "充电电量: %5 kWh\n"
-                                   "充电时长: %6 分钟")
-                                   .arg(QString::number(data.voltage, 'f', 1))
-                                   .arg(QString::number(data.current, 'f', 1))
-                                   .arg(QString::number(data.power, 'f', 2))
-                                   .arg(QString::number(data.totalAmount, 'f', 2))
-                                   .arg(QString::number(data.totalEnergy, 'f', 3))
-                                   .arg(QString::number(chargedMinutes, 'f', 1));
+        QString detail;
+        if (data.dischargeMode) {
+            detail = QString::fromUtf8(
+                         "放电电压: %1 V\n"
+                         "放电电流: %2 A\n"
+                         "实时功率: %3 kW\n"
+                         "实时金额: %4 元\n"
+                         "放电电量: %5 kWh\n"
+                         "放电时长: %6 分钟")
+                         .arg(QString::number(data.voltage, 'f', 1))
+                         .arg(QString::number(data.current, 'f', 1))
+                         .arg(QString::number(data.power, 'f', 2))
+                         .arg(QString::number(data.totalAmount, 'f', 2))
+                         .arg(QString::number(data.totalEnergy, 'f', 3))
+                         .arg(QString::number(chargedMinutes, 'f', 1));
+        } else {
+            detail = QString::fromUtf8(
+                         "充电电压: %1 V\n"
+                         "充电电流: %2 A\n"
+                         "实时功率: %3 kW\n"
+                         "实时金额: %4 元\n"
+                         "充电电量: %5 kWh\n"
+                         "充电时长: %6 分钟")
+                         .arg(QString::number(data.voltage, 'f', 1))
+                         .arg(QString::number(data.current, 'f', 1))
+                         .arg(QString::number(data.power, 'f', 2))
+                         .arg(QString::number(data.totalAmount, 'f', 2))
+                         .arg(QString::number(data.totalEnergy, 'f', 3))
+                         .arg(QString::number(chargedMinutes, 'f', 1));
+        }
         painter.drawText(rect.adjusted(16, 90, -16, -16), Qt::AlignLeft | Qt::AlignTop, detail);
     } else if (data.state == "STOPPED") {
         const QString detail = QString::fromUtf8(
@@ -495,6 +555,16 @@ void HmiWindow::publishLogicCmd(uint8_t gun, const char* cmd, bool v2g)
     topic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gun) << "/cmd";
     m_mqtt.publish(topic.str(), txt, 1, false);
     cJSON_free(txt);
+
+    if (std::strcmp(cmd, "start_charge") == 0 && gun < m_guns.size()) {
+        QMutexLocker locker(&m_dataMutex);
+        m_guns[gun].dischargeMode = v2g;
+    } else if (std::strcmp(cmd, "stop_charge") == 0 && gun < m_guns.size()) {
+        QMutexLocker locker(&m_dataMutex);
+        if (m_guns[gun].state == "IDLE" || m_guns[gun].state == "STOPPED") {
+            m_guns[gun].dischargeMode = false;
+        }
+    }
 }
 
 void HmiWindow::mousePressEvent(QMouseEvent* event)

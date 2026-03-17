@@ -283,6 +283,31 @@ int CANPileController::stopCharge()
     return 0;
 }
 
+int CANPileController::powerAdjust()
+{
+    if (!m_initialized) {
+        return -1;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_protocolMutex);
+        if (m_protocol->encodePowerAdjust() != 0) {
+            std::cerr << "[CANPileController] Failed to encode and send power adjust command\n";
+            return -1;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_retryMutex);
+        m_powerAdjustRetry.active = true;
+        m_powerAdjustRetry.start = std::chrono::steady_clock::now();
+        m_powerAdjustRetry.lastSend = m_powerAdjustRetry.start;
+    }
+
+    std::cout << "[CANPileController] Power adjust command sent\n";
+    return 0;
+}
+
 void CANPileController::taskThread()
 {
     using namespace std::chrono;
@@ -314,6 +339,7 @@ void CANPileController::taskThread()
                     std::lock_guard<std::mutex> lock(m_retryMutex);
                     m_startReqRetry.active = false;
                     m_stopReqRetry.active = false;
+                    m_powerAdjustRetry.active = false;
                 }
                 {
                     std::lock_guard<std::mutex> lock(m_protocolMutex);
@@ -365,6 +391,7 @@ void CANPileController::taskThread()
             std::lock_guard<std::mutex> lock(m_retryMutex);
             if (m_startReqRetry.active) {
                 if (now - m_startReqRetry.start >= retryTimeout) {
+                    std::cerr << "[CANPileController] Start charge response timeout\n";
                     m_startReqRetry.active = false;
                 } else if (now - m_startReqRetry.lastSend >= retryInterval) {
                     std::lock_guard<std::mutex> protoLock(m_protocolMutex);
@@ -374,11 +401,22 @@ void CANPileController::taskThread()
             }
             if (m_stopReqRetry.active) {
                 if (now - m_stopReqRetry.start >= retryTimeout) {
+                    std::cerr << "[CANPileController] Stop charge response timeout\n";
                     m_stopReqRetry.active = false;
                 } else if (now - m_stopReqRetry.lastSend >= retryInterval) {
                     std::lock_guard<std::mutex> protoLock(m_protocolMutex);
                     m_protocol->encodeStopCharge();
                     m_stopReqRetry.lastSend = now;
+                }
+            }
+            if (m_powerAdjustRetry.active) {
+                if (now - m_powerAdjustRetry.start >= retryTimeout) {
+                    std::cerr << "[CANPileController] Power adjust response timeout\n";
+                    m_powerAdjustRetry.active = false;
+                } else if (now - m_powerAdjustRetry.lastSend >= retryInterval) {
+                    std::lock_guard<std::mutex> protoLock(m_protocolMutex);
+                    m_protocol->encodePowerAdjust();
+                    m_powerAdjustRetry.lastSend = now;
                 }
             }
             // 启动完成/停止完成应答只发送一次，不参与重发
@@ -441,6 +479,14 @@ int CANPileController::setVersionCheckData(const TCU2CCU_CmdVersionCheckData* cm
         return -1;
     }
     return m_protocol->setVersionCheckData(cmd);
+}
+
+int CANPileController::setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmd)
+{
+    if (!m_initialized || !m_protocol) {
+        return -1;
+    }
+    return m_protocol->setPowerAdjustData(cmd);
 }
 
 int CANPileController::setChargeParamData(const TCU2CCU_CmdChargeParamData* cmd)
@@ -652,6 +698,10 @@ void CANPileController::receiveThread()
                 if (m_protocol->isStopChargeResponseValid()) {
                     std::lock_guard<std::mutex> lock(m_retryMutex);
                     m_stopReqRetry.active = false;
+                }
+                if (m_protocol->isPowerAdjustResponseValid()) {
+                    std::lock_guard<std::mutex> lock(m_retryMutex);
+                    m_powerAdjustRetry.active = false;
                 }
                 if (m_protocol->isStartCompleteDataValid()) {
                     TCU2CCU_CmdStartChargeData cmd;

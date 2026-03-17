@@ -52,6 +52,15 @@ namespace {
         return false;
     }
 
+    bool jsonGetInt(cJSON* obj, const char* key, int& out) {
+        cJSON* v = cJSON_GetObjectItem(obj, key);
+        if (v && cJSON_IsNumber(v)) {
+            out = v->valueint;
+            return true;
+        }
+        return false;
+    }
+
     std::string minuteToHHMM(int minuteOfDay) {
         if (minuteOfDay < 0) {
             minuteOfDay = 0;
@@ -471,6 +480,44 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
     }
     GunState& gs = m_gunStates[gun];
 
+    if (cmd == "power_ctrl") {
+        // BY ZF: 平台功率控制命令直接透传给 pile_controller 执行。
+        double maxChargePowerKw = 0.0;
+        bool hasPower = false;
+        if (cJSON_IsNumber(data)) {
+            maxChargePowerKw = data->valuedouble;
+            hasPower = true;
+        } else if (cJSON_IsObject(data)) {
+            cJSON* v = cJSON_GetObjectItem(data, "maxChargePowerKw");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(data, "powerLimitKw");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(data, "powerKw");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(data, "kw");
+            if (cJSON_IsNumber(v)) {
+                maxChargePowerKw = v->valuedouble;
+                hasPower = true;
+            }
+        }
+        if (!hasPower) {
+            cJSON* evt = cJSON_CreateObject();
+            cJSON_AddStringToObject(evt, "cmd", "power_ctrl");
+            cJSON_AddStringToObject(evt, "reason", "missing_max_charge_power_kw");
+            publishLogicEvent(gun, "cmd_reject", evt);
+            cJSON_Delete(evt);
+            return;
+        }
+
+        cJSON* pileData = cJSON_CreateObject();
+        cJSON_AddNumberToObject(pileData, "maxChargePowerKw", maxChargePowerKw);
+        publishPileCmd(gun, "power_ctrl", pileData);
+        cJSON_Delete(pileData);
+
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddNumberToObject(evt, "maxChargePowerKw", maxChargePowerKw);
+        publishLogicEvent(gun, "power_ctrl_forwarded", evt);
+        cJSON_Delete(evt);
+        return;
+    }
+
     if (cmd == "start_charge") {
         // BY ZF: platform 启动流程，测试阶段默认鉴权通过
         if (gs.state == STATE_PREPARE) {
@@ -803,13 +850,13 @@ void ChargeLogicProcess::publishFeeData(uint8_t gun)
     cJSON_AddNumberToObject(data, "totalAmount", roundTo5(gs.feeTotalElectricAmount + gs.feeTotalServiceAmount));
     cJSON_AddNumberToObject(data, "electicAmount", roundTo5(gs.feeTotalElectricAmount));
     cJSON_AddNumberToObject(data, "serviceAmount", roundTo5(gs.feeTotalServiceAmount));
-    // BY ZF: 充电时长（秒），从 startTimeMs 计算。
+    // BY ZF: 充电时长（秒），按“进入 CHARGING 到当前发送时刻”计算。
     double chargedTimeSec = 0.0;
-    if (gs.startTimeMs > 0) {
-        const uint64_t nowMs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-        if (nowMs > gs.startTimeMs) {
-            chargedTimeSec = static_cast<double>((nowMs - gs.startTimeMs) / 1000ULL);
+    if (gs.chargingEnterTime.time_since_epoch().count() > 0) {
+        const auto nowSteady = std::chrono::steady_clock::now();
+        if (nowSteady > gs.chargingEnterTime) {
+            chargedTimeSec = std::chrono::duration_cast<std::chrono::seconds>(
+                nowSteady - gs.chargingEnterTime).count();
         }
     }
     cJSON_AddNumberToObject(data, "chargedTime", chargedTimeSec);
@@ -1116,6 +1163,9 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     cJSON_AddNumberToObject(evt, "chargeMode", gs.chargeMode);
     cJSON_AddNumberToObject(evt, "prechargeAmount", gs.prechargeAmount);
     cJSON_AddNumberToObject(evt, "feeModelNo", gs.feeModelNo);
+    int v2g = 0;
+    jsonGetInt(data, "v2g", v2g);
+    cJSON_AddNumberToObject(evt, "v2g", (v2g != 0) ? 1 : 0);
     publishLogicEvent(gun, "auth_basis", evt);
     cJSON_Delete(evt);
 }
@@ -1444,6 +1494,12 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
         gs.startingEnterTime = std::chrono::steady_clock::time_point();
         gs.startingRetrySent = false;
     }
+    if (to == STATE_CHARGING) {
+        // BY ZF: 进入 CHARGING 时锁定计时起点，feeData.chargedTime 仅使用该起点计算。
+        gs.chargingEnterTime = std::chrono::steady_clock::now();
+    } else if (to == STATE_IDLE) {
+        gs.chargingEnterTime = std::chrono::steady_clock::time_point();
+    }
     publishStateChange(gun, prev, to, reason);
     if (to == STATE_STOPPED && prev == STATE_STOPPING) {
         logTradeRecordOnStopped(gun, reason);
@@ -1473,6 +1529,7 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.meterStableCount = 0;
     gs.lastStopCmdTime = std::chrono::steady_clock::time_point();
     gs.startingEnterTime = std::chrono::steady_clock::time_point();
+    gs.chargingEnterTime = std::chrono::steady_clock::time_point();
     gs.stoppingEnterTime = std::chrono::steady_clock::time_point();
     gs.lastMeterMsgTime = std::chrono::steady_clock::time_point();
     gs.lastMeterValueTime = std::chrono::steady_clock::time_point();

@@ -69,6 +69,7 @@ public:
     // 注意：这些方法编码完成后会直接调用通讯层发送，不再返回数据
     int encodeStartCharge();
     int encodeStopCharge();
+    int encodePowerAdjust();
     int encodeGetStatus(uint8_t gunNo);
     int encodeClearFault(uint8_t gunNo);
     
@@ -147,6 +148,7 @@ public:
      * @return 0成功，其他失败
      */
     int setStartChargeData(const TCU2CCU_CmdStartChargeData* cmdData);
+    int setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmdData);
     int setVersionCheckData(const TCU2CCU_CmdVersionCheckData* cmdData);
     int setChargeParamData(const TCU2CCU_CmdChargeParamData* cmdData);
     
@@ -179,6 +181,7 @@ public:
      * @return 0成功，其他失败
      */
     int getStopChargeData(TCU2CCU_CmdStopChargeData* outCmdData) const;
+    int getPowerAdjustData(TCU2CCU_CmdPowerAdjustData* outCmdData) const;
     
     /**
      * 获取停止充电应答数据（接收到的应答）
@@ -188,6 +191,9 @@ public:
     int getStopChargeResponseData(TCU2CCU_StopChargeResponseData* outData) const;
     bool isStopChargeResponseValid() const { return m_stopChargeResponseDataValid; }
     void clearStopChargeResponseValid() { m_stopChargeResponseDataValid = false; }
+
+    bool isPowerAdjustResponseValid() const { return m_powerAdjustResponseDataValid; }
+    void clearPowerAdjustResponseValid() { m_powerAdjustResponseDataValid = false; }
     
     /**
      * 获取版本校验应答数据（表23，CCU返回）
@@ -345,6 +351,13 @@ private:
     // BY ZF: 停止充电命令数据（下发）
     TCU2CCU_CmdStopChargeData m_cmdStopChargeData;
     bool m_cmdStopChargeDataValid;
+
+    // BY ZF: 功率调节命令数据（下发，仅处理绝对值模式）
+    TCU2CCU_CmdPowerAdjustData m_cmdPowerAdjustData;
+    bool m_cmdPowerAdjustDataValid;
+
+    // BY ZF: 功率调节应答标志（接收）
+    bool m_powerAdjustResponseDataValid;
     
     // BY ZF: 停止充电应答数据（接收）
     TCU2CCU_StopChargeResponseData m_stopChargeResponseData;
@@ -415,6 +428,7 @@ private:
      * @return 0成功，其他失败
      */
     int encodeStopChargeFrame();
+    int encodePowerAdjustFrame();
     
     /**
      * 发送单帧数据（单帧发送器）
@@ -453,6 +467,7 @@ private:
      * @return 0成功，其他失败
      */
     int decodeStopChargeResponse(const uint8_t* data, size_t dataLen);
+    int decodePowerAdjustResponse(const uint8_t* data, size_t dataLen);
     
     /**
      * 解码版本校验应答帧（表23，PGN=0x08，填充到成员变量）
@@ -594,7 +609,7 @@ private:
     static const uint16_t PGN_TIME_SYNC = 0x05;        // 对时命令
     static const uint16_t PGN_VERSION_CHECK = 0x07;     // 版本校验
     static const uint16_t PGN_PILE_CONFIG = 0x09;      // 充电桩参数信息
-    static const uint16_t PGN_PILE_STATUS_REQ = 0x0F;   // 充电桩实时信息请求
+    static const uint16_t PGN_POWER_ADJUST = 0x0F;     // 功率调节命令
     static const uint16_t PGN_START_CHARGE_ACK = 0x12; // 启动充电应答确认
     static const uint16_t PGN_STOP_CHARGE_ACK = 0x14;  // 停止充电应答确认
     static const uint16_t PGN_VIN_CONFIRM = 0x18;      // VIN信息确认
@@ -607,6 +622,7 @@ private:
     static const uint16_t PGN_TIME_SYNC_RESP = 0x06;       // 对时应答
     static const uint16_t PGN_VERSION_RESP = 0x08;         // 版本应答
     static const uint16_t PGN_PILE_CONFIG_ACK = 0x0A;      // 充电桩参数确认
+    static const uint16_t PGN_POWER_ADJUST_RESP = 0x10;    // 功率调节应答
     static const uint16_t PGN_START_COMPLETE = 0x11;       // 充电启动完成状态
     static const uint16_t PGN_STOP_COMPLETE = 0x13;         // 停止充电完成状态
     static const uint16_t PGN_VIN_INFO = 0x17;             // VIN信息

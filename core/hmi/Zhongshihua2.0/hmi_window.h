@@ -4,7 +4,6 @@
 #include <QWidget>
 #include <QMutex>
 #include <QTimer>
-#include <QRect>
 #include <stdint.h>
 #include <string>
 #include <vector>
@@ -50,7 +49,6 @@ public:
 
 protected:
     virtual void paintEvent(QPaintEvent* event);
-    virtual void mousePressEvent(QMouseEvent* event);
 
 private slots:
     void onRefreshUi();
@@ -70,9 +68,10 @@ private:
         double totalAmount;
         double totalEnergy;
         double chargedTime;
-        bool dischargeMode;
-        int soc;
-        int connectStatus;
+
+        // BY ZF: PREPARE 阶段二维码载荷
+        std::string qrPayload;
+        bool hasCustomQr;
 
         GunUiData()
             : configured(false)
@@ -84,9 +83,7 @@ private:
             , totalAmount(0.0)
             , totalEnergy(0.0)
             , chargedTime(0.0)
-            , dischargeMode(false)
-            , soc(0)
-            , connectStatus(0)
+            , hasCustomQr(false)
         {
         }
     };
@@ -100,8 +97,9 @@ private:
     void handleLogicEvent(uint8_t gun, const std::string& payload);
     void handleFeeData(uint8_t gun, const std::string& payload);
     void handlePileData(uint8_t gun, const std::string& payload);
-    void handleMeterData(uint8_t gun, const std::string& payload);
-    void publishLogicCmd(uint8_t gun, const char* cmd, bool v2g);
+    void handlePlatEvent(uint8_t gun, const std::string& payload);
+
+    void rebuildQrPayload(int gun);
 
     static bool parseTopicGun(const std::string& topic,
                               const std::string& prefix,
@@ -109,17 +107,9 @@ private:
                               std::string& tail);
 
     void drawGunPanel(QPainter& painter, const QRect& rect, const GunUiData& data);
-    void drawActionButtons(QPainter& painter, const QRect& rect, const GunUiData& data, uint8_t gun);
-    bool buttonVisible(const std::string& state, int btnType) const;
-    QRect buttonRect(const QRect& panelRect, int index, int total) const;
+    void drawQrPlaceholder(QPainter& painter, const QRect& rect, const std::string& payload);
 
 private:
-    struct ButtonClickArea {
-        uint8_t gun;
-        int type; // 0=charge_start, 1=discharge_start, 2=stop
-        QRect rect;
-    };
-
     HmiConfig m_config;
     MqttClient m_mqtt;
     bool m_mqttReady;
@@ -132,7 +122,6 @@ private:
     std::string m_operatorId;
     std::string m_macAddr;
     std::vector<GunUiData> m_guns;
-    std::vector<ButtonClickArea> m_clickAreas;
 };
 
 #endif // HMI_WINDOW_H

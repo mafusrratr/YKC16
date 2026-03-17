@@ -23,9 +23,11 @@ namespace {
     // U: 编码字节 33 34 43 35 -> 解码后 00 01 10 02 (低位在前) -> 0x02100100
     // I: 编码字节 33 34 44 35 -> 解码后 00 01 11 02 (低位在前) -> 0x02110100
     // E: 解码后 00 00 60 00 (低位在前) -> 0x00600000（正向有功总电能）
+    // BY ZF: 反向有功电量数据块 DI（低位在前 00 02 FF 00）-> 0x0002FF00
     static const uint32_t kDiVoltage = 0x02100100;
     static const uint32_t kDiCurrent = 0x02110100;
     static const uint32_t kDiTotalEnergy = 0x00600000;
+    static const uint32_t kDiReverseEnergy = 0x0002FF00;
 }
 
 // BY ZF: 构造函数，资源在 open() 中初始化
@@ -76,10 +78,14 @@ bool Dlt645Meter::readAll(const std::string& meterAddr, MeterReading& out, std::
 {
     // BY ZF: 按固定顺序读取，保证上层拿到的是同一轮采样的数据
     double energy = 0.0;
+    double reverseEnergy = 0.0;
     double voltage = 0.0;
     double current = 0.0;
 
     if (!readOne(meterAddr, kDiTotalEnergy, 2, energy, err)) {
+        return false;
+    }
+    if (!readOne(meterAddr, kDiReverseEnergy, 2, reverseEnergy, err)) {
         return false;
     }
     if (!readOne(meterAddr, kDiVoltage, 1, voltage, err)) {
@@ -91,6 +97,8 @@ bool Dlt645Meter::readAll(const std::string& meterAddr, MeterReading& out, std::
 
     // BY ZF: 现场该 DI 返回值需再缩小 100 倍后作为 kWh 上送
     out.totalEnergy = energy / 100.0;
+    // BY ZF: 反向有功总电能按 0.01kWh 精度解析，readOne() 已完成小数位处理，这里不再重复缩放
+    out.reverseEnergy = reverseEnergy;
     // BY ZF: 现场量纲约定：电压再缩小 10 倍，电流再缩小 100 倍
     out.voltage = voltage / 10.0;
     out.current = current / 100.0;
@@ -316,6 +324,16 @@ bool Dlt645Meter::decodeReadResponse(const std::vector<uint8_t>& frame, uint32_t
     std::vector<uint8_t> value(dataBytes, 0);
     for (size_t i = 0; i < dataBytes; i++) {
         value[i] = static_cast<uint8_t>(frame[14 + i] - 0x33);
+    }
+
+    // BY ZF: 反向有功总电能 DI=0x0002FF00 返回 5 组 * 4 字节数据块：
+    // BY ZF: 总电能 + 各费率电能。当前现场仅取首组“总反向有功总电能”，按 0.01kWh 解析。
+    if (expectedDi == kDiReverseEnergy) {
+        if (dataBytes < 4) {
+            return false;
+        }
+        out = decodeBcdLe(value.data(), 4, decimals);
+        return true;
     }
 
     out = decodeBcdLe(value.data(), value.size(), decimals);

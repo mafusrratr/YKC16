@@ -32,6 +32,8 @@ CAN2CCUProtocol::CAN2CCUProtocol()
     , m_startChargeResponseDataValid(false)
     , m_cmdStopChargeDataValid(false)
     , m_stopChargeResponseDataValid(false)
+    , m_cmdPowerAdjustDataValid(false)
+    , m_powerAdjustResponseDataValid(false)
     , m_cmdVersionCheckDataValid(false)
     , m_versionCheckResponseDataValid(false)
     , m_cmdChargeParamDataValid(false)
@@ -54,6 +56,7 @@ CAN2CCUProtocol::CAN2CCUProtocol()
     memset(&m_startChargeResponseData, 0, sizeof(TCU2CCU_StartChargeResponseData));
     memset(&m_cmdStopChargeData, 0, sizeof(TCU2CCU_CmdStopChargeData));
     memset(&m_stopChargeResponseData, 0, sizeof(TCU2CCU_StopChargeResponseData));
+    memset(&m_cmdPowerAdjustData, 0, sizeof(TCU2CCU_CmdPowerAdjustData));
     memset(&m_cmdVersionCheckData, 0, sizeof(TCU2CCU_CmdVersionCheckData));
     memset(&m_versionCheckResponseData, 0, sizeof(TCU2CCU_VersionCheckResponseData));
     memset(&m_cmdChargeParamData, 0, sizeof(TCU2CCU_CmdChargeParamData));
@@ -249,6 +252,17 @@ int CAN2CCUProtocol::setStopChargeData(const TCU2CCU_CmdStopChargeData* cmdData)
     return 0;
 }
 
+int CAN2CCUProtocol::setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmdData)
+{
+    if (cmdData == nullptr) {
+        return -1;
+    }
+    m_cmdPowerAdjustData = *cmdData;
+    m_cmdPowerAdjustDataValid = true;
+    m_powerAdjustResponseDataValid = false;
+    return 0;
+}
+
 int CAN2CCUProtocol::setVersionCheckData(const TCU2CCU_CmdVersionCheckData* cmdData)
 {
     if (cmdData == nullptr) {
@@ -275,6 +289,15 @@ int CAN2CCUProtocol::getStopChargeData(TCU2CCU_CmdStopChargeData* outCmdData) co
         return -1;
     }
     *outCmdData = m_cmdStopChargeData;
+    return 0;
+}
+
+int CAN2CCUProtocol::getPowerAdjustData(TCU2CCU_CmdPowerAdjustData* outCmdData) const
+{
+    if (outCmdData == nullptr || !m_cmdPowerAdjustDataValid) {
+        return -1;
+    }
+    *outCmdData = m_cmdPowerAdjustData;
     return 0;
 }
 
@@ -410,6 +433,16 @@ int CAN2CCUProtocol::encodeStopCharge()
     return encodeStopChargeFrame();
 }
 
+int CAN2CCUProtocol::encodePowerAdjust()
+{
+    // BY ZF: 功率调节仅处理绝对值模式，业务层需提前设置 adjustType=0x01。
+    if (!m_cmdPowerAdjustDataValid) {
+        std::cerr << "[CAN2CCU] Power adjust data not set\n";
+        return -1;
+    }
+    return encodePowerAdjustFrame();
+}
+
 int CAN2CCUProtocol::encodeStopChargeFrame()
 {
     // BY ZF: 按表14 充电停止帧编码并发送
@@ -427,6 +460,23 @@ int CAN2CCUProtocol::encodeStopChargeFrame()
     businessData[0] = m_cmdStopChargeData.stopReason;
     businessData[1] = m_cmdStopChargeData.tcuStopCode;
     return sendSingleFrame(0x10, PGN_STOP_CHARGE, businessData, 2);
+}
+
+int CAN2CCUProtocol::encodePowerAdjustFrame()
+{
+    // BY ZF: 使用 0x10/0x0F 下发功率控制，业务区为“类型 + 2字节参数”。
+    if (!m_cmdPowerAdjustDataValid) {
+        return -1;
+    }
+    if (m_sendCallback == nullptr) {
+        std::cerr << "[CAN2CCU] Send callback not set\n";
+        return -1;
+    }
+    uint8_t businessData[3];
+    businessData[0] = m_cmdPowerAdjustData.adjustType;
+    businessData[1] = static_cast<uint8_t>(m_cmdPowerAdjustData.adjustParam & 0xFF);
+    businessData[2] = static_cast<uint8_t>((m_cmdPowerAdjustData.adjustParam >> 8) & 0xFF);
+    return sendSingleFrame(0x10, PGN_POWER_ADJUST, businessData, 3);
 }
 
 int CAN2CCUProtocol::encodeStartCompleteAck(uint8_t loadControlSwitch, uint8_t confirmFlag)
@@ -625,6 +675,9 @@ int CAN2CCUProtocol::decodeFrame(uint32_t canId, const uint8_t* data, size_t dat
             
         case PGN_PILE_CONFIG_ACK:
             return decodeChargeParamResponse(data, dataLen);
+
+        case PGN_POWER_ADJUST_RESP:
+            return decodePowerAdjustResponse(data, dataLen);
             
         case PGN_HEARTBEAT_RESP:
             // BY ZF: 心跳解析中更新接收时间，供 getHeartbeatCommStatus 与编码表18 字节3 使用
@@ -712,6 +765,19 @@ int CAN2CCUProtocol::decodeStopChargeResponse(const uint8_t* data, size_t dataLe
     }
     m_stopChargeResponseData.confirmFlag = data[1];
     m_stopChargeResponseDataValid = true;
+    return 0;
+}
+
+int CAN2CCUProtocol::decodePowerAdjustResponse(const uint8_t* data, size_t dataLen)
+{
+    // BY ZF: 功率调节应答当前只用于截止 250ms 重发；收到 0x10 即视为对端已响应。
+    if (data == nullptr || dataLen < 1) {
+        return -1;
+    }
+    if (data[0] != 0 && data[0] != static_cast<uint8_t>(m_gunNo + 1)) {
+        return -1;
+    }
+    m_powerAdjustResponseDataValid = true;
     return 0;
 }
 
@@ -924,7 +990,9 @@ int CAN2CCUProtocol::decodeYC20Frame(uint32_t canId, const uint8_t* data, size_t
         }
         // 表 B.1 参数 2～13：Data2～Data20（字节 1～19）
         m_yc20Data.outputVoltage   = static_cast<uint16_t>(buf[1]) | (static_cast<uint16_t>(buf[2]) << 8);   // 0.1 V/位
-        m_yc20Data.outputCurrent  = 4000U - (static_cast<uint16_t>(buf[3]) | (static_cast<uint16_t>(buf[4]) << 8));   // 0.1 A/位，偏移 -400A，直接提取为 0.1A 值
+        // BY ZF: 电流按“4000-原始值”映射到有符号0.1A（充电为正，放电为负）。
+        m_yc20Data.outputCurrent   = static_cast<int16_t>(
+                    4000 - static_cast<int32_t>(static_cast<uint16_t>(buf[3]) | (static_cast<uint16_t>(buf[4]) << 8)));
         m_yc20Data.soc             = buf[5];   // 1%/位，0～100%
         m_yc20Data.batteryMinTemp  = static_cast<int16_t>(buf[6]) - 50;   // 1℃/位，偏移 -50℃
         m_yc20Data.batteryMaxTemp  = static_cast<int16_t>(buf[7]) - 50;
@@ -933,11 +1001,13 @@ int CAN2CCUProtocol::decodeYC20Frame(uint32_t canId, const uint8_t* data, size_t
         m_yc20Data.pileEnvTemp     = static_cast<int16_t>(buf[12]) - 50;  // 充电机环境温度，1℃/位，偏移 -50℃
         m_yc20Data.guideVoltage    = (static_cast<uint16_t>(buf[13]) | (static_cast<uint16_t>(buf[14]) << 8)) / 10;   // 0.01 V/位 → 0.1V
         m_yc20Data.bmsReqVoltage   = static_cast<uint16_t>(buf[15]) | (static_cast<uint16_t>(buf[16]) << 8);   // 0.1 V/位
-        m_yc20Data.bmsReqCurrent   = 4000U - (static_cast<uint16_t>(buf[17]) | (static_cast<uint16_t>(buf[18]) << 8));   // 0.1 A/位，偏移 -400A，直接提取
+        m_yc20Data.bmsReqCurrent   = static_cast<int16_t>(
+                    4000 - static_cast<int32_t>(static_cast<uint16_t>(buf[17]) | (static_cast<uint16_t>(buf[18]) << 8)));
         m_yc20Data.chargeMode      = buf[19];  // 01H 恒压，02H 恒流
         // 表 B.1（续）参数 14～26：Data21～Data36（字节 20～35）
         m_yc20Data.bmsMeasuredVoltage  = static_cast<uint16_t>(buf[20]) | (static_cast<uint16_t>(buf[21]) << 8);   // 0.1 V/位
-        m_yc20Data.bmsMeasuredCurrent  = 4000U - (static_cast<uint16_t>(buf[22]) | (static_cast<uint16_t>(buf[23]) << 8));   // 0.1 A/位，偏移 -400A，直接提取
+        m_yc20Data.bmsMeasuredCurrent  = static_cast<int16_t>(
+                    4000 - static_cast<int32_t>(static_cast<uint16_t>(buf[22]) | (static_cast<uint16_t>(buf[23]) << 8)));
         m_yc20Data.estimatedRemainTime  = static_cast<uint16_t>(buf[24]) | (static_cast<uint16_t>(buf[25]) << 8);   // 1 min/位
         m_yc20Data.interfaceTemp1  = static_cast<int16_t>(buf[26]) - 50;  // 探头1～4，1℃/位，偏移 -50℃
         m_yc20Data.interfaceTemp2  = static_cast<int16_t>(buf[27]) - 50;

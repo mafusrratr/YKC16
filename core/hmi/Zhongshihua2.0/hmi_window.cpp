@@ -285,8 +285,6 @@ void HmiWindow::handlePileData(uint8_t gun, const std::string& payload)
 
 void HmiWindow::handlePlatEvent(uint8_t gun, const std::string& payload)
 {
-    (void)gun;
-
     cJSON* root = cJSON_Parse(payload.c_str());
     if (!root) {
         return;
@@ -318,8 +316,11 @@ void HmiWindow::handlePlatEvent(uint8_t gun, const std::string& payload)
         m_gunCount = gc;
     }
 
-    // BY ZF: 保存桩编号。
-    cJSON* cdzId = cJSON_GetObjectItem(data, "cdzId");
+    // BY ZF: 保存桩编号（兼容 cdzNo/cdzId）。
+    cJSON* cdzId = cJSON_GetObjectItem(data, "cdzNo");
+    if (!cdzId) {
+        cdzId = cJSON_GetObjectItem(data, "cdzId");
+    }
     if (cdzId) {
         if (cJSON_IsString(cdzId) && cdzId->valuestring) {
             m_cdzId = cdzId->valuestring;
@@ -357,7 +358,7 @@ void HmiWindow::handlePlatEvent(uint8_t gun, const std::string& payload)
         }
     }
 
-    // BY ZF: 读取每枪 gunId。
+    // BY ZF: 读取每枪 gunId（兼容 guns[] 与 data 直传）。
     cJSON* guns = cJSON_GetObjectItem(data, "guns");
     if (guns && cJSON_IsArray(guns)) {
         const int n = cJSON_GetArraySize(guns);
@@ -385,13 +386,39 @@ void HmiWindow::handlePlatEvent(uint8_t gun, const std::string& payload)
                     m_guns[idx].gunId = tmp;
                 }
             }
+            cJSON* qrc = cJSON_GetObjectItem(item, "qrCode");
+            if (qrc && cJSON_IsString(qrc) && qrc->valuestring) {
+                m_guns[idx].qrPayload = qrc->valuestring;
+                m_guns[idx].hasCustomQr = !m_guns[idx].qrPayload.empty();
+            }
 
             m_guns[idx].configured = true;
             rebuildQrPayload(idx);
         }
+    } else if (gun <= 1) {
+        // BY ZF: 中石化 setConfig 采用按枪 topic 下发，优先读取 data 内直接字段。
+        cJSON* gid = cJSON_GetObjectItem(data, "gunId");
+        if (gid) {
+            if (cJSON_IsString(gid) && gid->valuestring) {
+                m_guns[gun].gunId = gid->valuestring;
+            } else if (cJSON_IsNumber(gid)) {
+                char tmp[64] = {0};
+                std::snprintf(tmp, sizeof(tmp), "%.0f", gid->valuedouble);
+                m_guns[gun].gunId = tmp;
+            }
+        }
+
+        cJSON* qrCode = cJSON_GetObjectItem(data, "qrCode");
+        if (qrCode && cJSON_IsString(qrCode) && qrCode->valuestring) {
+            m_guns[gun].qrPayload = qrCode->valuestring;
+            m_guns[gun].hasCustomQr = !m_guns[gun].qrPayload.empty();
+        }
+
+        m_guns[gun].configured = true;
+        rebuildQrPayload(gun);
     }
 
-    // BY ZF: 保障在仅更新运营商/MAC时，二维码也会随之刷新。
+    // BY ZF: 保障在仅更新运营商/MAC时，未配置自定义二维码的枪仍可自动刷新。
     for (int i = 0; i < 2; ++i) {
         rebuildQrPayload(i);
     }
@@ -404,6 +431,9 @@ void HmiWindow::handlePlatEvent(uint8_t gun, const std::string& payload)
 void HmiWindow::rebuildQrPayload(int gun)
 {
     if (gun < 0 || gun > 1) {
+        return;
+    }
+    if (m_guns[gun].hasCustomQr) {
         return;
     }
 
