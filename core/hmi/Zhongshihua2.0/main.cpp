@@ -1,22 +1,30 @@
 #include <QApplication>
-#include <iostream>
+#include <QFile>
 
-#include "hmi_window.h"
+#include "previewwindow.h"
+#include "runtime_window.h"
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
-    // BY ZF: Qt GUI 程序入口
     QApplication app(argc, argv);
+    app.setApplicationName("tcu_hmi");
+    app.setOrganizationName("codex");
 
-    HmiWindow window;
-    if (!window.initialize()) {
-        std::cerr << "[HMI] initialize failed" << std::endl;
-        return 1;
+    QFile qssFile(":/styles/cui.qss");
+    if (qssFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        app.setStyleSheet(QString::fromUtf8(qssFile.readAll()));
     }
 
-    // BY ZF: initialize() 可能已切全屏显示，避免再次 show() 覆盖窗口模式。
-    if (!window.isVisible()) {
-        window.show();
+    const QStringList args = app.arguments();
+    if (args.contains("--preview")) {
+        PreviewWindow window;
+        window.showFullScreen();
+        return app.exec();
+    }
+
+    RuntimeWindow window;
+    if (!window.initialize()) {
+        return 1;
     }
     return app.exec();
 }

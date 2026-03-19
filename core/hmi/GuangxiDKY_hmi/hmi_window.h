@@ -98,6 +98,7 @@ private:
     void onMqttMessage(const std::string& topic, const std::string& payload);
 
     void handleLogicEvent(uint8_t gun, const std::string& payload);
+    void handlePileCmd(uint8_t gun, const std::string& payload);
     void handleFeeData(uint8_t gun, const std::string& payload);
     void handlePileData(uint8_t gun, const std::string& payload);
     void handleMeterData(uint8_t gun, const std::string& payload);

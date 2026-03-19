@@ -237,6 +237,11 @@ void ChargeLogicProcess::doRun()
                 GunState& gs = m_gunStates[i];
                 if (gs.state == STATE_CHARGING) {
                     maybeTriggerTcuStopByPrecharge(static_cast<uint8_t>(i));
+                    // BY ZF: feeData 保底机制，充电中即便电量未变化也至少 15 秒发布一次。
+                    if (gs.lastFeeDataPublishTime.time_since_epoch().count() == 0 ||
+                        (now - gs.lastFeeDataPublishTime) >= std::chrono::seconds(15)) {
+                        publishFeeData(static_cast<uint8_t>(i));
+                    }
                 }
                 if (gs.state == STATE_STARTING) {
                     if (gs.startingEnterTime.time_since_epoch().count() != 0) {
@@ -892,6 +897,7 @@ void ChargeLogicProcess::publishFeeData(uint8_t gun)
     mgs.feeLastPublishedTotalEnergy = roundTo5(mgs.feeTotalEnergyKwh);
     mgs.feeLastPublishedElectricAmount = roundTo5(mgs.feeTotalElectricAmount);
     mgs.feeLastPublishedServiceAmount = roundTo5(mgs.feeTotalServiceAmount);
+    mgs.lastFeeDataPublishTime = std::chrono::steady_clock::now();
 }
 
 void ChargeLogicProcess::publishStateChange(uint8_t gun, ChargeState from, ChargeState to, const char* reason)
@@ -1501,7 +1507,7 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
         gs.chargingEnterTime = std::chrono::steady_clock::time_point();
     }
     publishStateChange(gun, prev, to, reason);
-    if (to == STATE_STOPPED && prev == STATE_STOPPING) {
+    if (to == STATE_STOPPED ) {
         logTradeRecordOnStopped(gun, reason);
     }
     if (to == STATE_IDLE) {
@@ -1530,6 +1536,7 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.lastStopCmdTime = std::chrono::steady_clock::time_point();
     gs.startingEnterTime = std::chrono::steady_clock::time_point();
     gs.chargingEnterTime = std::chrono::steady_clock::time_point();
+    gs.lastFeeDataPublishTime = std::chrono::steady_clock::time_point();
     gs.stoppingEnterTime = std::chrono::steady_clock::time_point();
     gs.lastMeterMsgTime = std::chrono::steady_clock::time_point();
     gs.lastMeterValueTime = std::chrono::steady_clock::time_point();

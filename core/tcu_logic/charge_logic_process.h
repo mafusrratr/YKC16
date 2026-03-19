@@ -37,7 +37,7 @@ struct ChargeLogicConfig {
         , mqttPort(1883)
         , mqttKeepalive(60)
         , mqttTopicPrefix("tcu")
-        , prechargeStopMargin(1.0)
+        , prechargeStopMargin(3.0)
     {}
 };
 
@@ -145,6 +145,7 @@ private:
         bool startingRetrySent;                 // STARTING 30s 重发是否已执行
         std::chrono::steady_clock::time_point startingEnterTime;  // 进入 STARTING 时间
         std::chrono::steady_clock::time_point chargingEnterTime;  // 进入 CHARGING 时间（用于 chargedTime）
+        std::chrono::steady_clock::time_point lastFeeDataPublishTime; // BY ZF: 最近一次 feeData 发布时间
         std::chrono::steady_clock::time_point stoppingEnterTime;  // 进入 STOPPING 时间
         std::chrono::steady_clock::time_point lastMeterMsgTime;   // 最近电表消息时间
         std::chrono::steady_clock::time_point lastMeterValueTime; // 最近电量变化时间

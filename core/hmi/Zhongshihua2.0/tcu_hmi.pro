@@ -1,37 +1,35 @@
-# tcu_hmi qmake project (Qt4.8.6)
-# BY ZF
-
-TEMPLATE = app
-TARGET = tcu_hmi
-CONFIG += qt thread
-CONFIG -= app_bundle
-
 QT += core gui
 
-# BY ZF: Qt4 下显式开启 C++11（仅写 CONFIG += c++11 不稳定）。
+greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
+
+CONFIG += c++11
+# BY ZF: Qt4/qmake 交叉环境下仅写 CONFIG += c++11 不稳定，显式补编译参数。
 QMAKE_CXXFLAGS += -std=gnu++11
 QMAKE_CFLAGS += -std=gnu99
-
-# BY ZF: 让 qrencode 源码启用其自带 config.h（定义 __STATIC、VERSION 等）。
 DEFINES += HAVE_CONFIG_H
+TEMPLATE = app
+TARGET = tcu_hmi
+DESTDIR = release
+OBJECTS_DIR = obj
+MOC_DIR = obj
+RCC_DIR = obj
+UI_DIR = obj
 
-# BY ZF: qrencode 库版本目录（可在 qmake 命令行覆盖）
 isEmpty(QRPATH) {
-    QRPATH = $$PWD/include/qrencode-3.4.4
+    QRPATH = $$PWD/../Changzhou_liyang_hmi/include/qrencode-3.4.4
 }
 
-INCLUDEPATH += $$PWD
-INCLUDEPATH += $$PWD/..
-INCLUDEPATH += $$PWD/../../base
-INCLUDEPATH += $$PWD/../../base/common
-INCLUDEPATH += $$PWD/../../base/mqtt
-INCLUDEPATH += $$PWD/../../base/mqtt/include
-INCLUDEPATH += $$PWD/../../base/cjson/include
+SOURCES += \
+    ../../base/common/config_manager_lite.cpp \
+    ../../base/mqtt/mqtt_client.cpp \
+    customwidgets.cpp \
+    main.cpp \
+    previewwindow.cpp \
+    runtime_window.cpp \
+    uipages.cpp
 
-# BY ZF: qrencode 路径兼容（优先源码目录，找不到时允许外部 QRPATH 覆盖）。
 exists($$QRPATH/qrencode.h) {
     INCLUDEPATH += $$QRPATH
-    # BY ZF: 直接编译 qrencode-3.4.4 源码，避免目标机缺少 libqrencode。
     SOURCES += \
         $$QRPATH/bitstream.c \
         $$QRPATH/mask.c \
@@ -42,27 +40,43 @@ exists($$QRPATH/qrencode.h) {
         $$QRPATH/qrspec.c \
         $$QRPATH/rscode.c \
         $$QRPATH/split.c
-} else {
-    message([tcu_hmi] qrencode source not found at $$QRPATH)
 }
 
-SOURCES += \
-    main.cpp \
-    hmi_window.cpp \
-    ../../base/common/config_manager_lite.cpp \
-    ../../base/mqtt/mqtt_client.cpp
-
 HEADERS += \
-    hmi_window.h \
     ../../base/common/config_manager_lite.h \
-    ../../base/mqtt/mqtt_client.h
+    ../../base/mqtt/mqtt_client.h \
+    customwidgets.h \
+    previewwindow.h \
+    runtime_window.h \
+    uipages.h
 
-LIBS += -lpthread -lmosquitto -lcjson -lm
+INCLUDEPATH += \
+    ../../base \
+    ../../base/mqtt/include \
+    ../../base/cjson/include
+
+# BY ZF: 交叉环境优先使用仓库内 extraLib 的已编译库，避免目标机缺少开发链接名。
 LIBS += -L$$PWD/../../../extraLib/imx6ul
 LIBS += -L$$PWD/../../../extraLib
+exists($$PWD/../../../extraLib/imx6ul/libmosquitto.so.1) {
+    LIBS += $$PWD/../../../extraLib/imx6ul/libmosquitto.so.1
+} else {
+    LIBS += -lmosquitto
+}
+exists($$PWD/../../../extraLib/imx6ul/libcjson.so.1.7.17) {
+    LIBS += $$PWD/../../../extraLib/imx6ul/libcjson.so.1.7.17
+} else {
+    LIBS += -lcjson
+}
+LIBS += -lpthread -lm
 
-DESTDIR = release
-OBJECTS_DIR = obj
-MOC_DIR = obj/moc
-RCC_DIR = obj/rcc
-UI_DIR = obj/ui
+FORMS += \
+    ui/a3about.ui \
+    ui/b1idle.ui \
+    ui/c6flushcad.ui \
+    ui/e1chargeinfo.ui \
+    ui/f7checkoutok.ui \
+    ui/numinputdlg.ui \
+    ui/numinputfdlg.ui
+
+RESOURCES += tcu_hmi.qrc

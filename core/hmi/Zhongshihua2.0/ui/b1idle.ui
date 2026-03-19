@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>B1IdleClass</class>
+ <widget class="BaseDialog" name="B1IdleClass">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>800</width>
+    <height>480</height>
+   </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>800</width>
+    <height>480</height>
+   </size>
+  </property>
+  <property name="maximumSize">
+   <size>
+    <width>800</width>
+    <height>480</height>
+   </size>
+  </property>
+  <property name="windowTitle">
+   <string>B1Idle</string>
+  </property>
+  <widget class="QLabel" name="base_bottom">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>425</y>
+     <width>800</width>
+     <height>55</height>
+    </rect>
+   </property>
+   <property name="pixmap">
+    <pixmap>:/cui/Resources/base_bottom.png</pixmap>
+   </property>
+   <property name="scaledContents">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QPushButton" name="btnAbout">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>408</y>
+     <width>72</width>
+     <height>72</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">QPushButton{border:none;background:transparent;}QPushButton:pressed{padding-left:1px;padding-top:1px;}</string>
+   </property>
+   <property name="icon">
+    <iconset>
+     <normaloff>:/cui/Resources/about.png</normaloff>:/cui/Resources/about.png</iconset>
+   </property>
+   <property name="iconSize">
+    <size>
+     <width>72</width>
+     <height>72</height>
+    </size>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_cdz_icon">
+   <property name="geometry">
+    <rect>
+     <x>8</x>
+     <y>2</y>
+     <width>32</width>
+     <height>32</height>
+    </rect>
+   </property>
+   <property name="pixmap">
+    <pixmap>:/cui/Resources/cdz_tb.png</pixmap>
+   </property>
+   <property name="scaledContents">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_cdz_title">
+   <property name="geometry">
+    <rect>
+     <x>44</x>
+     <y>0</y>
+     <width>180</width>
+     <height>41</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>25</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string>直流充电桩</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+   </property>
+  </widget>
+  <widget class="CCellWidget" name="cell0" native="true">
+   <property name="geometry">
+    <rect>
+     <x>40</x>
+     <y>140</y>
+     <width>330</width>
+     <height>240</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="Line" name="line">
+   <property name="geometry">
+    <rect>
+     <x>400</x>
+     <y>90</y>
+     <width>2</width>
+     <height>320</height>
+    </rect>
+   </property>
+   <property name="orientation">
+    <enum>Qt::Vertical</enum>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_2">
+   <property name="geometry">
+    <rect>
+     <x>80</x>
+     <y>140</y>
+     <width>91</width>
+     <height>61</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>35</pointsize>
+     <weight>75</weight>
+     <italic>false</italic>
+     <bold>true</bold>
+     <underline>false</underline>
+     <strikeout>false</strikeout>
+    </font>
+   </property>
+   <property name="text">
+    <string>A枪</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignCenter</set>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_3">
+   <property name="geometry">
+    <rect>
+     <x>440</x>
+     <y>140</y>
+     <width>81</width>
+     <height>51</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>35</pointsize>
+     <weight>75</weight>
+     <italic>false</italic>
+     <bold>true</bold>
+     <underline>false</underline>
+     <strikeout>false</strikeout>
+    </font>
+   </property>
+   <property name="text">
+    <string>B枪</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignCenter</set>
+   </property>
+  </widget>
+  <widget class="CCellWidget" name="cell1" native="true">
+   <property name="geometry">
+    <rect>
+     <x>400</x>
+     <y>140</y>
+     <width>330</width>
+     <height>240</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QLabel" name="lblDatetimeb">
+   <property name="geometry">
+    <rect>
+     <x>430</x>
+     <y>44</y>
+     <width>350</width>
+     <height>32</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>20</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">color:white;</string>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_zq">
+   <property name="geometry">
+    <rect>
+     <x>80</x>
+     <y>130</y>
+     <width>290</width>
+     <height>256</height>
+    </rect>
+   </property>
+  <property name="text">
+   <string/>
+  </property>
+  <property name="pixmap">
+   <pixmap resource="../tcu_hmi.qrc">:/cui/Resources/qt_zq.png</pixmap>
+  </property>
+  </widget>
+  <widget class="QLabel" name="label_yq">
+   <property name="geometry">
+    <rect>
+     <x>440</x>
+     <y>130</y>
+     <width>290</width>
+     <height>256</height>
+    </rect>
+   </property>
+  <property name="text">
+   <string/>
+  </property>
+  <property name="pixmap">
+   <pixmap resource="../tcu_hmi.qrc">:/cui/Resources/qt_yq.png</pixmap>
+  </property>
+  </widget>
+  <widget class="QLabel" name="label_about">
+   <property name="visible">
+    <bool>false</bool>
+   </property>
+   <property name="geometry">
+    <rect>
+     <x>40</x>
+     <y>450</y>
+     <width>22</width>
+     <height>23</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label">
+   <property name="visible">
+    <bool>false</bool>
+   </property>
+   <property name="geometry">
+    <rect>
+     <x>90</x>
+     <y>440</y>
+     <width>71</width>
+     <height>41</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>20</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string>关于</string>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">color:white;font-weight:bold;background:transparent;</string>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_gth">
+   <property name="geometry">
+    <rect>
+     <x>280</x>
+     <y>190</y>
+     <width>48</width>
+     <height>48</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_tk_zq">
+   <property name="geometry">
+    <rect>
+     <x>100</x>
+     <y>220</y>
+     <width>241</width>
+     <height>151</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_gth_3">
+   <property name="geometry">
+    <rect>
+     <x>640</x>
+     <y>190</y>
+     <width>48</width>
+     <height>48</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_tk_zq_2">
+   <property name="geometry">
+    <rect>
+     <x>460</x>
+     <y>220</y>
+     <width>241</width>
+     <height>151</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_id">
+   <property name="geometry">
+    <rect>
+     <x>590</x>
+     <y>0</y>
+     <width>211</width>
+     <height>41</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>25</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="layoutDirection">
+    <enum>Qt::LeftToRight</enum>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+   </property>
+  </widget>
+  <zorder>label_zq</zorder>
+  <zorder>label_yq</zorder>
+  <zorder>line</zorder>
+  <zorder>label_2</zorder>
+  <zorder>label_3</zorder>
+  <zorder>base_bottom</zorder>
+  <zorder>label_about</zorder>
+  <zorder>label</zorder>
+  <zorder>lblDatetimeb</zorder>
+  <zorder>label_tk_zq</zorder>
+  <zorder>label_gth</zorder>
+  <zorder>label_tk_zq_2</zorder>
+  <zorder>label_gth_3</zorder>
+  <zorder>cell0</zorder>
+  <zorder>cell1</zorder>
+  <zorder>btnAbout</zorder>
+  <zorder>label_cdz_icon</zorder>
+  <zorder>label_cdz_title</zorder>
+  <zorder>label_id</zorder>
+ </widget>
+ <layoutdefault spacing="6" margin="11"/>
+ <customwidgets>
+  <customwidget>
+   <class>BaseDialog</class>
+   <extends>QWidget</extends>
+   <header>basedialog.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>CCellWidget</class>
+   <extends>QWidget</extends>
+   <header>cellwidget.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>

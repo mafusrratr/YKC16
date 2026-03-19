@@ -1,0 +1,140 @@
+QPushButton{border-style: none;}
+QDialog{background-image: url(:/cui/Resources/Main.png);}
+
+A2Function>QPushButton#btnQueryCard {background-image: url(:/cui/Resources/btncardquery.png)}
+A2Function>QPushButton#btnCharge {background-image: url(:/cui/Resources/btncharge.png)}
+A2Function>QPushButton#btnCardJiehui {background-image: url(:/cui/Resources/btncardjiesuo.png)}
+QLabel#label_about{background-image: url(:/cui/Resources/about.png)}
+QLabel#charge_je{background-image: url(:/cui/Resources/charge_je.png)}
+QLabel#charge_dl{background-image: url(:/cui/Resources/charge_dl.png)}
+QLabel#ts_tb{background-image: url(:/cui/Resources/ts.png)}
+QLabel#label_error{background-image: url(:/cui/Resources/error.png)}
+QLabel#f7_ok{background-image: url(:/cui/Resources/f7_ok.png)}
+QLabel#charge_ts{background-image: url(:/cui/Resources/charge_ts.png)}
+QPushButton#btnCheckout{background-image: url(:/cui/Resources/btncheckout.png)}
+QPushButton#btnCard{background-image: url(:/cui/Resources/btncard.png)}
+QPushButton#btnCardOnline{background-image: url(:/cui/Resources/btncard.png)}
+QPushButton#btnBackpay{background-image: url(:/cui/Resources/btnotherpay.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/btnstop.png)}
+QTabWidget:pane{
+border: 1px solid black; top: -1px;}
+QPushButton#save_config{color:white;}
+QPushButton#log_read{background-image: url(:/cui/Resources/check.png)}
+QTabBar::tab{min-width:100px; margin-right: 10px; margin-bottom:-2px;background: transparent;left: 30px;}
+QPushButton:focus{outline: none;}
+QToolButton#login{background-color:transparent;}
+QToolButton#login_2{background-color:transparent;}
+QToolButton#login111{background-color:transparent;}
+QToolButton#login111_2{background-color:transparent;}
+QTextBrowser{background-color:transparent;color:white;}
+QScrollBar:vertical {border:0px solid grey;background:#0A1626;width:15px;margin:22 0 22 0px;}
+QToolButton#btn0{background-color:transparent;}
+QToolButton#btn0_2{background-color:transparent;}
+QToolButton#btn1{background-color:transparent;}
+QToolButton#btn2{background-color:transparent;}
+QToolButton#btn3{background-color:transparent;}
+QToolButton#btn4{background-color:transparent;}
+QToolButton#btn5{background-color:transparent;}
+QToolButton#btn6{background-color:transparent;}
+QToolButton#btn7{background-color:transparent;}
+QToolButton#btn8{background-color:transparent;}
+QToolButton#btn9{background-color:transparent;}
+QToolButton#btnPoint{background-color:transparent;}
+QToolButton#btnOk{background-color:transparent;}
+QToolButton#btnCancel{background-color:transparent;}
+QToolButton#btnBackspace{background-color:transparent;}
+QLineEdit#edtResult{background-color:transparent;}
+
+QLabel#login_tb{background-image:url(:/cui/Resources/login.png)}
+QLabel#login_in{background-image:url(:/cui/Resources/input.png)}
+
+
+QLabel#login_tb_2{background-image:url(:/cui/Resources/login.png)}
+QLabel#label_sectip_2{background-image:url(:/cui/Resources/input.png)}
+
+QLabel#login_tb_3{background-image:url(:/cui/Resources/login.png)}
+QLabel#label_sectip_3{background-image:url(:/cui/Resources/input.png)}
+
+
+QLabel#login_tb_4{background-image:url(:/cui/Resources/login.png)}
+QLabel#label_sectip_4{background-image:url(:/cui/Resources/input.png)}
+
+
+QLineEdit#lineEdit_sec{background-color:transparent;}
+QLineEdit#lineEdit_sec_2{background-color:transparent;}
+QLineEdit#lineEdit_earse{background-color:transparent;}
+QLineEdit#lineEdit_earse_4{background-color:transparent;}
+
+C1PurchaseSelect>QPushButton#btnCard{background-image: url(:/cui/Resources/btncardoffline.png)}
+C1PurchaseSelect>QPushButton#btnPincode{background-image: url(:/cui/Resources/btnpincode.png)}
+C1PurchaseSelect>QPushButton#btnUserPswd{background-image: url(:/cui/Resources/btnuserswd.png)}
+C1PurchaseSelect>QPushButton#btnQRCode{background-image: url(:/cui/Resources/btnqrcode.png)}
+QLabel#cdz_tb{background-image:url(:/cui/Resources/cdz_tb.png)}
+QLabel#label_tk_zq{background-color:rgba(22,56,83,100);border-radius:15px}
+QLabel#label_tk_zq_2{background-color:rgba(22,56,83,100);border-radius:15px}
+E1ChargeInfo>QStackedWidget>QWidget>QLabel{font-size:24px;}
+QLabel#c8_back{background-image:url(:/cui/Resources/back.png)}
+NumInputFDlg>QPushButton{boder-style:solid;border-width:1px;font-size:36px;}
+NumInputFDlg>QPushButton#btnOk{background-image: url();}
+G1Update{background-image: url(:/cui/Resources/G1.png);}
+QLabel{color:white;}
+QPushButton#update_push{color:white;}
+QRadioButton{color:red;}
+
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-0.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-1.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-2.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-3.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-4.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-5.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-6.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-7.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-8.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-9.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-point.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-back.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-ok.png)}
+QPushButton#btnStop{background-image: url(:/cui/Resources/k-C.png)}
+
+QTabBar{
+font: 16pt "黑体";
+}
+QTabBar::tab{
+	font-family:"黑体";    /*设置tab中的文本的字体*/
+	border-top-left-radius: 5px;    /*设置tab的边框的圆角（左上圆角）*/
+	border-top-right-radius: 5px;    /*设置tab的边框的圆角（右上圆角）*/
+	min-width: 100px;/*宽度*/
+	padding: 10px;/*高度*/
+	color:#ffffff;    /*设置tab中的文本的颜色*/
+	background-color: rgba(255, 255, 255, 0);
+	border: none;
+	border:0px solid #c3c3c3;
+ 
+}
+ 
+/*设置TabWidget中QTabBar的tab被选中时的样式*/
+QTabBar::tab:selected{
+color:#ffffff;    /*设置tab中的文本的颜色*/
+background-color: rgb(55, 156, 212);
+font: 16pt "黑体";
+}
+QTabBar::tab:!selected{
+color: rgb(55, 156, 212);
+background-color: rgba(60, 60, 60);
+font: 14pt "黑体";
+}
+/*设置TabWidget中鼠标悬浮在QTabBar的tab上，但未选中该Tab的样式*/
+QTabBar::tab:hover:!selected {
+color:#ffffff;    /*设置tab中的文本的颜色*/
+background-color: rgb(55, 156, 212);
+font: 16pt "黑体";
+}
+ 
+/*设置TabWidget的边框的样式*/
+QTabWidget::pane {
+border: 1px solid rgb(108, 117, 125, 65);
+}
+QTabBar::scroller{width:20;
+color:#ffffff;    /*设置tab中的文本的颜色*/
+background-color: rgb(55, 156, 212);
+}

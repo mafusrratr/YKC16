@@ -47,6 +47,9 @@ static QString stateMessage(const std::string& state, bool dischargeMode)
         return QString::fromUtf8("停止中...");
     }
     if (state == "STOPPED") {
+        if (dischargeMode) {
+            return QString::fromUtf8("已完成放电，如需再次放电请重新插拔充电枪");
+        }
         return QString::fromUtf8("已完成充电，如需再次充电请重新插拔充电枪");
     }
     if (state == "ERROR") {
@@ -188,6 +191,7 @@ void HmiWindow::onMqttConnected(int rc)
     const std::string p = m_config.mqttTopicPrefix;
     m_mqtt.subscribe(p + "/logic/+/event", 2);
     m_mqtt.subscribe(p + "/logic/+/feeData", 1);
+    m_mqtt.subscribe(p + "/pile/+/cmd", 2);
     m_mqtt.subscribe(p + "/pile/+/data", 0);
     m_mqtt.subscribe(p + "/meter/+/data", 0);
 }
@@ -207,7 +211,9 @@ void HmiWindow::onMqttMessage(const std::string& topic, const std::string& paylo
     }
 
     if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/pile/", gun, tail)) {
-        if (gun <= 1 && tail == "data") {
+        if (gun <= 1 && tail == "cmd") {
+            handlePileCmd(gun, payload);
+        } else if (gun <= 1 && tail == "data") {
             handlePileData(gun, payload);
         }
         return;
@@ -252,6 +258,27 @@ void HmiWindow::handleLogicEvent(uint8_t gun, const std::string& payload)
 
     cJSON_Delete(root);
     // BY ZF: 状态变化后主动刷新（跨线程使用队列调用）。
+    QMetaObject::invokeMethod(this, "onRefreshUi", Qt::QueuedConnection);
+}
+
+void HmiWindow::handlePileCmd(uint8_t gun, const std::string& payload)
+{
+    cJSON* root = cJSON_Parse(payload.c_str());
+    if (!root) {
+        return;
+    }
+
+    cJSON* cmd = cJSON_GetObjectItem(root, "cmd");
+    cJSON* data = cJSON_GetObjectItem(root, "data");
+    if (cmd && cJSON_IsString(cmd) && cmd->valuestring &&
+        std::strcmp(cmd->valuestring, "start_charge") == 0 && cJSON_IsObject(data)) {
+        cJSON* v2g = cJSON_GetObjectItem(data, "v2g");
+        QMutexLocker locker(&m_dataMutex);
+        m_guns[gun].dischargeMode = (v2g && cJSON_IsNumber(v2g) && v2g->valueint != 0);
+    }
+
+    cJSON_Delete(root);
+    // BY ZF: 直接监听 tcu_logic 下发给 pile_controller 的启动命令，确保远程放电流程切到放电界面。
     QMetaObject::invokeMethod(this, "onRefreshUi", Qt::QueuedConnection);
 }
 
@@ -446,11 +473,20 @@ void HmiWindow::drawGunPanel(QPainter& painter, const QRect& rect, const GunUiDa
         }
         painter.drawText(rect.adjusted(16, 90, -16, -16), Qt::AlignLeft | Qt::AlignTop, detail);
     } else if (data.state == "STOPPED") {
-        const QString detail = QString::fromUtf8(
-                                   "充电电量: %1 kWh\n"
-                                   "充电金额: %2 元")
-                                   .arg(QString::number(data.totalEnergy, 'f', 3))
-                                   .arg(QString::number(data.totalAmount, 'f', 2));
+        QString detail;
+        if (data.dischargeMode) {
+            detail = QString::fromUtf8(
+                         "放电电量: %1 kWh\n"
+                         "放电金额: %2 元")
+                         .arg(QString::number(data.totalEnergy, 'f', 3))
+                         .arg(QString::number(data.totalAmount, 'f', 2));
+        } else {
+            detail = QString::fromUtf8(
+                         "充电电量: %1 kWh\n"
+                         "充电金额: %2 元")
+                         .arg(QString::number(data.totalEnergy, 'f', 3))
+                         .arg(QString::number(data.totalAmount, 'f', 2));
+        }
         painter.drawText(rect.adjusted(16, 120, -16, -16), Qt::AlignLeft | Qt::AlignTop, detail);
     }
 
