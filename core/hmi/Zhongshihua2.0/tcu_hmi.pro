@@ -53,7 +53,8 @@ HEADERS += \
 INCLUDEPATH += \
     ../../base \
     ../../base/mqtt/include \
-    ../../base/cjson/include
+    ../../base/cjson/include \
+    ../../logger/sql
 
 # BY ZF: 交叉环境优先使用仓库内 extraLib 的已编译库，避免目标机缺少开发链接名。
 LIBS += -L$$PWD/../../../extraLib/imx6ul
@@ -67,6 +68,11 @@ exists($$PWD/../../../extraLib/imx6ul/libcjson.so.1.7.17) {
     LIBS += $$PWD/../../../extraLib/imx6ul/libcjson.so.1.7.17
 } else {
     LIBS += -lcjson
+}
+exists($$PWD/../../../extraLib/imx6ul/libsqlite3.so) {
+    LIBS += $$PWD/../../../extraLib/imx6ul/libsqlite3.so
+} else {
+    LIBS += -lsqlite3
 }
 LIBS += -lpthread -lm
 

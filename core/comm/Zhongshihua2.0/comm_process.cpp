@@ -895,6 +895,7 @@ bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& pa
                     } else if (std::strcmp(to->valuestring, "STOPPED") == 0) {
                         mappedStatus = 0x04;
                     }
+                    printf("mappedStatus: %d\n", mappedStatus);
                     m_gunRuntimeData[gun].gunStatus = mappedStatus;
                 }
             }
@@ -1560,6 +1561,7 @@ bool CommProcess::connectPlatformTcp()
     m_loginState = LOGIN_IDLE;
     m_lastLoginAction = std::chrono::steady_clock::now();
     m_lastHeartbeat = std::chrono::steady_clock::now();
+    m_lastHeartbeatRecv = std::chrono::steady_clock::now();
     m_lastChargeInfoReport = std::chrono::steady_clock::now();
     m_lastChargeInfoReportByGun.assign(static_cast<size_t>(m_config.gunCount), m_lastChargeInfoReport);
     m_runtimeChangedByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
@@ -2298,14 +2300,16 @@ std::vector<uint8_t> CommProcess::buildChargeInfoBody(uint8_t gun)
     // 2) 桩编码 BCD7
     appendPileCodeBcd7(body, m_config.cdzNo);
     // 3) 枪号 BCD1：按联调要求固定 0x00
-    body.push_back(0x00);
+    body.push_back(static_cast<uint8_t>(gun + 1));
 
     // 4) 状态：直接使用上游 state_change 映射结果。
+    printf("rd.gunStatus: %d\n", rd.gunStatus);
     body.push_back(rd.gunStatus);
 
     // 5) 枪是否归位（按联调要求固定 0x02）
     body.push_back(0x02);
     // 6) 是否插枪：来自 yx 车辆连接状态
+    printf("rd.yxVehicleConnectStatus: %d\n", rd.yxVehicleConnectStatus);
     body.push_back(rd.yxVehicleConnectStatus ? 0x01 : 0x00);
 
     // 7) 输出电压（0.1V）
@@ -2395,7 +2399,7 @@ void CommProcess::reportChargeInfoPeriodic()
         }
         const bool forceSend = (m_runtimeChangedByGun[gun] != 0);
         const bool charging = (m_gunRuntimeData[gun].gunStatus == 0x03);
-        const std::chrono::seconds interval = charging ? std::chrono::seconds(15) : std::chrono::seconds(300);
+        const std::chrono::seconds interval = charging ? std::chrono::seconds(15) : std::chrono::seconds(60);
         if (!forceSend && (now - m_lastChargeInfoReportByGun[gun] < interval)) {
             continue;
         }
@@ -2403,12 +2407,12 @@ void CommProcess::reportChargeInfoPeriodic()
         if (!body.empty()) {
             sendPlatformFrame(kCmdChargeInfo, body);
             // BY ZF: 充电中每15秒同步上送0x25 BSM信息。
-            if (charging) {
+            // if (charging) {
                 const std::vector<uint8_t> bsmBody = buildBsmBody(gun);
                 if (!bsmBody.empty()) {
                     sendPlatformFrame(kCmdBsm, bsmBody);
                 }
-            }
+            // }
             m_lastChargeInfoReportByGun[gun] = now;
             m_runtimeChangedByGun[gun] = 0;
         }
@@ -2461,6 +2465,12 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
         }
         break;
     case LOGIN_ONLINE: {
+        // BY ZF: 心跳接收超时 30 秒，超时则关闭 TCP 以触发重连
+        if (now - m_lastHeartbeatRecv >= std::chrono::seconds(30)) {
+            m_logSender.warn("platform_heartbeat", "recv_timeout_30s");
+            closePlatformTcp();
+            break;
+        }
         if (now - m_lastHeartbeat >= std::chrono::seconds(m_config.tcpHeartbeatSec)) {
             if (!sendPlatformFrame(kCmdHeartbeat, buildHeartbeatBody())) {
                 closePlatformTcp();
@@ -2680,6 +2690,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     }
 
     if (cmd == kCmdHeartbeatAck) {
+        m_lastHeartbeatRecv = std::chrono::steady_clock::now();
         return;
     }
 

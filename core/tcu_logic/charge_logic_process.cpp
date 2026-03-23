@@ -94,6 +94,17 @@ namespace {
         return static_cast<uint64_t>(std::strtoull(buf, nullptr, 10));
     }
 
+    // BY ZF: Unix 秒时间戳转 YYYYMMDDHHMMSS 字符串，用于本地故障持久化事件。
+    std::string toYmdHmsString(std::time_t tsSec) {
+        std::tm tmv;
+        localtime_r(&tsSec, &tmv);
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%04d%02d%02d%02d%02d%02d",
+                      tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                      tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+        return std::string(buf);
+    }
+
     int readGunCountFromIni(const std::string& path) {
         std::ifstream in(path.c_str());
         if (!in.is_open()) {
@@ -264,6 +275,10 @@ void ChargeLogicProcess::doRun()
                         }
                         // BY ZF: STARTING 持续 60s 未完成，进入停机流程
                         if (elapsed >= std::chrono::seconds(60)) {
+                            const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0xF001U));
+                            if (result.valid) {
+                                gs.stopReason = result.reason;
+                            }
                             handleEvent(static_cast<uint8_t>(i), EVT_STOP_CMD, "starting_timeout_60s");
                             continue;
                         }
@@ -593,10 +608,15 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
 
     if (type == "start_complete") {
         bool ok = true;
+        unsigned int chargeFailReason = 0;
         if (data) {
             cJSON* v = cJSON_GetObjectItem(data, "successFlag");
             if (v && cJSON_IsNumber(v) && v->valueint != 0) {
                 ok = false;
+            }
+            v = cJSON_GetObjectItem(data, "chargeFailReason");
+            if (v && cJSON_IsNumber(v) && v->valueint >= 0) {
+                chargeFailReason = static_cast<unsigned int>(v->valueint) & 0xFFFFU;
             }
             cJSON* soc = cJSON_GetObjectItem(data, "soc");
             if (soc && cJSON_IsNumber(soc)) {
@@ -611,17 +631,29 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
         }
         if (ok) {
             handleEvent(gun, EVT_START_COMPLETE_OK, "start_complete_ok");
+            m_gunStates[gun].startSuccessFlag = true;
         } else {
+            const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(chargeFailReason));
+            if (result.valid) {
+                m_gunStates[gun].stopReason = result.reason;
+            }
             handleEvent(gun, EVT_START_COMPLETE_FAIL, "start_complete_fail");
+            m_gunStates[gun].startSuccessFlag = false;
         }
         return;
     }
 
     if (type == "stop_complete") {
+        unsigned int stopReasonRaw = 0;
         if (data) {
             cJSON* r = cJSON_GetObjectItem(data, "stopReason");
-            if (r && cJSON_IsNumber(r)) {
-                m_gunStates[gun].stopReason = static_cast<unsigned int>(r->valueint);
+            if (r && cJSON_IsNumber(r) && r->valueint >= 0) {
+                stopReasonRaw = static_cast<unsigned int>(r->valueint) & 0xFFFFU;
+                const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(stopReasonRaw));  
+                //如果充电启动完成帧表示成功启动，则才处理启动完成帧给的reason，否则防止覆盖考虑，仅保存启动完成的
+                if (m_gunStates[gun].startSuccessFlag ) {
+                    m_gunStates[gun].stopReason = result.reason;                
+                }
             }
             cJSON* soc = cJSON_GetObjectItem(data, "stopSoc");
             if (soc && cJSON_IsNumber(soc)) {
@@ -669,6 +701,7 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
         cJSON* ws = cJSON_GetObjectItem(data, "workStatus");
         cJSON* vc = cJSON_GetObjectItem(data, "vehicleConnectStatus");
         cJSON* tf = cJSON_GetObjectItem(data, "totalFault");
+        cJSON* of = cJSON_GetObjectItem(data, "otherFault");
         if (ws && cJSON_IsNumber(ws)) {
             gs.lastWorkStatus = static_cast<uint8_t>(ws->valueint);
             gs.hasWorkStatus = true;
@@ -680,6 +713,19 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
         if (tf && cJSON_IsNumber(tf)) {
             gs.lastTotalFault = static_cast<uint8_t>(tf->valueint);
             gs.hasTotalFault = true;
+        }
+        if (of && cJSON_IsNumber(of) && of->valueint >= 0) {
+            const unsigned int otherFault = static_cast<unsigned int>(of->valueint) & 0xFFFFU;
+            if (!gs.hasOtherFault || gs.lastOtherFault != otherFault) {
+                gs.hasOtherFault = true;
+                gs.lastOtherFault = otherFault;
+                if (otherFault != 0U &&
+                    (gs.state == STATE_IDLE || gs.state == STATE_PREPARE || gs.state == STATE_ERROR || gs.state == STATE_STOPPED) &&
+                    gs.hasWorkStatus && gs.lastWorkStatus == 0) {
+                    const FaultJudgeResult result = JudgeStandbyFaultPoint(MakeStandbyPointKey(otherFault));
+                    publishSaveErrorEvent(gun, result, otherFault, "pile_yx");
+                }
+            }
         }
 
         if (gs.hasWorkStatus && gs.lastWorkStatus == 0 && gs.state == STATE_CHARGING) {
@@ -900,6 +946,43 @@ void ChargeLogicProcess::publishFeeData(uint8_t gun)
     mgs.lastFeeDataPublishTime = std::chrono::steady_clock::now();
 }
 
+void ChargeLogicProcess::publishSaveErrorEvent(uint8_t gun, const FaultJudgeResult& result, unsigned int rawValue, const char* faultSource)
+{
+    if (!result.valid) {
+        return;
+    }
+    if (!result.treatAsFault) {
+        return;
+    }
+
+    std::ostringstream topic;
+    topic << m_config.mqttTopicPrefix << "/save/" << static_cast<int>(gun) << "/event";
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "ts", static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count()));
+    cJSON_AddNumberToObject(root, "seq", static_cast<double>(++m_seq));
+    cJSON_AddStringToObject(root, "source", "tcu_logic");
+    cJSON_AddNumberToObject(root, "gun", gun);
+    cJSON_AddStringToObject(root, "type", "Error");
+
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "occurTime", toYmdHmsString(std::time(NULL)).c_str());
+    cJSON_AddNumberToObject(data, "faultType", result.faultType);
+    cJSON_AddStringToObject(data, "pointKey", result.pointKey.c_str());
+    cJSON_AddStringToObject(data, "faultSource", faultSource ? faultSource : "");
+    cJSON_AddStringToObject(data, "faultMessage", result.message.c_str());
+    cJSON_AddNumberToObject(data, "rawValue", rawValue);
+    cJSON_AddItemToObject(root, "data", data);
+
+    char* out = cJSON_PrintUnformatted(root);
+    if (out) {
+        m_mqtt.publish(topic.str(), out, 2, true);
+        cJSON_free(out);
+    }
+    cJSON_Delete(root);
+}
+
 void ChargeLogicProcess::publishStateChange(uint8_t gun, ChargeState from, ChargeState to, const char* reason)
 {
     // BY ZF: 统一状态变更事件
@@ -1083,6 +1166,7 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     }
     GunState& gs = m_gunStates[gun];
 
+    // BY ZF: 充电开始时间统一以 logic 接收到启动命令的本机时间为准，不使用平台透传 startTime。
     uint64_t startTs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
     std::string userNo;
@@ -1093,11 +1177,6 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     int feeModelNo = 0;
 
     if (data) {
-        cJSON* n = cJSON_GetObjectItem(data, "startTime");
-        if (n && cJSON_IsNumber(n) && n->valuedouble > 0) {
-            startTs = static_cast<uint64_t>(n->valuedouble);
-        }
-
         const char* u = getString(data, "chargeUserNo");
         if (!u || !u[0]) u = getString(data, "userNo");
         if (!u || !u[0]) u = getString(data, "userId");
@@ -1158,7 +1237,7 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     gs.feeTotalServiceAmount = 0.0;
     gs.meterStableCount = 0;
 
-    // BY ZF: 从启动命令解析计费模型（HHMM时段 + 分段电费/服务费）
+    // BY ZF: 从启动命令解析计费模型（HHMM时段 + 分段电费/服务费）。
     parseFeeModel(gun, data);
 
     cJSON* evt = cJSON_CreateObject();
@@ -1270,6 +1349,29 @@ bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
     gs.feeServicePricePerKwh.swap(sortedService);
 
     gs.feeInitialized = true;
+
+    // BY ZF: 解析成功后直接保存计费模型到 logger/本地数据库。
+    if (!gs.feeModelId.empty()) {
+        FeeModel feeModel;
+        feeModel.feeModelId = gs.feeModelId;
+        feeModel.timeNum = gs.feeTimeNum;
+        feeModel.timeSeg.reserve(gs.feeTimeSegMinutes.size());
+        feeModel.segFlag.reserve(gs.feeTimeSegMinutes.size());
+        feeModel.chargeFee.reserve(gs.feeChargePricePerKwh.size());
+        feeModel.serviceFee.reserve(gs.feeServicePricePerKwh.size());
+
+        for (size_t i = 0; i < gs.feeTimeSegMinutes.size(); ++i) {
+            feeModel.timeSeg.push_back(minuteToHHMM(gs.feeTimeSegMinutes[i]));
+            // BY ZF: 启动命令下发的是按时段展开的价格数组，这里按段号(1-based)落库。
+            feeModel.segFlag.push_back(static_cast<unsigned int>(i + 1));
+            feeModel.chargeFee.push_back(static_cast<unsigned int>(
+                std::round(std::max(0.0, gs.feeChargePricePerKwh[i]) * 1000.0)));
+            feeModel.serviceFee.push_back(static_cast<unsigned int>(
+                std::round(std::max(0.0, gs.feeServicePricePerKwh[i]) * 1000.0)));
+        }
+
+        m_logSender.saveFeeModel(feeModel);
+    }
     return true;
 }
 
@@ -1526,6 +1628,8 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
 
     GunState& gs = m_gunStates[gun];
 
+    gs.hasOtherFault = false;
+    gs.lastOtherFault = 0;
     gs.pendingStart = false;
     gs.pendingStartData.clear();
     gs.lastStartCmdData.clear();
@@ -1577,6 +1681,7 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.feeLastPublishedTotalEnergy = -1.0;
     gs.feeLastPublishedElectricAmount = -1.0;
     gs.feeLastPublishedServiceAmount = -1.0;
+    gs.startSuccessFlag = false;
 
     gs.hasTotalAmount = false;
     gs.lastTotalAmount = 0.0;

@@ -15,6 +15,7 @@ TARGET = $(RELEASE_DIR)/tcu_logic
 SOURCES = main.cpp charge_logic_process.cpp \
           ../base/mqtt/mqtt_client.cpp
 BASE_SOURCES = ../base/common/config_manager_lite.cpp \
+               ../base/common/fault_reason_mapper.cpp \
                ../base/common/message_queue.cpp \
                ../base/logger/log_sender.cpp \
                ../base/process/base_process.cpp

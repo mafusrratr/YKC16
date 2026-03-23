@@ -8,6 +8,7 @@
 
 #include "../base/process/base_process.h"
 #include "../base/common/config_manager_lite.h"
+#include "../base/common/fault_reason_mapper.h"
 #include "../base/mqtt/mqtt_client.h"
 #include "../base/logger/log_sender.h"
 #include <string>
@@ -90,6 +91,7 @@ private:
         bool hasWorkStatus;                     // 是否收到过 workStatus
         bool hasVehicleConnectStatus;           // 是否收到过 vehicleConnectStatus
         bool hasTotalFault;                     // 是否收到过 totalFault
+        bool hasOtherFault;                     // 是否收到过 otherFault
         bool hasMeterValue;                     // 是否收到过电量
         double lastMeterValue;                  // 最近电量(kWh)
         bool hasMeterVoltage;                   // 是否收到过电压
@@ -100,6 +102,7 @@ private:
         double lastTotalAmount;                 // 最近总金额(元)
         uint8_t meterStableCount;               // 电量连续不变化次数
         bool tcuStopReqSent;                    // 是否已发送 tcu_stop_request
+        unsigned int lastOtherFault;            // 最近一次 otherFault 原始值
 
         // BY ZF: 启动鉴权/订单基础信息（HMI/平台 start_charge.data）
         bool hasAuthBasis;                      // 是否已具备启动基础参数
@@ -140,6 +143,7 @@ private:
 
         bool pendingStart;                      // 已收 start_charge，等待 PREPARE 窗口处理
         bool stopCompleteSeen;                  // 是否收到 stop_complete
+        bool startSuccessFlag;                  // 启动成功标志
         std::string pendingStartData;           // 缓存启动命令 data JSON
         std::string lastStartCmdData;           // 最近一次下发给 pile 的启动参数
         bool startingRetrySent;                 // STARTING 30s 重发是否已执行
@@ -158,6 +162,7 @@ private:
             , hasWorkStatus(false)
             , hasVehicleConnectStatus(false)
             , hasTotalFault(false)
+            , hasOtherFault(false)
             , hasMeterValue(false)
             , lastMeterValue(0.0)
             , hasMeterVoltage(false)
@@ -168,6 +173,7 @@ private:
             , lastTotalAmount(0.0)
             , meterStableCount(0)
             , tcuStopReqSent(false)
+            , lastOtherFault(0)
             , hasAuthBasis(false)
             , startTimeMs(0)
             , startType(0)
@@ -193,6 +199,7 @@ private:
             , feeLastPublishedServiceAmount(-1.0)
             , pendingStart(false)
             , stopCompleteSeen(false)
+            , startSuccessFlag(false)
             , startingRetrySent(false)
         {}
     };
@@ -213,6 +220,7 @@ private:
     // BY ZF: 对外发布（下发 pile 命令、上报 logic 事件/计费）
     void publishPileCmd(uint8_t gun, const std::string& cmd, cJSON* data);
     void publishLogicEvent(uint8_t gun, const std::string& event, cJSON* data);
+    void publishSaveErrorEvent(uint8_t gun, const FaultJudgeResult& result, unsigned int rawValue, const char* faultSource);
     void publishFeeData(uint8_t gun);
     void publishStateChange(uint8_t gun, ChargeState from, ChargeState to, const char* reason);
     void publishUpdateRecordEvent(uint8_t gun, const TradeRecord& rec);

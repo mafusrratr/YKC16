@@ -1,6 +1,7 @@
 #include "customwidgets.h"
 
 #include <QDateTime>
+#include <QPaintEvent>
 #include <QFontMetrics>
 #include <QMouseEvent>
 #include <QPainter>
@@ -13,6 +14,21 @@ extern "C" {
 }
 
 namespace {
+
+static int hhmmToMinutesLocal(const QString &hhmm)
+{
+    if (hhmm.size() < 4) {
+        return -1;
+    }
+    bool okHour = false;
+    bool okMinute = false;
+    const int hour = hhmm.mid(0, 2).toInt(&okHour);
+    const int minute = hhmm.mid(2, 2).toInt(&okMinute);
+    if (!okHour || !okMinute) {
+        return -1;
+    }
+    return hour * 60 + minute;
+}
 
 static QPixmap buildCellTextPixmap(const QSize &size, const QString &text, int pointSize)
 {
@@ -222,6 +238,155 @@ void QRWidget::paintEvent(QPaintEvent *event)
     }
 
     QRcode_free(code);
+}
+
+FeeModelChartWidget::FeeModelChartWidget(QWidget *parent)
+    : QWidget(parent)
+    , m_currentIndex(-1)
+{
+    // BY ZF: 分时信息页改为自绘柱状图，后续调整样式只需要改这一个控件。
+    setMinimumSize(640, 220);
+    setAttribute(Qt::WA_StyledBackground, true);
+    setStyleSheet("background:transparent;");
+}
+
+void FeeModelChartWidget::setBars(const QVector<FeeBarData> &bars, int currentIndex)
+{
+    m_bars = bars;
+    m_currentIndex = currentIndex;
+    update();
+}
+
+void FeeModelChartWidget::paintEvent(QPaintEvent *event)
+{
+    Q_UNUSED(event);
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.fillRect(rect(), Qt::transparent);
+
+    QRect outerRect = rect().adjusted(6, 8, -6, -6);
+    painter.setPen(QPen(QColor(150, 150, 150), 1));
+    painter.setBrush(QColor(244, 246, 247));
+    painter.drawRoundedRect(outerRect, 12, 12);
+
+    QRect chartRect = rect().adjusted(56, 42, -28, -34);
+    if (chartRect.width() <= 0 || chartRect.height() <= 0) {
+        return;
+    }
+
+    painter.setPen(QPen(QColor(90, 90, 90), 1));
+    painter.drawLine(chartRect.bottomLeft(), chartRect.topLeft());
+    painter.drawLine(chartRect.bottomLeft(), chartRect.bottomRight());
+
+    if (m_bars.isEmpty()) {
+        painter.setPen(QColor(38, 45, 52));
+        painter.setFont(QFont("MS Shell Dlg 2", 16, QFont::Bold));
+        painter.drawText(chartRect, Qt::AlignCenter, QString::fromUtf8("暂无计费模型数据"));
+        return;
+    }
+
+    double maxValue = 0.0;
+    int i = 0;
+    for (i = 0; i < m_bars.size(); ++i) {
+        const double total = m_bars.at(i).chargeFee + m_bars.at(i).serviceFee;
+        if (total > maxValue) {
+            maxValue = total;
+        }
+    }
+    if (maxValue < 0.1) {
+        maxValue = 0.1;
+    }
+
+    QFont axisFont("MS Shell Dlg 2", 12);
+    QFont labelFont("MS Shell Dlg 2", 13, QFont::Bold);
+    QFont totalFont("MS Shell Dlg 2", 12, QFont::Bold);
+
+    const double pxPerMinute = chartRect.width() / 1440.0;
+    const int count = m_bars.size();
+    for (i = 0; i < count; ++i) {
+        const FeeBarData &bar = m_bars.at(i);
+        QString startText = bar.startTime;
+        QString endText = bar.endTime;
+        startText.remove(":");
+        endText.remove(":");
+        const int startMinute = hhmmToMinutesLocal(startText);
+        int endMinute = hhmmToMinutesLocal(endText);
+        if (endMinute <= startMinute) {
+            endMinute = 1440;
+        }
+
+        int x = chartRect.x() + static_cast<int>(startMinute * pxPerMinute + 0.5);
+        int nextX = chartRect.x() + static_cast<int>(endMinute * pxPerMinute + 0.5);
+        int barWidth = qMax(1, nextX - x);
+        const double chargeHeightRatio = bar.chargeFee / maxValue;
+        const double totalHeightRatio = (bar.chargeFee + bar.serviceFee) / maxValue;
+        const int totalHeight = qMax(1, static_cast<int>(chartRect.height() * totalHeightRatio));
+        const int chargeHeight = qMax(1, static_cast<int>(chartRect.height() * chargeHeightRatio));
+        const int y = chartRect.bottom() - totalHeight;
+
+        QColor chargeColor(0, 176, 102);
+        QColor serviceColor(18, 108, 245);
+        if (i == m_currentIndex) {
+            chargeColor = QColor(0, 148, 86);
+            serviceColor = QColor(0, 82, 214);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(255, 210, 80, 45));
+            painter.drawRect(QRect(x, chartRect.y(), barWidth, chartRect.height()));
+        }
+
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(chargeColor);
+        painter.drawRect(QRect(x, chartRect.bottom() - chargeHeight, barWidth, chargeHeight));
+
+        const int serviceHeight = qMax(1, totalHeight - chargeHeight);
+        painter.setBrush(serviceColor);
+        painter.drawRect(QRect(x, y, barWidth, serviceHeight));
+
+        painter.setPen(QColor(38, 45, 52));
+        painter.setFont(totalFont);
+        painter.drawText(QRect(x - 16, y - 18, barWidth + 32, 16),
+                         Qt::AlignCenter,
+                         QString::number(bar.chargeFee + bar.serviceFee, 'f', 2));
+    }
+
+    painter.setPen(QColor(38, 45, 52));
+    painter.setFont(labelFont);
+    painter.drawText(QRect(2, chartRect.y() - 2, 42, 20), Qt::AlignRight | Qt::AlignVCenter,
+                     QString::number(maxValue, 'f', 2));
+    painter.drawText(QRect(2, chartRect.bottom() - 10, 42, 20), Qt::AlignRight | Qt::AlignVCenter,
+                     QString::number(0.0, 'f', 2));
+    painter.setFont(QFont("MS Shell Dlg 2", 12, QFont::Bold));
+    painter.drawText(QRect(8, chartRect.y() - 20, 60, 16),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QString::fromUtf8("价格(元)"));
+
+    painter.setFont(axisFont);
+    const int hourWidth = chartRect.width() / 24;
+    for (i = 0; i <= 24; ++i) {
+        const int tickX = (i == 24) ? chartRect.right() : (chartRect.x() + i * hourWidth);
+        painter.setPen(QPen(QColor(90, 90, 90), 1));
+        painter.drawLine(tickX, chartRect.bottom(), tickX, chartRect.bottom() + 4);
+        if (i <= 24) {
+            painter.setPen(QColor(38, 45, 52));
+            int textX = tickX - 12;
+            if (i == 0) {
+                textX = tickX;
+            } else if (i == 24) {
+                textX = tickX - 24;
+            }
+            painter.drawText(QRect(textX, chartRect.bottom() + 8, 24, 14),
+                             (i == 0) ? (Qt::AlignLeft | Qt::AlignTop) :
+                             (i == 24) ? (Qt::AlignRight | Qt::AlignTop) :
+                             (Qt::AlignHCenter | Qt::AlignTop),
+                             QString("%1").arg(i, 2, 10, QChar('0')));
+        }
+    }
+    painter.setPen(QColor(38, 45, 52));
+    painter.setFont(QFont("MS Shell Dlg 2", 12, QFont::Bold));
+    painter.drawText(QRect(chartRect.right() - 54, chartRect.bottom() + 22, 54, 14),
+                     Qt::AlignRight | Qt::AlignVCenter,
+                     QString::fromUtf8("时刻(h)"));
 }
 
 CCellWidget::CCellWidget(QWidget *parent) :

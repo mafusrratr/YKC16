@@ -378,6 +378,9 @@ private:
     std::chrono::steady_clock::time_point m_lastLoginAction;   // 最近登录动作时间
     std::chrono::steady_clock::time_point m_lastHeartbeat;     // 最近心跳发送时间
 
+
+    std::chrono::steady_clock::time_point m_lastHeartbeatRecv;     // 最近心跳应答接受时间
+
     std::chrono::steady_clock::time_point m_lastChargeInfoReport; // reportChargeInfoPeriodic调度节拍
     std::vector<std::chrono::steady_clock::time_point> m_lastChargeInfoReportByGun; // 每枪最近0x13上报时间
     std::vector<uint8_t> m_runtimeChangedByGun;      // 每枪运行态变化标记（1=有变化待立即上送）

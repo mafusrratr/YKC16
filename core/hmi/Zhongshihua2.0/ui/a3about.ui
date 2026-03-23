@@ -93,10 +93,13 @@
      <height>381</height>
     </rect>
    </property>
+   <property name="styleSheet">
+    <string notr="true">QTabWidget::pane{border:1px solid rgb(168,168,168);background:rgb(225,228,230);border-radius:10px;top:-1px;}QTabBar::tab{min-width:120px;min-height:30px;padding:2px 10px;background:rgb(205,208,210);color:rgb(40,40,40);border:1px solid rgb(150,150,150);border-bottom:none;border-top-left-radius:8px;border-top-right-radius:8px;font:16px 'MS Shell Dlg 2';}QTabBar::tab:selected{background:rgb(242,243,244);font:16px 'MS Shell Dlg 2';font-weight:bold;border:2px solid rgb(110,110,110);border-bottom:none;}QTabBar::tab:!selected{margin-top:6px;}QTabBar QToolButton{width:70px;height:15px;background:rgb(214,217,219);border:1px solid rgb(150,150,150);border-radius:6px;color:rgb(40,40,40);font:18px 'MS Shell Dlg 2';font-weight:bold;}QTabBar QToolButton:hover{background:rgb(236,238,239);}QTabBar QToolButton:pressed{background:rgb(196,199,201);}</string>
+   </property>
    <property name="font">
     <font>
-     <family>微软雅黑</family>
-     <pointsize>28</pointsize>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>16</pointsize>
      <weight>50</weight>
      <italic>false</italic>
      <bold>false</bold>

@@ -2,14 +2,22 @@
 
 #include <QBrush>
 #include <QDateTime>
+#include <QFileInfo>
+#include <QFrame>
+#include <QHeaderView>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
 #include <QMetaObject>
 #include <QMutexLocker>
 #include <QPalette>
 #include <QPixmap>
 #include <QPushButton>
 #include <QStackedWidget>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTabWidget>
+#include <QVBoxLayout>
 
 #include <algorithm>
 #include <cstdlib>
@@ -18,6 +26,7 @@
 
 #include "../../base/common/config_manager_lite.h"
 #include "../../base/cjson/include/cjson/cJSON.h"
+#include "../../logger/sql/sqlite3.h"
 #include "customwidgets.h"
 #include "uipages.h"
 
@@ -78,6 +87,11 @@ static QString formatMoney(double value)
 }
 
 static QString formatEnergy(double value)
+{
+    return QString::number(value, 'f', 3);
+}
+
+static QString formatFeeValue(double value)
 {
     return QString::number(value, 'f', 3);
 }
@@ -198,6 +212,132 @@ static void setLabelPixmap(QWidget *page, const char *name, const QString &res)
     }
 }
 
+static QStringList splitSemicolon(const std::string &text)
+{
+    return QString::fromStdString(text).split(";", QString::SkipEmptyParts);
+}
+
+static int hhmmToMinutes(const std::string &hhmm)
+{
+    if (hhmm.size() < 4) {
+        return -1;
+    }
+    const int hour = std::atoi(hhmm.substr(0, 2).c_str());
+    const int minute = std::atoi(hhmm.substr(2, 2).c_str());
+    return hour * 60 + minute;
+}
+
+static QString hhmmText(const std::string &hhmm)
+{
+    if (hhmm.size() < 4) {
+        return QString::fromStdString(hhmm);
+    }
+    return QString("%1:%2").arg(QString::fromStdString(hhmm.substr(0, 2)))
+                           .arg(QString::fromStdString(hhmm.substr(2, 2)));
+}
+
+static QString ymdhmsText(const std::string &stamp)
+{
+    if (stamp.size() < 14) {
+        return QString::fromStdString(stamp);
+    }
+    return QString("%1-%2-%3 %4:%5:%6")
+        .arg(QString::fromStdString(stamp.substr(0, 4)))
+        .arg(QString::fromStdString(stamp.substr(4, 2)))
+        .arg(QString::fromStdString(stamp.substr(6, 2)))
+        .arg(QString::fromStdString(stamp.substr(8, 2)))
+        .arg(QString::fromStdString(stamp.substr(10, 2)))
+        .arg(QString::fromStdString(stamp.substr(12, 2)));
+}
+
+static QString chargeRecordReasonText(int reason)
+{
+    return QString::number(reason);
+}
+
+static QWidget *makeInfoCard(QWidget *parent, const QString &title, const QRect &rect)
+{
+    QFrame *frame = new QFrame(parent);
+    frame->setObjectName(title);
+    frame->setGeometry(rect);
+    frame->setStyleSheet("QFrame{background:rgb(244,246,247);border:1px solid rgb(168,168,168);border-radius:12px;}");
+
+    QLabel *header = new QLabel(title, frame);
+    header->setGeometry(16, 10, rect.width() - 32, 28);
+    header->setStyleSheet("QLabel{color:rgb(38,45,52);background:transparent;font:20px 'MS Shell Dlg 2';font-weight:bold;}");
+    return frame;
+}
+
+static QLabel *makeValueLabel(QWidget *parent, const char *name, const QRect &rect, int pointSize, bool bold)
+{
+    QLabel *label = new QLabel(parent);
+    label->setObjectName(name);
+    label->setGeometry(rect);
+    label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    label->setStyleSheet(QString("QLabel{color:rgb(38,45,52);background:transparent;font:%1px 'MS Shell Dlg 2';font-weight:%2;}")
+                         .arg(pointSize)
+                         .arg(bold ? 700 : 500));
+    return label;
+}
+
+static bool readFeeModelFromStmt(sqlite3_stmt *stmt, RuntimeWindow::FeeModelData &model)
+{
+    if (!stmt || sqlite3_step(stmt) != SQLITE_ROW) {
+        return false;
+    }
+
+    const char *feeModelId = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
+    const char *timeSeg = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+    const char *segFlag = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+    const char *chargeFee = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
+    const char *serviceFee = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
+    const char *timeStamp = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 6));
+
+    const QStringList segs = splitSemicolon(timeSeg ? timeSeg : "");
+    const QStringList flags = splitSemicolon(segFlag ? segFlag : "");
+    const QStringList chargeFees = splitSemicolon(chargeFee ? chargeFee : "");
+    const QStringList serviceFees = splitSemicolon(serviceFee ? serviceFee : "");
+    const int count = std::min(std::min(segs.size(), chargeFees.size()), serviceFees.size());
+    if (count <= 0) {
+        return false;
+    }
+
+    int idx = 0;
+    for (idx = 0; idx < count; ++idx) {
+        RuntimeWindow::FeeSegment seg;
+        seg.segFlag = idx < flags.size() ? flags.at(idx).toStdString() : std::string();
+        seg.startTime = segs.at(idx).toStdString();
+        seg.endTime = (idx + 1 < segs.size()) ? segs.at(idx + 1).toStdString() : std::string("2400");
+        seg.chargeFee = chargeFees.at(idx).toDouble() / 1000.0;
+        seg.serviceFee = serviceFees.at(idx).toDouble() / 1000.0;
+        model.segments.push_back(seg);
+    }
+
+    model.feeModelId = feeModelId ? feeModelId : "";
+    model.timeStamp = timeStamp ? timeStamp : "";
+    model.valid = !model.segments.empty();
+    if (!model.valid) {
+        return false;
+    }
+
+    const QTime nowTime = QTime::currentTime();
+    const int nowMinute = nowTime.hour() * 60 + nowTime.minute();
+    model.currentIndex = 0;
+    for (idx = 0; idx < static_cast<int>(model.segments.size()); ++idx) {
+        const int start = hhmmToMinutes(model.segments[idx].startTime);
+        const int end = hhmmToMinutes(model.segments[idx].endTime);
+        if (start >= 0 && end > start && nowMinute >= start && nowMinute < end) {
+            model.currentIndex = idx;
+            break;
+        }
+        if (idx == static_cast<int>(model.segments.size()) - 1 && nowMinute >= start) {
+            model.currentIndex = idx;
+        }
+    }
+
+    return true;
+}
+
 } // namespace
 
 RuntimeWindow::HmiConfig::HmiConfig()
@@ -235,6 +375,39 @@ RuntimeWindow::GunUiData::GunUiData()
 {
 }
 
+RuntimeWindow::ModuleVersionInfo::ModuleVersionInfo()
+{
+}
+
+RuntimeWindow::MonStatusData::MonStatusData()
+    : platformComm(0)
+    , meterComm(0)
+    , controllerComm(0)
+    , activeFaultCount(0)
+{
+}
+
+RuntimeWindow::FeeSegment::FeeSegment()
+    : chargeFee(0.0)
+    , serviceFee(0.0)
+{
+}
+
+RuntimeWindow::FeeModelData::FeeModelData()
+    : currentIndex(-1)
+    , valid(false)
+{
+}
+
+RuntimeWindow::ChargeRecordItem::ChargeRecordItem()
+    : id(0)
+    , gunNo(0)
+    , totalElect(0.0)
+    , totalCost(0.0)
+    , reason(0)
+{
+}
+
 RuntimeWindow::RuntimeWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_mqttReady(false)
@@ -246,6 +419,11 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_operatorId("0")
     , m_macAddr("000000000000000000000000")
     , m_guns(2)
+    , m_lastFeeModelCheckMs(0)
+    , m_lastChargeRecordCheckMs(0)
+    , m_recordGunFilter(-1)
+    , m_chargeRecordPage(0)
+    , m_chargeRecordPageSize(8)
     , m_stack(new QStackedWidget(this))
     , m_bottomTime(new QLabel(this))
     , m_idlePage(0)
@@ -253,6 +431,10 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_chargingPage(0)
     , m_checkoutPage(0)
     , m_aboutPage(0)
+    , m_aboutTabWidget(0)
+    , m_feeChart(0)
+    , m_chargeRecordTable(0)
+    , m_chargeRecordPageLabel(0)
 {
     m_guns[0].gun = 0;
     m_guns[1].gun = 1;
@@ -537,6 +719,34 @@ void RuntimeWindow::bindStaticUi()
     if (tab) {
         tab->setCurrentIndex(0);
     }
+    m_aboutTabWidget = tab;
+    QLabel *aboutIcon = m_aboutPage->findChild<QLabel *>("label_cdz_icon");
+    if (!aboutIcon) {
+        aboutIcon = new QLabel(m_aboutPage);
+        aboutIcon->setObjectName("label_cdz_icon");
+        aboutIcon->setGeometry(8, 2, 32, 32);
+        aboutIcon->setPixmap(QPixmap(":/cui/Resources/cdz_tb.png"));
+        aboutIcon->setScaledContents(true);
+        aboutIcon->show();
+    }
+    QLabel *aboutTitle = m_aboutPage->findChild<QLabel *>("label_cdz_title");
+    if (!aboutTitle) {
+        aboutTitle = new QLabel(QString::fromUtf8("直流充电桩"), m_aboutPage);
+        aboutTitle->setObjectName("label_cdz_title");
+        aboutTitle->setGeometry(44, 0, 180, 41);
+        aboutTitle->setStyleSheet("QLabel{color:white;background:transparent;font:25px 'MS Shell Dlg 2';font-weight:bold;}");
+        aboutTitle->show();
+    }
+    QLabel *aboutId = m_aboutPage->findChild<QLabel *>("label_id");
+    if (!aboutId) {
+        aboutId = new QLabel(m_aboutPage);
+        aboutId->setObjectName("label_id");
+        aboutId->setGeometry(590, 0, 211, 41);
+        aboutId->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        aboutId->setStyleSheet("QLabel{color:white;background:transparent;font:25px 'MS Shell Dlg 2';font-weight:bold;}");
+        aboutId->show();
+    }
+    setupAboutTabs();
 }
 
 void RuntimeWindow::onMqttConnected(int rc)
@@ -552,6 +762,7 @@ void RuntimeWindow::onMqttConnected(int rc)
     m_mqtt.subscribe(p + "/pile/+/data", 0);
     m_mqtt.subscribe(p + "/plat/+/event", 1);
     m_mqtt.subscribe(p + "/plat/+/setConfig", 1);
+    m_mqtt.subscribe(p + "/mon/0/event", 1);
 }
 
 void RuntimeWindow::onMqttMessage(const std::string &topic, const std::string &payload)
@@ -579,6 +790,11 @@ void RuntimeWindow::onMqttMessage(const std::string &topic, const std::string &p
         if (gun <= 1 && (tail == "event" || tail == "setConfig")) {
             handlePlatEvent(gun, payload);
         }
+        return;
+    }
+
+    if (topic == m_config.mqttTopicPrefix + "/mon/0/event") {
+        handleMonEvent(payload);
     }
 }
 
@@ -778,6 +994,525 @@ void RuntimeWindow::rebuildQrPayload(int gun)
     m_guns[gun].qrPayload = std::string("hlht://") + gunId + "." + operatorId + "/" + macAddr;
 }
 
+void RuntimeWindow::setupAboutTabs()
+{
+    // BY ZF: A3 前两页改为运行态重建，避免继续维护旧项目遗留的大量静态控件。
+    if (!m_aboutTabWidget) {
+        return;
+    }
+
+    QWidget *feeTab = m_aboutTabWidget->widget(0);
+    QWidget *deviceTab = m_aboutTabWidget->widget(1);
+    if (!feeTab || !deviceTab) {
+        return;
+    }
+
+    m_aboutTabWidget->setTabText(0, QString::fromUtf8("分时信息"));
+    m_aboutTabWidget->setTabText(1, QString::fromUtf8("设备信息"));
+
+    QList<QWidget *> feeChildren;
+    const QObjectList feeObjects = feeTab->children();
+    int i = 0;
+    for (i = 0; i < feeObjects.size(); ++i) {
+        QWidget *child = qobject_cast<QWidget *>(feeObjects.at(i));
+        if (child && child->parent() == feeTab) {
+            feeChildren.append(child);
+        }
+    }
+    for (i = 0; i < feeChildren.size(); ++i) {
+        feeChildren.at(i)->hide();
+    }
+
+    QList<QWidget *> deviceChildren;
+    const QObjectList deviceObjects = deviceTab->children();
+    for (i = 0; i < deviceObjects.size(); ++i) {
+        QWidget *child = qobject_cast<QWidget *>(deviceObjects.at(i));
+        if (child && child->parent() == deviceTab) {
+            deviceChildren.append(child);
+        }
+    }
+    for (i = 0; i < deviceChildren.size(); ++i) {
+        deviceChildren.at(i)->hide();
+    }
+
+    QWidget *feeOverlay = feeTab->findChild<QWidget *>("feeInfoOverlay");
+    if (!feeOverlay) {
+        feeOverlay = new QWidget(feeTab);
+        feeOverlay->setObjectName("feeInfoOverlay");
+        feeOverlay->setGeometry(0, 0, 755, 345);
+        feeOverlay->setStyleSheet("background:transparent;");
+
+        QFrame *topCard = static_cast<QFrame *>(makeInfoCard(feeOverlay, QString(), QRect(12, 8, 731, 48)));
+        topCard->setStyleSheet("QFrame{background:transparent;border:none;}");
+        makeValueLabel(topCard, "lblCurrentSeg", QRect(18, 20, 170, 24), 14, true);
+        makeValueLabel(topCard, "lblCurrentChargeFee", QRect(194, 20, 160, 24), 14, false);
+        makeValueLabel(topCard, "lblCurrentServiceFee", QRect(364, 20, 160, 24), 14, false);
+        makeValueLabel(topCard, "lblCurrentTotalFee", QRect(534, 20, 170, 24), 14, true);
+
+        QLabel *legendCharge = new QLabel(QString::fromUtf8("电费"), feeOverlay);
+        legendCharge->setGeometry(548, 64, 60, 20);
+        legendCharge->setStyleSheet("QLabel{color:rgb(38,45,52);background:transparent;font:13px 'MS Shell Dlg 2';}");
+        QLabel *legendChargeColor = new QLabel(feeOverlay);
+        legendChargeColor->setGeometry(522, 67, 18, 14);
+        legendChargeColor->setStyleSheet("QLabel{background:rgb(0,176,102);border-radius:3px;}");
+        QLabel *legendService = new QLabel(QString::fromUtf8("服务费"), feeOverlay);
+        legendService->setGeometry(662, 64, 60, 20);
+        legendService->setStyleSheet("QLabel{color:rgb(38,45,52);background:transparent;font:13px 'MS Shell Dlg 2';}");
+        QLabel *legendServiceColor = new QLabel(feeOverlay);
+        legendServiceColor->setGeometry(636, 67, 18, 14);
+        legendServiceColor->setStyleSheet("QLabel{background:rgb(18,108,245);border-radius:3px;}");
+
+        m_feeChart = new FeeModelChartWidget(feeOverlay);
+        m_feeChart->setObjectName("feeModelChart");
+        m_feeChart->setGeometry(12, 74, 731, 248);
+        legendChargeColor->raise();
+        legendCharge->raise();
+        legendServiceColor->raise();
+        legendService->raise();
+        feeOverlay->show();
+    }
+
+    QWidget *deviceOverlay = deviceTab->findChild<QWidget *>("deviceInfoOverlay");
+    if (!deviceOverlay) {
+        deviceOverlay = new QWidget(deviceTab);
+        deviceOverlay->setObjectName("deviceInfoOverlay");
+        deviceOverlay->setGeometry(0, 0, 755, 345);
+        deviceOverlay->setStyleSheet("background:transparent;");
+
+        QFrame *leftCard = static_cast<QFrame *>(makeInfoCard(deviceOverlay, QString::fromUtf8("软件版本信息"), QRect(12, 10, 360, 300)));
+        QFrame *rightCard = static_cast<QFrame *>(makeInfoCard(deviceOverlay, QString::fromUtf8("通信状态信息"), QRect(383, 10, 360, 300)));
+
+        const int rowY[] = {48, 84, 120, 156, 192, 228};
+        const char *nameLabels[] = {
+            "logic", "meter", "mon", "comm", "daemon", "hmi"
+        };
+        const char *valueNames[] = {
+            "lblVersionLogic", "lblVersionMeter", "lblVersionMon",
+            "lblVersionComm", "lblVersionDaemon", "lblVersionHmi"
+        };
+        for (i = 0; i < 6; ++i) {
+            QLabel *name = new QLabel(QString::fromLatin1(nameLabels[i]), leftCard);
+            name->setGeometry(18, rowY[i], 70, 24);
+            name->setStyleSheet("QLabel{color:rgb(72,84,94);background:transparent;font:15px 'MS Shell Dlg 2';font-weight:bold;}");
+            makeValueLabel(leftCard, valueNames[i], QRect(88, rowY[i], 250, 24), 14, false);
+        }
+
+        QLabel *deviceIdTitle = new QLabel(QString::fromUtf8("设备身份"), leftCard);
+        deviceIdTitle->setGeometry(18, 264, 80, 20);
+        deviceIdTitle->setStyleSheet("QLabel{color:rgb(72,84,94);background:transparent;font:14px 'MS Shell Dlg 2';font-weight:bold;}");
+        makeValueLabel(leftCard, "lblDeviceIdentity", QRect(100, 260, 240, 26), 12, false);
+
+        const QString commTitles[] = {
+            QString::fromUtf8("平台通信状态"),
+            QString::fromUtf8("电表通信状态"),
+            QString::fromUtf8("主控通信状态"),
+            QString::fromUtf8("当前故障数量"),
+            QString::fromUtf8("最近故障名称"),
+            QString::fromUtf8("最近故障时间")
+        };
+        const char *commValueNames[] = {
+            "lblCommPlatform", "lblCommMeter", "lblCommController",
+            "lblDeviceFaultCount", "lblDeviceLatestFault", "lblDeviceLatestFaultTime"
+        };
+        for (i = 0; i < 6; ++i) {
+            QLabel *title = new QLabel(commTitles[i], rightCard);
+            title->setGeometry(18, rowY[i], 120, 24);
+            title->setStyleSheet("QLabel{color:rgb(72,84,94);background:transparent;font:15px 'MS Shell Dlg 2';font-weight:bold;}");
+            QLabel *value = makeValueLabel(rightCard, commValueNames[i], QRect(150, rowY[i], 180, 24), 14, true);
+            if (i < 3) {
+                value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            }
+        }
+        deviceOverlay->show();
+    }
+
+    setupChargeRecordTab();
+}
+
+void RuntimeWindow::setupChargeRecordTab()
+{
+    // BY ZF: 充电记录统一收敛为单页，A/B/全部通过筛选按钮切换。
+    if (!m_aboutTabWidget) {
+        return;
+    }
+
+    QWidget *summaryTab = m_aboutPage->findChild<QWidget *>("tab_9");
+    QWidget *aTab = m_aboutPage->findChild<QWidget *>("tab_7");
+    QWidget *bTab = m_aboutPage->findChild<QWidget *>("tab_8");
+
+    int idx = -1;
+    if (summaryTab) {
+        idx = m_aboutTabWidget->indexOf(summaryTab);
+        if (idx >= 0) {
+            m_aboutTabWidget->removeTab(idx);
+        }
+    }
+    if (bTab) {
+        idx = m_aboutTabWidget->indexOf(bTab);
+        if (idx >= 0) {
+            m_aboutTabWidget->removeTab(idx);
+        }
+    }
+    if (!aTab) {
+        return;
+    }
+
+    idx = m_aboutTabWidget->indexOf(aTab);
+    if (idx >= 0) {
+        m_aboutTabWidget->setTabText(idx, QString::fromUtf8("充电记录"));
+    }
+
+    QList<QWidget *> tabChildren;
+    const QObjectList tabObjects = aTab->children();
+    int i = 0;
+    for (i = 0; i < tabObjects.size(); ++i) {
+        QWidget *child = qobject_cast<QWidget *>(tabObjects.at(i));
+        if (child && child->parent() == aTab) {
+            tabChildren.append(child);
+        }
+    }
+    for (i = 0; i < tabChildren.size(); ++i) {
+        tabChildren.at(i)->hide();
+    }
+
+    QWidget *recordOverlay = aTab->findChild<QWidget *>("chargeRecordOverlay");
+    if (recordOverlay) {
+        return;
+    }
+
+    recordOverlay = new QWidget(aTab);
+    recordOverlay->setObjectName("chargeRecordOverlay");
+    recordOverlay->setGeometry(0, 0, 755, 345);
+    recordOverlay->setStyleSheet("background:transparent;");
+
+    QFrame *filterBar = static_cast<QFrame *>(makeInfoCard(recordOverlay, QString(), QRect(12, 8, 731, 50)));
+    filterBar->setStyleSheet("QFrame{background:transparent;border:none;}");
+
+    QPushButton *btnAll = new QPushButton(QString::fromUtf8("全部"), filterBar);
+    btnAll->setObjectName("btnChargeRecordAll");
+    btnAll->setGeometry(18, 12, 92, 28);
+    btnAll->setStyleSheet("QPushButton{background:rgb(232,234,236);border:1px solid rgb(150,150,150);border-radius:8px;color:rgb(38,45,52);font:14px 'MS Shell Dlg 2';font-weight:bold;}"
+                          "QPushButton:pressed{background:rgb(205,208,210);}");
+    connect(btnAll, SIGNAL(clicked()), this, SLOT(showAllChargeRecords()));
+
+    QPushButton *btnA = new QPushButton(QString::fromUtf8("A枪"), filterBar);
+    btnA->setObjectName("btnChargeRecordA");
+    btnA->setGeometry(122, 12, 92, 28);
+    btnA->setStyleSheet(btnAll->styleSheet());
+    connect(btnA, SIGNAL(clicked()), this, SLOT(showAGunChargeRecords()));
+
+    QPushButton *btnB = new QPushButton(QString::fromUtf8("B枪"), filterBar);
+    btnB->setObjectName("btnChargeRecordB");
+    btnB->setGeometry(226, 12, 92, 28);
+    btnB->setStyleSheet(btnAll->styleSheet());
+    connect(btnB, SIGNAL(clicked()), this, SLOT(showBGunChargeRecords()));
+
+    m_chargeRecordPageLabel = new QLabel(filterBar);
+    m_chargeRecordPageLabel->setObjectName("lblChargeRecordPage");
+    m_chargeRecordPageLabel->setGeometry(432, 12, 92, 28);
+    m_chargeRecordPageLabel->setAlignment(Qt::AlignCenter);
+    m_chargeRecordPageLabel->setStyleSheet("QLabel{color:rgb(38,45,52);background:transparent;font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+
+    QPushButton *btnPrevLeft = new QPushButton(QString::fromUtf8("上一页"), filterBar);
+    btnPrevLeft->setObjectName("btnChargeRecordPrevLeft");
+    btnPrevLeft->setGeometry(536, 12, 92, 28);
+    btnPrevLeft->setStyleSheet("QPushButton{background:rgb(232,234,236);border:1px solid rgb(150,150,150);border-radius:8px;color:rgb(38,45,52);font:14px 'MS Shell Dlg 2';font-weight:bold;}"
+                               "QPushButton:pressed{background:rgb(205,208,210);}");
+    connect(btnPrevLeft, SIGNAL(clicked()), this, SLOT(showPrevChargeRecordPage()));
+
+    QPushButton *btnNextLeft = new QPushButton(QString::fromUtf8("下一页"), filterBar);
+    btnNextLeft->setObjectName("btnChargeRecordNextLeft");
+    btnNextLeft->setGeometry(640, 12, 92, 28);
+    btnNextLeft->setStyleSheet(btnPrevLeft->styleSheet());
+    connect(btnNextLeft, SIGNAL(clicked()), this, SLOT(showNextChargeRecordPage()));
+
+    m_chargeRecordTable = new QTableWidget(recordOverlay);
+    m_chargeRecordTable->setObjectName("chargeRecordTable");
+    m_chargeRecordTable->setGeometry(12, 52, 731, 270);
+    m_chargeRecordTable->setColumnCount(7);
+    m_chargeRecordTable->setRowCount(0);
+    QStringList headers;
+    headers << QString::fromUtf8("编号")
+            << QString::fromUtf8("枪号")
+            << QString::fromUtf8("启动时间")
+            << QString::fromUtf8("结束时间")
+            << QString::fromUtf8("电量(kWh)")
+            << QString::fromUtf8("金额(元)")
+            << QString::fromUtf8("停机原因");
+    m_chargeRecordTable->setHorizontalHeaderLabels(headers);
+    m_chargeRecordTable->verticalHeader()->hide();
+    m_chargeRecordTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_chargeRecordTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_chargeRecordTable->setFocusPolicy(Qt::NoFocus);
+    m_chargeRecordTable->setShowGrid(true);
+    m_chargeRecordTable->setAlternatingRowColors(true);
+    m_chargeRecordTable->setStyleSheet(
+        "QTableWidget{background:rgb(244,246,247);alternate-background-color:rgb(236,238,239);"
+        "gridline-color:rgb(188,188,188);border:1px solid rgb(168,168,168);color:rgb(38,45,52);font:13px 'MS Shell Dlg 2';}"
+        "QHeaderView::section{background:rgb(214,217,219);color:rgb(38,45,52);border:1px solid rgb(168,168,168);font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+    m_chargeRecordTable->setColumnWidth(0, 54);
+    m_chargeRecordTable->setColumnWidth(1, 52);
+    m_chargeRecordTable->setColumnWidth(2, 156);
+    m_chargeRecordTable->setColumnWidth(3, 156);
+    m_chargeRecordTable->setColumnWidth(4, 96);
+    m_chargeRecordTable->setColumnWidth(5, 86);
+    m_chargeRecordTable->setColumnWidth(6, 122);
+
+    QPushButton *btnPrevRight = new QPushButton(QString::fromUtf8("上一页"), recordOverlay);
+    btnPrevRight->setObjectName("btnChargeRecordPrevRight");
+    btnPrevRight->setGeometry(12, 324, 86, 22);
+    btnPrevRight->setStyleSheet(btnPrevLeft->styleSheet());
+    connect(btnPrevRight, SIGNAL(clicked()), this, SLOT(showPrevChargeRecordPage()));
+    btnPrevRight->hide();
+
+    QPushButton *btnNextRight = new QPushButton(QString::fromUtf8("下一页"), recordOverlay);
+    btnNextRight->setObjectName("btnChargeRecordNextRight");
+    btnNextRight->setGeometry(104, 324, 86, 22);
+    btnNextRight->setStyleSheet(btnPrevLeft->styleSheet());
+    connect(btnNextRight, SIGNAL(clicked()), this, SLOT(showNextChargeRecordPage()));
+    btnNextRight->hide();
+    recordOverlay->show();
+}
+
+void RuntimeWindow::refreshChargeRecordCache(bool forceReload)
+{
+    const uint64_t now = nowMs();
+    if (!forceReload && now - m_lastChargeRecordCheckMs < 5000) {
+        return;
+    }
+    m_lastChargeRecordCheckMs = now;
+
+    const QString targetPathAbs = QString::fromUtf8("/mnt/nandflash/data/chargerecords.db");
+    const QString targetPathRel = QString::fromUtf8("mnt/nandflash/data/chargerecords.db");
+    const QString fallbackPath = QString::fromUtf8("/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/core/hmi/Zhongshihua2.0/release/chargerecords.db");
+    QString dbPath;
+    if (QFileInfo(targetPathAbs).exists()) {
+        dbPath = targetPathAbs;
+    } else if (QFileInfo(targetPathRel).exists()) {
+        dbPath = targetPathRel;
+    } else {
+        dbPath = fallbackPath;
+    }
+    if (!QFileInfo(dbPath).exists()) {
+        return;
+    }
+
+    sqlite3 *db = 0;
+    if (sqlite3_open(dbPath.toLocal8Bit().constData(), &db) != SQLITE_OK || !db) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return;
+    }
+
+    const char *sql =
+        "SELECT id,gun_no,trade_no,charge_start_time,charge_end_time,total_elect,total_cost,reason "
+        "FROM charge_trade_info ORDER BY charge_start_time DESC,id DESC LIMIT 100;";
+    sqlite3_stmt *stmt = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
+        sqlite3_close(db);
+        return;
+    }
+
+    std::vector<ChargeRecordItem> records;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ChargeRecordItem item;
+        item.id = sqlite3_column_int(stmt, 0);
+        item.gunNo = sqlite3_column_int(stmt, 1);
+        const char *tradeNo = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+        const char *startTime = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+        const char *endTime = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
+        item.tradeNo = tradeNo ? tradeNo : "";
+        item.startTime = startTime ? startTime : "";
+        item.endTime = endTime ? endTime : "";
+        item.totalElect = sqlite3_column_double(stmt, 5);
+        item.totalCost = sqlite3_column_double(stmt, 6);
+        item.reason = sqlite3_column_int(stmt, 7);
+        records.push_back(item);
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    m_chargeRecords = records;
+}
+
+void RuntimeWindow::refreshChargeRecordTable()
+{
+    if (!m_chargeRecordTable) {
+        return;
+    }
+
+    QPushButton *btnAll = m_aboutPage->findChild<QPushButton *>("btnChargeRecordAll");
+    QPushButton *btnA = m_aboutPage->findChild<QPushButton *>("btnChargeRecordA");
+    QPushButton *btnB = m_aboutPage->findChild<QPushButton *>("btnChargeRecordB");
+    const QString activeStyle =
+        "QPushButton{background:rgb(72,148,196);border:1px solid rgb(110,110,110);border-radius:8px;color:white;font:14px 'MS Shell Dlg 2';font-weight:bold;}";
+    const QString normalStyle =
+        "QPushButton{background:rgb(232,234,236);border:1px solid rgb(150,150,150);border-radius:8px;color:rgb(38,45,52);font:14px 'MS Shell Dlg 2';font-weight:bold;}";
+    if (btnAll) btnAll->setStyleSheet(m_recordGunFilter < 0 ? activeStyle : normalStyle);
+    if (btnA) btnA->setStyleSheet(m_recordGunFilter == 0 ? activeStyle : normalStyle);
+    if (btnB) btnB->setStyleSheet(m_recordGunFilter == 1 ? activeStyle : normalStyle);
+
+    std::vector<ChargeRecordItem> filtered;
+    int i = 0;
+    for (i = 0; i < static_cast<int>(m_chargeRecords.size()); ++i) {
+        const ChargeRecordItem &item = m_chargeRecords[i];
+        if (m_recordGunFilter >= 0 && item.gunNo != m_recordGunFilter) {
+            continue;
+        }
+        filtered.push_back(item);
+    }
+
+    const int totalPages = filtered.empty() ? 1 : ((static_cast<int>(filtered.size()) - 1) / m_chargeRecordPageSize + 1);
+    if (m_chargeRecordPage >= totalPages) {
+        m_chargeRecordPage = totalPages - 1;
+    }
+    if (m_chargeRecordPage < 0) {
+        m_chargeRecordPage = 0;
+    }
+    if (m_chargeRecordPageLabel) {
+        m_chargeRecordPageLabel->setText(QString::fromUtf8("%1/%2").arg(m_chargeRecordPage + 1).arg(totalPages));
+    }
+
+    QPushButton *btnPrevLeft = m_aboutPage->findChild<QPushButton *>("btnChargeRecordPrevLeft");
+    QPushButton *btnNextLeft = m_aboutPage->findChild<QPushButton *>("btnChargeRecordNextLeft");
+    QPushButton *btnPrevRight = m_aboutPage->findChild<QPushButton *>("btnChargeRecordPrevRight");
+    QPushButton *btnNextRight = m_aboutPage->findChild<QPushButton *>("btnChargeRecordNextRight");
+    const bool hasPrev = (m_chargeRecordPage > 0);
+    const bool hasNext = (m_chargeRecordPage + 1 < totalPages);
+    if (btnPrevLeft) btnPrevLeft->setEnabled(hasPrev);
+    if (btnPrevRight) btnPrevRight->setEnabled(hasPrev);
+    if (btnNextLeft) btnNextLeft->setEnabled(hasNext);
+    if (btnNextRight) btnNextRight->setEnabled(hasNext);
+
+    m_chargeRecordTable->setRowCount(0);
+    int displayRow = 0;
+    const int startIndex = m_chargeRecordPage * m_chargeRecordPageSize;
+    const int endIndex = qMin(startIndex + m_chargeRecordPageSize, static_cast<int>(filtered.size()));
+    for (i = startIndex; i < endIndex; ++i) {
+        const ChargeRecordItem &item = filtered[i];
+
+        m_chargeRecordTable->insertRow(displayRow);
+        QTableWidgetItem *idItem = new QTableWidgetItem(QString::number(item.id));
+        QTableWidgetItem *gunItem = new QTableWidgetItem(item.gunNo == 0 ? QString::fromUtf8("A枪") : QString::fromUtf8("B枪"));
+        QTableWidgetItem *startItem = new QTableWidgetItem(ymdhmsText(item.startTime));
+        QTableWidgetItem *endItem = new QTableWidgetItem(ymdhmsText(item.endTime));
+        QTableWidgetItem *electItem = new QTableWidgetItem(QString::number(item.totalElect, 'f', 3));
+        QTableWidgetItem *costItem = new QTableWidgetItem(QString::number(item.totalCost, 'f', 2));
+        QTableWidgetItem *reasonItem = new QTableWidgetItem(chargeRecordReasonText(item.reason));
+        m_chargeRecordTable->setItem(displayRow, 0, idItem);
+        m_chargeRecordTable->setItem(displayRow, 1, gunItem);
+        m_chargeRecordTable->setItem(displayRow, 2, startItem);
+        m_chargeRecordTable->setItem(displayRow, 3, endItem);
+        m_chargeRecordTable->setItem(displayRow, 4, electItem);
+        m_chargeRecordTable->setItem(displayRow, 5, costItem);
+        m_chargeRecordTable->setItem(displayRow, 6, reasonItem);
+        ++displayRow;
+    }
+}
+
+void RuntimeWindow::refreshFeeModelCache(bool forceReload)
+{
+    // BY ZF: 分时模型统一从数据库最新记录读取，空库时保持旧缓存不被覆盖。
+    const uint64_t now = nowMs();
+    if (!forceReload && now - m_lastFeeModelCheckMs < 3000) {
+        return;
+    }
+    m_lastFeeModelCheckMs = now;
+
+    const QString targetPathAbs = QString::fromUtf8("/mnt/nandflash/data/feemodel.db");
+    QString dbPath;
+    dbPath = targetPathAbs;
+    
+    if (!QFileInfo(dbPath).exists()) {
+        std::cerr << "[A3] feemodel db not found: " << dbPath.toStdString() << std::endl;
+        return;
+    }
+
+    sqlite3 *db = 0;
+    if (sqlite3_open(dbPath.toLocal8Bit().constData(), &db) != SQLITE_OK || !db) {
+        std::cerr << "[A3] open feemodel db failed: " << dbPath.toStdString() << std::endl;
+        if (db) {
+            sqlite3_close(db);
+        }
+        return;
+    }
+
+    const char *sqlByTime =
+        "SELECT feeModelId,timeNum,timeSeg,segFlag,chargeFee,serviceFee,timeStamp "
+        "FROM tbFeeModel ORDER BY timeStamp DESC,id DESC LIMIT 1;";
+    const char *sqlById =
+        "SELECT feeModelId,timeNum,timeSeg,segFlag,chargeFee,serviceFee,timeStamp "
+        "FROM tbFeeModel ORDER BY id DESC LIMIT 1;";
+    sqlite3_stmt *stmt = 0;
+    if (sqlite3_prepare_v2(db, sqlByTime, -1, &stmt, 0) != SQLITE_OK) {
+        std::cerr << "[A3] prepare feemodel query by time failed: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_close(db);
+        return;
+    }
+
+    FeeModelData newModel;
+    bool ok = readFeeModelFromStmt(stmt, newModel);
+    sqlite3_finalize(stmt);
+
+    if (!ok) {
+        if (sqlite3_prepare_v2(db, sqlById, -1, &stmt, 0) == SQLITE_OK) {
+            newModel = FeeModelData();
+            ok = readFeeModelFromStmt(stmt, newModel);
+            sqlite3_finalize(stmt);
+        } else {
+            std::cerr << "[A3] prepare feemodel query by id failed: " << sqlite3_errmsg(db) << std::endl;
+        }
+    }
+
+    sqlite3_close(db);
+
+    if (!ok || !newModel.valid) {
+        std::cerr << "[A3] feemodel parse empty from db: " << dbPath.toStdString() << std::endl;
+        return;
+    }
+
+    if (!m_feeModel.valid || m_feeModel.timeStamp != newModel.timeStamp || m_feeModel.feeModelId != newModel.feeModelId) {
+        m_feeModel = newModel;
+        std::cerr << "[A3] feemodel loaded: " << m_feeModel.feeModelId
+                  << " segments=" << m_feeModel.segments.size()
+                  << " time=" << m_feeModel.timeStamp << std::endl;
+    }
+}
+
+void RuntimeWindow::handleMonEvent(const std::string &payload)
+{
+    // BY ZF: 设备信息页的通信状态与模块版本由 mon 事件缓存驱动。
+    cJSON *root = cJSON_Parse(payload.c_str());
+    if (!root) {
+        return;
+    }
+
+    cJSON *data = cJSON_GetObjectItem(root, "data");
+    if (!cJSON_IsObject(data)) {
+        data = root;
+    }
+
+    QMutexLocker locker(&m_dataMutex);
+    m_monStatus.logic.version = getString(data, "logicVersion", m_monStatus.logic.version);
+    m_monStatus.logic.buildDate = getString(data, "logicDate", getString(data, "logicBuildDate", m_monStatus.logic.buildDate));
+    m_monStatus.meter.version = getString(data, "meterVersion", m_monStatus.meter.version);
+    m_monStatus.meter.buildDate = getString(data, "meterDate", getString(data, "meterBuildDate", m_monStatus.meter.buildDate));
+    m_monStatus.mon.version = getString(data, "monVersion", m_monStatus.mon.version);
+    m_monStatus.mon.buildDate = getString(data, "monDate", getString(data, "monBuildDate", m_monStatus.mon.buildDate));
+
+    m_monStatus.platformComm = getInt(data, "platformComm", getInt(data, "platformLink", m_monStatus.platformComm));
+    m_monStatus.meterComm = getInt(data, "meterComm", getInt(data, "meterLink", m_monStatus.meterComm));
+    m_monStatus.controllerComm = getInt(data, "controllerComm", getInt(data, "mainCtrlComm", m_monStatus.controllerComm));
+    m_monStatus.activeFaultCount = getInt(data, "faultCount", getInt(data, "activeFaultCount", m_monStatus.activeFaultCount));
+    m_monStatus.latestFaultName = getString(data, "latestFaultName", getString(data, "faultName", m_monStatus.latestFaultName));
+    m_monStatus.latestFaultTime = getString(data, "latestFaultTime", getString(data, "faultTime", m_monStatus.latestFaultTime));
+    m_monStatus.lastEventTime = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss").toStdString();
+
+    cJSON_Delete(root);
+    QMetaObject::invokeMethod(this, "refreshUi", Qt::QueuedConnection);
+}
+
 void RuntimeWindow::refreshUi()
 {
     // BY ZF: 统一在 UI 线程做页面选择和控件刷新，避免多线程直接改界面。
@@ -835,8 +1570,13 @@ void RuntimeWindow::refreshUi()
 
 void RuntimeWindow::showAboutPage()
 {
-    QMutexLocker locker(&m_dataMutex);
-    m_showAbout = true;
+    {
+        QMutexLocker locker(&m_dataMutex);
+        m_showAbout = true;
+    }
+    refreshFeeModelCache(true);
+    refreshChargeRecordCache(true);
+    refreshChargeRecordTable();
     m_stack->setCurrentWidget(m_aboutPage);
 }
 
@@ -870,6 +1610,44 @@ void RuntimeWindow::returnToIdlePage()
         m_manualFocusLocked = false;
     }
     refreshUi();
+}
+
+void RuntimeWindow::showAllChargeRecords()
+{
+    m_recordGunFilter = -1;
+    m_chargeRecordPage = 0;
+    refreshChargeRecordCache(true);
+    refreshChargeRecordTable();
+}
+
+void RuntimeWindow::showAGunChargeRecords()
+{
+    m_recordGunFilter = 0;
+    m_chargeRecordPage = 0;
+    refreshChargeRecordCache(true);
+    refreshChargeRecordTable();
+}
+
+void RuntimeWindow::showBGunChargeRecords()
+{
+    m_recordGunFilter = 1;
+    m_chargeRecordPage = 0;
+    refreshChargeRecordCache(true);
+    refreshChargeRecordTable();
+}
+
+void RuntimeWindow::showPrevChargeRecordPage()
+{
+    if (m_chargeRecordPage > 0) {
+        --m_chargeRecordPage;
+    }
+    refreshChargeRecordTable();
+}
+
+void RuntimeWindow::showNextChargeRecordPage()
+{
+    ++m_chargeRecordPage;
+    refreshChargeRecordTable();
 }
 
 void RuntimeWindow::refreshIdlePage(const std::vector<GunUiData> &guns)
@@ -1118,6 +1896,10 @@ void RuntimeWindow::refreshCheckoutPage(const GunUiData &gun)
 
 void RuntimeWindow::refreshAboutPage()
 {
+    refreshFeeModelCache(false);
+    refreshChargeRecordCache(false);
+    refreshChargeRecordTable();
+    setLabelText(m_aboutPage, "label_id", QString::fromStdString(m_cdzNo.empty() ? m_cdzId : m_cdzNo));
     setLabelText(m_aboutPage, "current_time", QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss"));
     setLabelText(m_aboutPage, "label_timeshow", QString::fromStdString(m_cdzId));
     setLabelText(m_aboutPage, "lblVersion", QString::fromUtf8("Zhongshihua2.0"));
@@ -1127,6 +1909,70 @@ void RuntimeWindow::refreshAboutPage()
     setLabelText(m_aboutPage, "lblcomm", QString::fromUtf8("逻辑订阅模式"));
     setLabelText(m_aboutPage, "lblPoleId_2", QString::fromStdString(m_cdzId));
     setLabelText(m_aboutPage, "lblJzqAddr", QString::fromStdString(m_macAddr));
+
+    setLabelText(m_aboutPage, "lblVersionLogic",
+                 QString("logic    %1    %2")
+                    .arg(QString::fromStdString(m_monStatus.logic.version.empty() ? "--" : m_monStatus.logic.version))
+                    .arg(QString::fromStdString(m_monStatus.logic.buildDate.empty() ? "--" : m_monStatus.logic.buildDate)));
+    setLabelText(m_aboutPage, "lblVersionMeter",
+                 QString("meter    %1    %2")
+                    .arg(QString::fromStdString(m_monStatus.meter.version.empty() ? "--" : m_monStatus.meter.version))
+                    .arg(QString::fromStdString(m_monStatus.meter.buildDate.empty() ? "--" : m_monStatus.meter.buildDate)));
+    setLabelText(m_aboutPage, "lblVersionMon",
+                 QString("mon      %1    %2")
+                    .arg(QString::fromStdString(m_monStatus.mon.version.empty() ? "--" : m_monStatus.mon.version))
+                    .arg(QString::fromStdString(m_monStatus.mon.buildDate.empty() ? "--" : m_monStatus.mon.buildDate)));
+    setLabelText(m_aboutPage, "lblVersionComm", QString("comm     --    --"));
+    setLabelText(m_aboutPage, "lblVersionDaemon", QString("daemon   --    --"));
+    setLabelText(m_aboutPage, "lblVersionHmi", QString("hmi      Zhongshihua2.0    MQTT Runtime"));
+
+    setLabelText(m_aboutPage, "lblCommPlatform", QString::number(m_monStatus.platformComm));
+    setLabelText(m_aboutPage, "lblCommMeter", QString::number(m_monStatus.meterComm));
+    setLabelText(m_aboutPage, "lblCommController", QString::number(m_monStatus.controllerComm));
+    setLabelText(m_aboutPage, "lblDeviceFaultCount", QString::number(m_monStatus.activeFaultCount));
+    setLabelText(m_aboutPage, "lblDeviceLatestFault",
+                 QString::fromStdString(m_monStatus.latestFaultName.empty() ? "--" : m_monStatus.latestFaultName));
+    setLabelText(m_aboutPage, "lblDeviceLatestFaultTime",
+                 QString::fromStdString(m_monStatus.latestFaultTime.empty() ? "--" : m_monStatus.latestFaultTime));
+    setLabelText(m_aboutPage, "lblDeviceIdentity",
+                 QString("No:%1  ID:%2  MAC:%3")
+                    .arg(QString::fromStdString(m_cdzNo.empty() ? "--" : m_cdzNo))
+                    .arg(QString::fromStdString(m_cdzId.empty() ? "--" : m_cdzId))
+                    .arg(QString::fromStdString(m_macAddr.empty() ? "--" : m_macAddr)));
+
+    QString currentSeg = QString::fromUtf8("当前时段：--");
+    QString currentCharge = QString::fromUtf8("电费：-- 元");
+    QString currentService = QString::fromUtf8("服务费：-- 元");
+    QString currentTotal = QString::fromUtf8("总价：-- 元");
+    QVector<FeeBarData> bars;
+    if (m_feeModel.valid) {
+        int idx = 0;
+        for (idx = 0; idx < static_cast<int>(m_feeModel.segments.size()); ++idx) {
+            FeeBarData bar;
+            bar.startTime = hhmmText(m_feeModel.segments[idx].startTime);
+            bar.endTime = hhmmText(m_feeModel.segments[idx].endTime);
+            bar.chargeFee = m_feeModel.segments[idx].chargeFee;
+            bar.serviceFee = m_feeModel.segments[idx].serviceFee;
+            bars.push_back(bar);
+        }
+
+        if (m_feeModel.currentIndex >= 0 && m_feeModel.currentIndex < static_cast<int>(m_feeModel.segments.size())) {
+            const FeeSegment &seg = m_feeModel.segments[m_feeModel.currentIndex];
+            currentSeg = QString::fromUtf8("当前时段：%1 - %2")
+                .arg(hhmmText(seg.startTime))
+                .arg(hhmmText(seg.endTime));
+            currentCharge = QString::fromUtf8("电费：%1 元").arg(formatFeeValue(seg.chargeFee));
+            currentService = QString::fromUtf8("服务费：%1 元").arg(formatFeeValue(seg.serviceFee));
+            currentTotal = QString::fromUtf8("总价：%1 元").arg(formatFeeValue(seg.chargeFee + seg.serviceFee));
+        }
+    }
+    setLabelText(m_aboutPage, "lblCurrentSeg", currentSeg);
+    setLabelText(m_aboutPage, "lblCurrentChargeFee", currentCharge);
+    setLabelText(m_aboutPage, "lblCurrentServiceFee", currentService);
+    setLabelText(m_aboutPage, "lblCurrentTotalFee", currentTotal);
+    if (m_feeChart) {
+        m_feeChart->setBars(bars, m_feeModel.currentIndex);
+    }
 }
 
 RuntimeWindow::PageId RuntimeWindow::decidePage(const std::vector<GunUiData> &guns, int &focusGun) const

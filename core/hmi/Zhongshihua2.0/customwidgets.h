@@ -7,7 +7,18 @@
 #include <QLineEdit>
 #include <QProgressBar>
 #include <QTimer>
+#include <QVector>
 #include <QWidget>
+
+class QPaintEvent;
+
+struct FeeBarData
+{
+    QString startTime;
+    QString endTime;
+    double chargeFee;
+    double serviceFee;
+};
 
 class CClickLabel : public QLabel
 {
@@ -94,6 +105,22 @@ protected:
 private:
     QString m_data;
     QString m_data1;
+};
+
+class FeeModelChartWidget : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit FeeModelChartWidget(QWidget *parent = 0);
+    void setBars(const QVector<FeeBarData> &bars, int currentIndex);
+
+protected:
+    void paintEvent(QPaintEvent *event);
+
+private:
+    QVector<FeeBarData> m_bars;
+    int m_currentIndex;
 };
 
 class CCellWidget : public QWidget

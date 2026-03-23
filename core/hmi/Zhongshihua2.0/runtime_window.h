@@ -14,7 +14,10 @@
 class QLabel;
 class QPushButton;
 class QStackedWidget;
+class QTableWidget;
+class QTabWidget;
 class QWidget;
+class FeeModelChartWidget;
 
 class RuntimeWindow : public QMainWindow
 {
@@ -32,8 +35,13 @@ private slots:
     void leaveAboutPage();
     void handleCellClick(int port);
     void returnToIdlePage();
+    void showAllChargeRecords();
+    void showAGunChargeRecords();
+    void showBGunChargeRecords();
+    void showPrevChargeRecordPage();
+    void showNextChargeRecordPage();
 
-private:
+public:
     enum PageId {
         PageIdle = 0,
         PageAuthorize,
@@ -83,6 +91,62 @@ private:
         GunUiData();
     };
 
+    struct ModuleVersionInfo {
+        std::string version;
+        std::string buildDate;
+
+        ModuleVersionInfo();
+    };
+
+    struct MonStatusData {
+        ModuleVersionInfo logic;
+        ModuleVersionInfo meter;
+        ModuleVersionInfo mon;
+        int platformComm;
+        int meterComm;
+        int controllerComm;
+        int activeFaultCount;
+        std::string latestFaultName;
+        std::string latestFaultTime;
+        std::string lastEventTime;
+
+        MonStatusData();
+    };
+
+    struct FeeSegment {
+        std::string segFlag;
+        std::string startTime;
+        std::string endTime;
+        double chargeFee;
+        double serviceFee;
+
+        FeeSegment();
+    };
+
+    struct FeeModelData {
+        std::string feeModelId;
+        std::string timeStamp;
+        std::vector<FeeSegment> segments;
+        int currentIndex;
+        bool valid;
+
+        FeeModelData();
+    };
+
+    struct ChargeRecordItem {
+        int id;
+        int gunNo;
+        std::string tradeNo;
+        std::string startTime;
+        std::string endTime;
+        double totalElect;
+        double totalCost;
+        int reason;
+
+        ChargeRecordItem();
+    };
+
+private:
     bool loadConfig();
     bool initMqtt();
     bool buildPages();
@@ -96,9 +160,15 @@ private:
     void handleFeeData(uint8_t gun, const std::string &payload);
     void handlePileData(uint8_t gun, const std::string &payload);
     void handlePlatEvent(uint8_t gun, const std::string &payload);
+    void handleMonEvent(const std::string &payload);
 
     void rebuildQrPayload(int gun);
     void applyIdleLayout();
+    void setupAboutTabs();
+    void refreshFeeModelCache(bool forceReload);
+    void setupChargeRecordTab();
+    void refreshChargeRecordCache(bool forceReload);
+    void refreshChargeRecordTable();
     void refreshIdlePage(const std::vector<GunUiData> &guns);
     void refreshAuthorizePage(const GunUiData &gun);
     void refreshChargingPage(const GunUiData &gun);
@@ -129,6 +199,14 @@ private:
     std::string m_operatorId;
     std::string m_macAddr;
     std::vector<GunUiData> m_guns;
+    MonStatusData m_monStatus;
+    FeeModelData m_feeModel;
+    uint64_t m_lastFeeModelCheckMs;
+    std::vector<ChargeRecordItem> m_chargeRecords;
+    uint64_t m_lastChargeRecordCheckMs;
+    int m_recordGunFilter;
+    int m_chargeRecordPage;
+    int m_chargeRecordPageSize;
 
     QStackedWidget *m_stack;
     QLabel *m_bottomTime;
@@ -137,6 +215,10 @@ private:
     QWidget *m_chargingPage;
     QWidget *m_checkoutPage;
     QWidget *m_aboutPage;
+    QTabWidget *m_aboutTabWidget;
+    FeeModelChartWidget *m_feeChart;
+    QTableWidget *m_chargeRecordTable;
+    QLabel *m_chargeRecordPageLabel;
 };
 
 #endif
