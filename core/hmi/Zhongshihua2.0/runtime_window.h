@@ -3,6 +3,7 @@
 
 #include <QMainWindow>
 #include <QMutex>
+#include <QString>
 #include <QTimer>
 
 #include <stdint.h>
@@ -40,6 +41,11 @@ private slots:
     void showBGunChargeRecords();
     void showPrevChargeRecordPage();
     void showNextChargeRecordPage();
+    void showAllFaultRecords();
+    void showAFaultRecords();
+    void showBFaultRecords();
+    void showPrevFaultRecordPage();
+    void showNextFaultRecordPage();
 
 public:
     enum PageId {
@@ -146,6 +152,15 @@ public:
         ChargeRecordItem();
     };
 
+    struct FaultRecordItem {
+        int id;
+        int gunNo;
+        std::string occurTime;
+        QString faultName;
+
+        FaultRecordItem();
+    };
+
 private:
     bool loadConfig();
     bool initMqtt();
@@ -166,6 +181,9 @@ private:
     void applyIdleLayout();
     void setupAboutTabs();
     void refreshFeeModelCache(bool forceReload);
+    void setupFaultRecordTab();
+    void refreshFaultRecordCache(bool forceReload);
+    void refreshFaultRecordTable();
     void setupChargeRecordTab();
     void refreshChargeRecordCache(bool forceReload);
     void refreshChargeRecordTable();
@@ -207,6 +225,11 @@ private:
     int m_recordGunFilter;
     int m_chargeRecordPage;
     int m_chargeRecordPageSize;
+    std::vector<FaultRecordItem> m_faultRecords;
+    uint64_t m_lastFaultRecordCheckMs;
+    int m_faultGunFilter;
+    int m_faultRecordPage;
+    int m_faultRecordPageSize;
 
     QStackedWidget *m_stack;
     QLabel *m_bottomTime;
@@ -217,6 +240,8 @@ private:
     QWidget *m_aboutPage;
     QTabWidget *m_aboutTabWidget;
     FeeModelChartWidget *m_feeChart;
+    QTableWidget *m_faultRecordTable;
+    QLabel *m_faultRecordPageLabel;
     QTableWidget *m_chargeRecordTable;
     QLabel *m_chargeRecordPageLabel;
 };

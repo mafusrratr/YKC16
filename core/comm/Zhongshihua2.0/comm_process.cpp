@@ -54,6 +54,7 @@ namespace {
     //实时数据帧定义
     static const uint8_t kCmdBrm = 0x15;
     static const uint8_t kCmdBcp = 0x17;
+    static const uint8_t kCmdChargeEndStage = 0x19;
     static const uint8_t kCmdBst = 0x1D;
     static const uint8_t kCmdCst = 0x21;
     static const uint8_t kCmdBsm = 0x25;
@@ -1251,6 +1252,11 @@ bool CommProcess::handlePileEventForPlatform(uint8_t gun, const std::string& pay
     } else if (cJSON_IsString(type) && type->valuestring &&
                std::strcmp(type->valuestring, "stop_complete") == 0 &&
                cJSON_IsObject(data)) {
+        // BY ZF: 停止完成后补送0x19结束阶段报文（BSD/CSD汇总）。
+        const std::vector<uint8_t> endStageBody = buildChargeEndStageBody(gun, data);
+        if (!endStageBody.empty()) {
+            (void)sendPlatformFrame(kCmdChargeEndStage, endStageBody);
+        }
         // BY ZF: 停止完成后上送0x1D BST报文。
         const std::vector<uint8_t> bstBody = buildBstBody(gun, data);
         if (!bstBody.empty()) {
@@ -1376,7 +1382,7 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
     }
     if (periodCount < 0) periodCount = 0;
     if (periodCount > 48) periodCount = 48;
-    
+
     const FeeModel* matchedFeeModel = nullptr;
     if (gun < m_feeModelByGun.size()) {
         const FeeModel& localFeeModel = m_feeModelByGun[gun];
@@ -1384,12 +1390,14 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
             !localFeeModel.feeModelId.empty() &&
             feeModelIdFromRecord == localFeeModel.feeModelId &&
             static_cast<int>(localFeeModel.timeNum) == periodCount &&
-            localFeeModel.segFlag.size() >= static_cast<size_t>(periodCount)) {
+            localFeeModel.timeSeg.size() >= static_cast<size_t>(periodCount) &&
+            localFeeModel.chargeFee.size() >= static_cast<size_t>(periodCount) &&
+            localFeeModel.serviceFee.size() >= static_cast<size_t>(periodCount)) {
             matchedFeeModel = &localFeeModel;
         }
     }
 
-    // BY ZF: 统一封装单条费率明细，避免重复拼包逻辑。
+    // BY ZF: 统一封装单条半小时时段明细，时段号固定为 0x00~0x2F。
     auto appendRateDetail = [&body](uint8_t rateNo,
                                     uint32_t chargePrice,
                                     uint32_t servicePrice,
@@ -1407,68 +1415,122 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
         appendU32LE(body, serviceFeeVal);// N费率服务费(1e-4元)
     };
 
-    if (matchedFeeModel) {
-        // BY ZF: 计费模型一致时，按 segFlag 聚合后再上送（费率号维度）。
-        std::vector<uint64_t> energyByRate(256, 0ULL);
-        std::vector<uint64_t> chargeByRate(256, 0ULL);
-        std::vector<uint64_t> serviceByRate(256, 0ULL);
-        std::vector<uint32_t> chargePriceByRate(256, 0U);
-        std::vector<uint32_t> servicePriceByRate(256, 0U);
-        std::vector<uint8_t> rateSeen(256, 0U);
-        uint8_t maxRateNo = 0;
-
-        for (int i = 0; i < periodCount; ++i) {
-            double periodChargeFee = 0.0;
-            double periodServiceFee = 0.0;
-            double periodEnergy = 0.0;
-            if (cJSON_IsArray(chargeFeeArr)) {
-                cJSON* n = cJSON_GetArrayItem(chargeFeeArr, i);
-                if (n && cJSON_IsNumber(n)) periodChargeFee = n->valuedouble;
-            }
-            if (cJSON_IsArray(serviceFeeArr)) {
-                cJSON* n = cJSON_GetArrayItem(serviceFeeArr, i);
-                if (n && cJSON_IsNumber(n)) periodServiceFee = n->valuedouble;
-            }
-            if (cJSON_IsArray(partElectArr)) {
-                cJSON* n = cJSON_GetArrayItem(partElectArr, i);
-                if (n && cJSON_IsNumber(n)) periodEnergy = n->valuedouble;
-            }
-
-            unsigned int rawFlag = matchedFeeModel->segFlag[static_cast<size_t>(i)];
-            if (rawFlag > 255U) {
-                rawFlag = 255U;
-            }
-            const uint8_t rateNo = static_cast<uint8_t>(rawFlag);
-
-            energyByRate[rateNo] += static_cast<uint64_t>(scaleToU32(periodEnergy, 10000.0));
-            chargeByRate[rateNo] += static_cast<uint64_t>(scaleToU32(periodChargeFee, 10000.0));
-            serviceByRate[rateNo] += static_cast<uint64_t>(scaleToU32(periodServiceFee, 10000.0));
-            // BY ZF: 单价按计费模型发送，不根据金额/电量反算。
-            if (static_cast<size_t>(i) < matchedFeeModel->chargeFee.size()) {
-                chargePriceByRate[rateNo] = static_cast<uint32_t>(matchedFeeModel->chargeFee[static_cast<size_t>(i)] * 100U); // 0.001元 -> 1e-5元
-            }
-            if (static_cast<size_t>(i) < matchedFeeModel->serviceFee.size()) {
-                servicePriceByRate[rateNo] = static_cast<uint32_t>(matchedFeeModel->serviceFee[static_cast<size_t>(i)] * 100U); // 0.001元 -> 1e-5元
-            }
-            rateSeen[rateNo] = 1U;
-            if (rateNo > maxRateNo) {
-                maxRateNo = rateNo;
+    // BY ZF: 从 HHMM 起始时刻推导半小时时段号；00:00~00:30 => 0x00，23:30~24:00 => 0x2F。
+    auto parseHalfHourSlotNo = [](const std::string& hhmm, uint8_t& slotNo) -> bool {
+        if (hhmm.size() != 4U) {
+            return false;
+        }
+        for (size_t i = 0; i < hhmm.size(); ++i) {
+            if (hhmm[i] < '0' || hhmm[i] > '9') {
+                return false;
             }
         }
+        const int hour = (hhmm[0] - '0') * 10 + (hhmm[1] - '0');
+        const int minute = (hhmm[2] - '0') * 10 + (hhmm[3] - '0');
+        if (hour < 0 || hour > 23) {
+            return false;
+        }
+        if (minute != 0 && minute != 30) {
+            return false;
+        }
+        slotNo = static_cast<uint8_t>((hour * 60 + minute) / 30);
+        return slotNo <= 0x2FU;
+    };
 
-        // BY ZF: 费率总数按费率号最大值推导（zero-based => count=max+1）。
-        const uint8_t rateCount = static_cast<uint8_t>(maxRateNo + 1U);
-        body.push_back(rateCount);
-        for (uint16_t rateNo = 0; rateNo < static_cast<uint16_t>(rateCount); ++rateNo) {
-            const uint64_t energy64 = energyByRate[rateNo];
-            const uint64_t charge64 = chargeByRate[rateNo];
-            const uint64_t service64 = serviceByRate[rateNo];
-            const uint32_t energy = static_cast<uint32_t>(std::min<uint64_t>(energy64, 0xFFFFFFFFULL));
-            const uint32_t chargeFeeVal = static_cast<uint32_t>(std::min<uint64_t>(charge64, 0xFFFFFFFFULL));
-            const uint32_t serviceFeeVal = static_cast<uint32_t>(std::min<uint64_t>(service64, 0xFFFFFFFFULL));
-            const uint32_t chargePrice = rateSeen[rateNo] ? chargePriceByRate[rateNo] : 0U;
-            const uint32_t servicePrice = rateSeen[rateNo] ? servicePriceByRate[rateNo] : 0U;
-            appendRateDetail(static_cast<uint8_t>(rateNo), chargePrice, servicePrice, energy, chargeFeeVal, serviceFeeVal);
+    // BY ZF: 读取 update_record 单个分段的电量/金额；字段语义与 timeSeg 一一对应。
+    auto getSegmentNumber = [](cJSON* arr, int index) -> double {
+        if (!cJSON_IsArray(arr)) {
+            return 0.0;
+        }
+        cJSON* item = cJSON_GetArrayItem(arr, index);
+        return (item && cJSON_IsNumber(item)) ? item->valuedouble : 0.0;
+    };
+
+    // BY ZF: 解析 YYYYMMDDhhmmss 为“日内秒”，用于裁剪订单实际覆盖的半小时槽位。
+    auto parseDaySecondsFromYmdHms = [](uint64_t ymdhms, int& dayNo, int& daySeconds) -> bool {
+        char buf[15] = {0};
+        std::snprintf(buf, sizeof(buf), "%014llu", static_cast<unsigned long long>(ymdhms));
+        auto d2 = [](char a, char b) -> int {
+            if (a < '0' || a > '9' || b < '0' || b > '9') {
+                return -1;
+            }
+            return (a - '0') * 10 + (b - '0');
+        };
+        const int year = d2(buf[0], buf[1]) * 100 + d2(buf[2], buf[3]);
+        const int month = d2(buf[4], buf[5]);
+        const int day = d2(buf[6], buf[7]);
+        const int hour = d2(buf[8], buf[9]);
+        const int minute = d2(buf[10], buf[11]);
+        const int second = d2(buf[12], buf[13]);
+        if (year < 0 || month < 1 || month > 12 || day < 1 || day > 31 ||
+            hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+            second < 0 || second > 59) {
+            return false;
+        }
+        dayNo = year * 10000 + month * 100 + day;
+        daySeconds = hour * 3600 + minute * 60 + second;
+        return true;
+    };
+
+    if (matchedFeeModel) {
+        // BY ZF: 按订单开始/结束时间裁剪，仅上送实际覆盖到的半小时时段。
+        size_t rateCountPos = body.size();
+        body.push_back(0x00);
+        uint8_t rateCount = 0;
+        int startDayNo = 0;
+        int endDayNo = 0;
+        int startDaySeconds = 0;
+        int endDaySeconds = 0;
+        const bool startTimeOk = parseDaySecondsFromYmdHms(startTime, startDayNo, startDaySeconds);
+        const bool endTimeOk = parseDaySecondsFromYmdHms(endTime, endDayNo, endDaySeconds);
+        const bool canFilterByTime = startTimeOk && endTimeOk && (startDayNo == endDayNo) &&
+                                     (endDaySeconds > startDaySeconds);
+        for (int i = 0; i < periodCount; ++i) {
+            const double periodEnergy = getSegmentNumber(partElectArr, i);
+            const double periodChargeFee = getSegmentNumber(chargeFeeArr, i);
+            const double periodServiceFee = getSegmentNumber(serviceFeeArr, i);
+
+            uint8_t slotNo = static_cast<uint8_t>(i);
+            if (!parseHalfHourSlotNo(matchedFeeModel->timeSeg[static_cast<size_t>(i)], slotNo)) {
+                // BY ZF: timeSeg 非法时退回数组下标，兼容后续 48 段半小时模型。
+                slotNo = static_cast<uint8_t>(i);
+            }
+
+            if (canFilterByTime) {
+                const int slotStartSeconds = static_cast<int>(slotNo) * 30 * 60;
+                const int slotEndSeconds = slotStartSeconds + 30 * 60;
+                const bool overlapped = (startDaySeconds < slotEndSeconds) && (endDaySeconds > slotStartSeconds);
+                if (!overlapped) {
+                    continue;
+                }
+            }
+
+            const uint32_t chargePrice =
+                    static_cast<uint32_t>(matchedFeeModel->chargeFee[static_cast<size_t>(i)] * 100U); // 0.001元 -> 1e-5元
+            const uint32_t servicePrice =
+                    static_cast<uint32_t>(matchedFeeModel->serviceFee[static_cast<size_t>(i)] * 100U); // 0.001元 -> 1e-5元
+            const uint32_t energy = scaleToU32(periodEnergy, 10000.0);
+            const uint32_t chargeFeeVal = scaleToU32(periodChargeFee, 10000.0);
+            const uint32_t serviceFeeVal = scaleToU32(periodServiceFee, 10000.0);
+            appendRateDetail(slotNo, chargePrice, servicePrice, energy, chargeFeeVal, serviceFeeVal);
+            ++rateCount;
+        }
+        // BY ZF: 过滤后若无有效时段，则退回单条汇总，避免形成空明细。
+        if (rateCount == 0U) {
+            body.resize(rateCountPos);
+            body.push_back(1U);
+            const uint32_t energy = scaleToU32(totalElect, 10000.0);
+            const uint32_t chargeFeeVal = scaleToU32(totalPowerCost, 10000.0);
+            const uint32_t serviceFeeVal = scaleToU32(totalServCost, 10000.0);
+            const uint32_t chargePrice = (energy > 0U)
+                ? static_cast<uint32_t>((static_cast<uint64_t>(chargeFeeVal) * 10ULL + energy / 2U) / energy)
+                : 0U;
+            const uint32_t servicePrice = (energy > 0U)
+                ? static_cast<uint32_t>((static_cast<uint64_t>(serviceFeeVal) * 10ULL + energy / 2U) / energy)
+                : 0U;
+            appendRateDetail(0U, chargePrice, servicePrice, energy, chargeFeeVal, serviceFeeVal);
+        } else {
+            body[rateCountPos] = rateCount;
         }
     } else {
         // BY ZF: 计费模型不一致时，按单费率上送总和数据。
@@ -1799,7 +1861,7 @@ bool CommProcess::tryUpdateSm2PubKeyFromLoginAck(const uint8_t* body, size_t bod
     return true;
 }
 
-std::vector<uint8_t> CommProcess::buildPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body)
+std::vector<uint8_t> CommProcess::buildPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body, int seqOverride)
 {
     // BY ZF: 协议头部：0x68 + 设备类型(1) + 协议版本(2) + 长度(2,小端)
     // BY ZF: 数据域：序列号(2) + CP56Time2a(7) + 加密标志(1) + 帧类型(1) + 消息体(N)
@@ -1823,7 +1885,9 @@ std::vector<uint8_t> CommProcess::buildPlatformFrame(uint8_t cmd, const std::vec
     if (!encryptBodyByCmd(cmd, body, m_sm4SessionKey, m_sm4SessionKeyReady, payload, encryptFlag)) {
         return std::vector<uint8_t>();
     }
-    const uint16_t seq = static_cast<uint16_t>((++m_seq) & 0xFFFF);
+    const uint16_t seq = (seqOverride >= 0 && seqOverride <= 0xFFFF)
+            ? static_cast<uint16_t>(seqOverride)
+            : static_cast<uint16_t>((++m_seq) & 0xFFFF);
     const uint16_t totalLen = static_cast<uint16_t>(2 + 7 + 1 + 1 + payload.size()); // seq+time+enc+cmd+payload
     // BY ZF: 数据长度小端序。
     frame.push_back(static_cast<uint8_t>(totalLen & 0xFF));
@@ -1858,12 +1922,12 @@ std::vector<uint8_t> CommProcess::buildPlatformFrame(uint8_t cmd, const std::vec
     return frame;
 }
 
-bool CommProcess::sendPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body)
+bool CommProcess::sendPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body, int seqOverride)
 {
     if (m_tcpFd < 0) {
         return false;
     }
-    const std::vector<uint8_t> frame = buildPlatformFrame(cmd, body);
+    const std::vector<uint8_t> frame = buildPlatformFrame(cmd, body, seqOverride);
     if (frame.empty()) {
         return false;
     }
@@ -1949,9 +2013,9 @@ std::vector<uint8_t> CommProcess::buildLoginRequestBody() const
     body.push_back(0x04);
 
     // BY ZF: 15) 经度，默认0（4字节）。
-    appendU32BE(body, 0U);
+    appendU32LE(body, 0U);
     // BY ZF: 16) 纬度，默认0（4字节）。
-    appendU32BE(body, 0U);
+    appendU32LE(body, 0U);
 
     return body;
 }
@@ -2011,8 +2075,8 @@ std::vector<uint8_t> CommProcess::buildBrmBody(uint8_t gun) const
 
     // BY ZF: BRM 基础字段。
     body.push_back(rd.startCompleteData.batteryType);
-    appendU16BE(body, rd.startCompleteData.ratedCapacity);
-    appendU16BE(body, rd.startCompleteData.ratedTotalVoltage);
+    appendU16LE(body, rd.startCompleteData.ratedCapacity);
+    appendU16LE(body, rd.startCompleteData.ratedTotalVoltage);
 
     fillAsciiFixed(body, rd.startCompleteData.batteryManufacturer, 4);
     body.insert(body.end(), rd.startCompleteData.batterySerial.begin(), rd.startCompleteData.batterySerial.end());
@@ -2052,7 +2116,7 @@ std::vector<uint8_t> CommProcess::buildBcpBody(uint8_t gun) const
     body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
 
     // 4) BMS单体动力蓄电池最高允许充电电压（0.01V/位）
-    appendU16BE(body, rd.startCompleteData.cellMaxChargeVoltage);
+    appendU16LE(body, rd.startCompleteData.cellMaxChargeVoltage);
     // 5) BMS最高允许充电电流（0.1A/位，按协议偏移+800A）
     {
         int bmsMaxCurrentRaw = static_cast<int>(rd.startCompleteData.maxAllowChargeCurrent) + 8000;
@@ -2062,22 +2126,22 @@ std::vector<uint8_t> CommProcess::buildBcpBody(uint8_t gun) const
         if (bmsMaxCurrentRaw > 65535) {
             bmsMaxCurrentRaw = 65535;
         }
-        appendU16BE(body, static_cast<uint16_t>(bmsMaxCurrentRaw));
+        appendU16LE(body, static_cast<uint16_t>(bmsMaxCurrentRaw));
     }
     // 6) BMS动力蓄电池标称总能量（0.1kWh/位）
-    appendU16BE(body, static_cast<uint16_t>(rd.startCompleteData.nominalEnergy));
+    appendU16LE(body, static_cast<uint16_t>(rd.startCompleteData.nominalEnergy));
     // 7) BMS最高允许充电总电压（0.1V/位）
-    appendU16BE(body, rd.startCompleteData.bmsMaxChargeVoltage);
+    appendU16LE(body, rd.startCompleteData.bmsMaxChargeVoltage);
     // 8) BMS最高允许温度（偏移50，原始值直传）
     body.push_back(rd.startCompleteData.maxAllowTemp + 50);
     // 9) BMS整车动力蓄电池荷电状态SOC（0.1%/位）
-    appendU16BE(body, static_cast<uint16_t>(rd.startCompleteData.soc));
+    appendU16LE(body, static_cast<uint16_t>(rd.startCompleteData.soc));
     // 10) BMS整车动力蓄电池当前电池总电压（0.1V/位）
-    appendU16BE(body, rd.startCompleteData.currentTotalVoltage);
+    appendU16LE(body, rd.startCompleteData.currentTotalVoltage);
     // 11) CML电桩最高输出电压（0.1V/位）
-    appendU16BE(body, rd.startCompleteData.pileMaxOutputVoltage);
+    appendU16LE(body, rd.startCompleteData.pileMaxOutputVoltage);
     // 12) CML电桩最低输出电压（0.1V/位）
-    appendU16BE(body, rd.startCompleteData.pileMinOutputVoltage);
+    appendU16LE(body, rd.startCompleteData.pileMinOutputVoltage);
     // 13) CML电桩最大输出电流（0.1A/位，按协议偏移+800A）
     {
         int pileMaxCurrentRaw = static_cast<int>(rd.startCompleteData.pileMaxOutputCurrent) + 8000;
@@ -2087,7 +2151,7 @@ std::vector<uint8_t> CommProcess::buildBcpBody(uint8_t gun) const
         if (pileMaxCurrentRaw > 65535) {
             pileMaxCurrentRaw = 65535;
         }
-        appendU16BE(body, static_cast<uint16_t>(pileMaxCurrentRaw));
+        appendU16LE(body, static_cast<uint16_t>(pileMaxCurrentRaw));
     }
     // 14) CML电桩最小输出电流（0.1A/位，按协议偏移+800A）
     {
@@ -2098,11 +2162,85 @@ std::vector<uint8_t> CommProcess::buildBcpBody(uint8_t gun) const
         if (pileMinCurrentRaw > 65535) {
             pileMinCurrentRaw = 65535;
         }
-        appendU16BE(body, static_cast<uint16_t>(pileMinCurrentRaw));
+        appendU16LE(body, static_cast<uint16_t>(pileMinCurrentRaw));
     }
     // 15) 是否离线模式下产生（当前固定在线0x00）
     body.push_back(0x00);
 
+    return body;
+}
+
+std::vector<uint8_t> CommProcess::buildChargeEndStageBody(uint8_t gun, cJSON* stopCompleteData) const
+{
+    std::vector<uint8_t> body;
+    if (gun >= m_gunRuntimeData.size() || !stopCompleteData) {
+        return body;
+    }
+
+    // BY ZF: 结束阶段关键量直接取 stop_complete 事件，累计时间/电量取 feeData 运行态缓存。
+    auto getU8 = [stopCompleteData](const char* key, uint8_t defVal) -> uint8_t {
+        cJSON* n = cJSON_GetObjectItem(stopCompleteData, key);
+        if (!n || !cJSON_IsNumber(n)) {
+            return defVal;
+        }
+        int v = n->valueint;
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        return static_cast<uint8_t>(v);
+    };
+    auto getU16 = [stopCompleteData](const char* key, uint16_t defVal) -> uint16_t {
+        cJSON* n = cJSON_GetObjectItem(stopCompleteData, key);
+        if (!n || !cJSON_IsNumber(n)) {
+            return defVal;
+        }
+        int v = n->valueint;
+        if (v < 0) v = 0;
+        if (v > 0xFFFF) v = 0xFFFF;
+        return static_cast<uint16_t>(v);
+    };
+    auto getTemp = [stopCompleteData](const char* key, uint8_t defVal) -> uint8_t {
+        cJSON* n = cJSON_GetObjectItem(stopCompleteData, key);
+        if (!n || !cJSON_IsNumber(n)) {
+            return defVal;
+        }
+        int v = n->valueint + 50;
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        return static_cast<uint8_t>(v);
+    };
+
+    const GunRuntimeData& rd = m_gunRuntimeData[gun];
+
+    // BY ZF: 0x19 上传充电结束阶段报文。
+    // 1) 交易流水号 BCD16
+    appendBcdFixed(body, rd.orderNo, 16);
+    // 2) 桩编号 BCD7
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    // 3) 枪号 BCD1（1..n）
+    const int gunNo = static_cast<int>(gun) + 1;
+    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
+    // 4) BMS中止充电状态SOC BIN1
+    body.push_back(getU8("stopSoc", 0));
+    // 5) BMS动力蓄电池单体最低电压 BIN2（直接沿用 stop_complete 数据）
+    appendU16LE(body, getU16("cellMinVoltage", 0));
+    // 6) BMS动力蓄电池单体最高电压 BIN2（直接沿用 stop_complete 数据）
+    appendU16LE(body, getU16("cellMaxVoltage", 0));
+    // 7) BMS动力蓄电池最低温度 BIN1（按协议加50偏移）
+    body.push_back(getTemp("batteryMinTemp", 50));
+    // 8) BMS动力蓄电池最高温度 BIN1（按协议加50偏移）
+    body.push_back(getTemp("batteryMaxTemp", 50));
+    // BY ZF: feeData.chargedTime 当前缓存单位为秒，0x19 要求分钟。
+    const uint16_t chargedMinutes = static_cast<uint16_t>(std::max(0.0, rd.chargedTime / 60.0));
+    // 9) 本次充电累计充电时间 BIN2（min）
+    appendU16LE(body, chargedMinutes);
+    // BY ZF: feeData.totalEnergy 当前缓存单位为kWh，0x19 要求0.1kWh。
+    int energyRaw = static_cast<int>(rd.totalEnergy * 10.0);
+    if (energyRaw < 0) energyRaw = 0;
+    if (energyRaw > 0xFFFF) energyRaw = 0xFFFF;
+    // 10) 本次充电电量 BIN2（0.1kWh）
+    appendU16LE(body, static_cast<uint16_t>(energyRaw));
+    // 11) 是否离线模式下产生 BIN1（当前在线固定0x00）
+    body.push_back(0x00);
     return body;
 }
 
@@ -2146,7 +2284,7 @@ std::vector<uint8_t> CommProcess::buildBstBody(uint8_t gun, cJSON* stopCompleteD
     // 4) BMS中止充电原因 BIN1
     body.push_back(getU8("bmsStopReason", 0));
     // 5) BMS中止充电故障原因 BIN2
-    appendU16BE(body, getU16("bmsChargeFaultReason", 0));
+    appendU16LE(body, getU16("bmsChargeFaultReason", 0));
     // 6) BMS中止充电错误原因 BIN1
     body.push_back(getU8("bmsStopErrorReason", 0));
     // 7) 是否离线模式下产生 BIN1（当前在线固定0x00）
@@ -2173,7 +2311,7 @@ std::vector<uint8_t> CommProcess::buildCstBody(uint8_t gun) const
     // 4) 充电桩中止充电原因 BIN1（固定0x00）
     body.push_back(0x00);
     // 5) 充电桩中止充电故障原因 BIN2（固定0x0000）
-    appendU16BE(body, 0x0000);
+    appendU16LE(body, 0x0000);
     // 6) 充电桩中止充电错误原因 BIN1（固定0x00）
     body.push_back(0x00);
     // 7) 是否离线模式下产生 BIN1（当前在线固定0x00）
@@ -2221,7 +2359,7 @@ std::vector<uint8_t> CommProcess::buildBsmBody(uint8_t gun) const
     // g15 充电禁止：00=禁止，01=允许
     bsmStatusWord |= static_cast<uint16_t>(0x01U << 2); // g15
     // g16 预留默认00
-    appendU16BE(body, bsmStatusWord);
+    appendU16LE(body, bsmStatusWord);
     // 17) 是否离线模式下产生（1Byte）
     body.push_back(0x00);
     // 18) 预留字段（BCD4）
@@ -2242,6 +2380,18 @@ std::vector<uint8_t> CommProcess::buildRemoteStartAckBody(uint8_t gun, uint8_t r
     body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
     body.push_back(static_cast<uint8_t>(result));
     return body;
+}
+
+bool CommProcess::sendRemoteStopAck(uint8_t gunNoBcd, uint8_t result, uint8_t failReason, int seqOverride)
+{
+    std::vector<uint8_t> body;
+    body.reserve(10);
+    // BY ZF: 0x35 远程停止充电应答：桩编号BCD7 + 枪号BCD1 + 停止结果BCD1 + 失败原因BIN1。
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    body.push_back(gunNoBcd);
+    body.push_back(result);
+    body.push_back(failReason);
+    return sendPlatformFrame(kCmdRemoteStopAck, body, seqOverride);
 }
 
 std::vector<uint8_t> CommProcess::buildStartChargeResultBody(uint8_t gun) const
@@ -2314,13 +2464,13 @@ std::vector<uint8_t> CommProcess::buildChargeInfoBody(uint8_t gun)
 
     // 7) 输出电压（0.1V）
     const uint16_t outputVoltage = static_cast<uint16_t>(std::max(0.0, rd.voltage * 10.0));
-    appendU16BE(body, outputVoltage);
+    appendU16LE(body, outputVoltage);
     // 8) 输出电流（0.1A，按协议偏移+800A）
     int outputCurrentRaw = static_cast<int>(rd.current * 10.0 + 8000.0);
     if (outputCurrentRaw < 0) outputCurrentRaw = 0;
     if (outputCurrentRaw > 65535) outputCurrentRaw = 65535;
     const uint16_t outputCurrent = static_cast<uint16_t>(outputCurrentRaw);
-    appendU16BE(body, outputCurrent);
+    appendU16LE(body, outputCurrent);
 
     // 9) 枪线温度：使用温度探头1，按偏移50编码
     int gunTemp = static_cast<int>(rd.interfaceTemp1 + 50.0);
@@ -2345,20 +2495,20 @@ std::vector<uint8_t> CommProcess::buildChargeInfoBody(uint8_t gun)
 
     // 13) 累计充电时间（min，2字节）
     const uint16_t chargedMinutes = static_cast<uint16_t>(std::max(0.0, rd.chargedTime / 60.0));
-    appendU16BE(body, chargedMinutes);
+    appendU16LE(body, chargedMinutes);
 
     // 14) 剩余时间（min，2字节）
     const uint16_t remainMinutes = static_cast<uint16_t>(std::max(0.0, rd.estimatedRemainTime));
-    appendU16BE(body, remainMinutes);
+    appendU16LE(body, remainMinutes);
 
     // 15) 充电度数（4字节，精确到小数点后4位）
-    appendU32BE(body, static_cast<uint32_t>(std::max(0.0, rd.totalEnergy * 10000.0)));
+    appendU32LE(body, static_cast<uint32_t>(std::max(0.0, rd.totalEnergy * 10000.0)));
     // 16) 计费充电度数（4字节，当前与充电度数保持一致）
-    appendU32BE(body, static_cast<uint32_t>(std::max(0.0, rd.totalEnergy * 10000.0)));
+    appendU32LE(body, static_cast<uint32_t>(std::max(0.0, rd.totalEnergy * 10000.0)));
     // 17) 已充电费（4字节，精确到小数点后4位）
-    appendU32BE(body, static_cast<uint32_t>(std::max(0.0, rd.electricAmount * 10000.0)));
+    appendU32LE(body, static_cast<uint32_t>(std::max(0.0, rd.electricAmount * 10000.0)));
     // 18) 已充服务费（4字节，精确到小数点后4位）
-    appendU32BE(body, static_cast<uint32_t>(std::max(0.0, rd.serviceAmount * 10000.0)));
+    appendU32LE(body, static_cast<uint32_t>(std::max(0.0, rd.serviceAmount * 10000.0)));
 
     // 19) 枪体温度（偏移50），按联调要求仍取温度探头1
     int gunBodyTemp = static_cast<int>(rd.interfaceTemp1 + 50.0);
@@ -2368,17 +2518,17 @@ std::vector<uint8_t> CommProcess::buildChargeInfoBody(uint8_t gun)
 
     // 20) 电表示值（8字节，精确到小数点后4位）
     const uint64_t meterVal = static_cast<uint64_t>(std::max(0.0, rd.meterEnergy * 10000.0));
-    appendU64BE(body, meterVal);
+    appendU64LE(body, meterVal);
 
     // 21) 功率因数（2字节，精确到小数点后2位）：固定0.99
-    appendU16BE(body, 99U);
+    appendU16LE(body, 99U);
 
     // 22) 功率需量（4字节，精确到小数点后2位）：实时功率 U*I(kW)*100
     const double powerDemand = (rd.voltage * rd.current) / 1000.0 * 100.0;
-    appendU32BE(body, static_cast<uint32_t>(std::max(0.0, powerDemand)));
+    appendU32LE(body, static_cast<uint32_t>(std::max(0.0, powerDemand)));
 
     // 23) 最大功率需量（4字节，精确到小数点后2位）：固定250000
-    appendU32BE(body, 250000U);
+    appendU32LE(body, 250000U);
 
     // 24) 是否离线模式下产生：在线模式固定0x00
     body.push_back(0x00);
@@ -2570,6 +2720,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     if (frameLen != static_cast<size_t>(8 + totalLen)) {
         return;
     }
+    const uint16_t rxSeq = static_cast<uint16_t>(frame[6] | (static_cast<uint16_t>(frame[7]) << 8));
     // BY ZF: 帧尾CRC按小端序读取。
     const uint16_t recvCrc = static_cast<uint16_t>(
                 static_cast<uint16_t>(frame[frameLen - 2]) |
@@ -2638,8 +2789,8 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         }
         m_logSender.saveFeeModel(feeModel);
 
-        // BY ZF: 收到有效0x0A后发起0x0B对时请求，再进入在线态。
-        (void)sendPlatformFrame(kCmdTimeSyncReq, buildTimeSyncRequestBody());
+        // BY ZF: 收到有效0x0A后发起0x0B对时请求，序列号沿用平台下发帧。
+        (void)sendPlatformFrame(kCmdTimeSyncReq, buildTimeSyncRequestBody(), rxSeq);
         m_loginState = LOGIN_ONLINE;
         m_lastHeartbeat = std::chrono::steady_clock::now() - std::chrono::seconds(m_config.tcpHeartbeatSec);
         m_logSender.info("platform_login_step", "fee_model_ack_ok");
@@ -2722,7 +2873,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         }
         const std::vector<uint8_t> ackBody = buildQrCodeSetAckBody(gunNoBcd, ackResult);
         if (!ackBody.empty()) {
-            (void)sendPlatformFrame(kCmdQrCodeSetAck, ackBody);
+            (void)sendPlatformFrame(kCmdQrCodeSetAck, ackBody, rxSeq);
         }
         if (setConfigData) {
             cJSON_Delete(setConfigData);
@@ -2746,14 +2897,14 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             // BY ZF: 0xA8 下发后立即回复 0xA7 远程启动应答（当前联调口径固定成功0x01）。
             const std::vector<uint8_t> ackBody = buildRemoteStartAckBody(gun, 0x01);
             if (!ackBody.empty()) {
-                (void)sendPlatformFrame(kCmdRemoteStartAck, ackBody);
+                (void)sendPlatformFrame(kCmdRemoteStartAck, ackBody, rxSeq);
             }
         } else {
             // BY ZF: 启动命令解析失败（常见为计费模型未就绪）：
             // BY ZF: 回复0xA7失败，并立即重发0x0D枪计费模型请求。
             const std::vector<uint8_t> nackBody = buildRemoteStartAckBody(gun, 0x00);
             if (!nackBody.empty()) {
-                (void)sendPlatformFrame(kCmdRemoteStartAck, nackBody);
+                (void)sendPlatformFrame(kCmdRemoteStartAck, nackBody, rxSeq);
             }
             const uint8_t gunCount = (m_config.gunCount == 0) ? 1 : m_config.gunCount;
             for (uint8_t i = 0; i < gunCount; ++i) {
@@ -2769,9 +2920,16 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
 
     if (cmd == kCmdRemoteStopCmd) {
         uint8_t gun = 0;
+        const uint8_t gunNoBcd = (decBodyLen >= 8U) ? body[7] : 0x01;
         cJSON* stopData = nullptr;
         if (parseRemoteStop036(body, decBodyLen, gun, &stopData)) {
             publishPlatCommand(gun, "stop_charge", stopData);
+            // BY ZF: 0x35 停机应答成功：停止结果0x01，失败原因0x00。
+            (void)sendRemoteStopAck(gunNoBcd, 0x01, 0x00, rxSeq);
+        } else {
+            // BY ZF: 0x36远程停机解析失败时，立即回复0x35失败应答，失败原因固定01。
+            (void)sendRemoteStopAck(gunNoBcd, 0x00, 0x01, rxSeq);
+            m_logSender.warn("platform_remote_stop", "parse_or_validate_fail");
         }
         if (stopData) {
             cJSON_Delete(stopData);
@@ -2852,18 +3010,12 @@ bool CommProcess::parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeMo
     feeModel.chargeFee.clear();
     feeModel.serviceFee.clear();
 
-    // BY ZF: 先缓存 feeCount 个费率组，再按48个半小时位图逐段切换生成时段。
+    // BY ZF: 按 48 个半小时槽位完整展开保存，供后续计费与交易记录逐槽位一一对应。
     // BY ZF: 中石化协议按 zero-based 编码：0..feeCount-1（0表示第1组）。
-    int prevFeeIdx = -1;
     for (int slot = 0; slot < 48; ++slot) {
         int feeIdx = static_cast<int>(slotMap[static_cast<size_t>(slot)]); // 0x00 => 第1组
         if (feeIdx < 0 || feeIdx >= static_cast<int>(feeCount)) {
             feeIdx = 0; // BY ZF: 异常值兜底到第1组
-        }
-
-        const bool isNewSeg = (slot == 0) || (feeIdx != prevFeeIdx);
-        if (!isNewSeg) {
-            continue;
         }
 
         const int minute = slot * 30;
@@ -2879,14 +3031,15 @@ bool CommProcess::parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeMo
         const unsigned int serviceMilli = static_cast<unsigned int>((serviceRateRaw[static_cast<size_t>(feeIdx)] + 50U) / 100U);
         feeModel.chargeFee.push_back(chargeMilli);
         feeModel.serviceFee.push_back(serviceMilli);
-
-        prevFeeIdx = feeIdx;
     }
 
-    if (feeModel.timeSeg.empty()) {
+    if (feeModel.timeSeg.size() != 48U ||
+        feeModel.segFlag.size() != 48U ||
+        feeModel.chargeFee.size() != 48U ||
+        feeModel.serviceFee.size() != 48U) {
         return false;
     }
-    feeModel.timeNum = static_cast<unsigned char>(feeModel.timeSeg.size());
+    feeModel.timeNum = 48;
     return true;
 }
 
@@ -3040,34 +3193,29 @@ bool CommProcess::parseRemoteStop036(const uint8_t* body, size_t bodyLen, uint8_
     if (!body || !outData) {
         return false;
     }
-    // BY ZF: 0x15 最小长度：枪ID4 + 订单10 + 操作类型1
-    if (bodyLen < 15) {
+    // BY ZF: 0x36 最小长度：桩编号BCD7 + 枪号BCD1。
+    if (bodyLen < 8U) {
         return false;
     }
 
-    const uint32_t gunId = readU32BE(body);
-    const uint8_t* orderBcd = body + 4;
-    const uint8_t operationType = body[14];
-    if (operationType != 0x01) {
+    const std::string recvPileCode = bcdToDigitString(body, 7);
+    const std::string localPileCode = normalizePileCode14(m_config.cdzNo);
+    if (recvPileCode != localPileCode) {
         return false;
     }
 
-    int gunIndex = -1;
-    for (size_t i = 0; i < m_config.gunIdList.size(); ++i) {
-        if (m_config.gunIdList[i] == gunId) {
-            gunIndex = static_cast<int>(i);
-            break;
-        }
+    const uint8_t gunNoBcd = body[7];
+    const int gunNo = ((gunNoBcd >> 4) & 0x0F) * 10 + (gunNoBcd & 0x0F);
+    if (gunNo <= 0) {
+        return false;
     }
-    if (gunIndex < 0) {
+    const int gunIndex = gunNo - 1;
+    if (gunIndex >= static_cast<int>(m_config.gunCount)) {
         return false;
     }
     gun = static_cast<uint8_t>(gunIndex);
 
-    const std::string orderNo = bcdToDigitString(orderBcd, 10);
-
     cJSON* data = cJSON_CreateObject();
-    cJSON_AddStringToObject(data, "orderNo", orderNo.c_str());
     cJSON_AddNumberToObject(data, "stopReason", 0x01);  // BY ZF: 按要求固定停机原因 0x01
     cJSON_AddNumberToObject(data, "tcuStopCode", 0);
     *outData = data;

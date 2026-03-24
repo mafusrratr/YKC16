@@ -19,7 +19,8 @@
 enum DatabaseType {
     DB_MAIN = 0,        // 主运行数据库
     DB_CHARGE = 1,       // 充电记录数据库
-    DB_FEE = 2          // 计费模型数据库
+    DB_FEE = 2,         // 计费模型数据库
+    DB_ERROR = 3        // 故障记录数据库
 };
 
 /**
@@ -41,7 +42,8 @@ public:
      */
     bool initialize(const std::string& mainDbPath, 
                    const std::string& chargeDbPath,
-                   const std::string& feeDbPath);
+                   const std::string& feeDbPath,
+                   const std::string& errorDbPath);
     
     /**
      * 关闭所有数据库连接
@@ -158,6 +160,15 @@ public:
      * @return true 成功
      */
     bool loadUnconfirmedTradeRecords(std::vector<TradeRecord>& outRecords, int limit = 100);
+
+    // ========== 故障记录相关 ==========
+    // BY ZF: 保存通过 MQTT 下发的故障记录事件。
+    bool logFaultRecord(int gun,
+                        const std::string& type,
+                        const std::string& occurTime,
+                        const std::string& pointKey,
+                        const std::string& faultMessage,
+                        unsigned int rawValue);
     
     // ========== 计费模型相关 ==========
     
@@ -327,6 +338,7 @@ private:
      * @return true成功
      */
     bool createFeeTables();
+    bool createErrorTables();
     
     /**
      * 执行SQL语句

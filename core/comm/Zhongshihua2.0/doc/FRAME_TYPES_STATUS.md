@@ -47,6 +47,10 @@
   - 触发源：`tcu/pile/{gun}/event` 的 `start_complete`；
   - 判定规则：`successFlag==0` 为成功，否则失败；
   - 失败原因取 `start_complete.chargeFailReason`。
+- `0x19` 上传充电结束阶段报文（上行，已实现）
+  - 触发源：`tcu/pile/{gun}/event` 的 `stop_complete`；
+  - `stopSoc/单体最低最高电压/电池最低最高温度` 取 `stop_complete`；
+  - `本次累计充电时间/本次充电电量` 取 `tcu/logic/{gun}/feeData` 缓存。
 - `0x60` 充电记录包请求（上行，已实现）
   - 触发源：`tcu/logic/{gun}/event` 的 `update_record`；
   - 已完成组帧发送。

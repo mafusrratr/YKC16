@@ -1598,6 +1598,7 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
     if (to == STATE_STARTING) {
         gs.startingEnterTime = std::chrono::steady_clock::now();
         gs.startingRetrySent = false;
+        gs.startSuccessFlag = false;
     } else {
         gs.startingEnterTime = std::chrono::steady_clock::time_point();
         gs.startingRetrySent = false;
@@ -1605,8 +1606,10 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
     if (to == STATE_CHARGING) {
         // BY ZF: 进入 CHARGING 时锁定计时起点，feeData.chargedTime 仅使用该起点计算。
         gs.chargingEnterTime = std::chrono::steady_clock::now();
+        gs.startSuccessFlag = true;
     } else if (to == STATE_IDLE) {
         gs.chargingEnterTime = std::chrono::steady_clock::time_point();
+        gs.startSuccessFlag = false;
     }
     publishStateChange(gun, prev, to, reason);
     if (to == STATE_STOPPED ) {

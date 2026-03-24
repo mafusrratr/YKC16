@@ -69,7 +69,8 @@ public:
     
     void setDatabasePaths(const std::string& mainDbPath,
                         const std::string& chargeDbPath,
-                        const std::string& feeDbPath);
+                        const std::string& feeDbPath,
+                        const std::string& errorDbPath);
     void setBufferConfig(size_t maxSize, int flushInterval);
 
     // BY ZF: 看门狗喂狗函数（供外部驱动主循环时调用）
@@ -106,6 +107,9 @@ private:
      * 简单的JSON解析函数
      */
     void parseAndLogMessage(const std::string& jsonData);
+    // BY ZF: 处理 MQTT 故障事件并落库到 error.db。
+    void handleMqttMessage(const std::string& topic, const std::string& payload);
+    bool parseAndSaveErrorEvent(const std::string& topic, const std::string& payload);
     bool initMqttPublisher();
     
     /**
@@ -147,6 +151,7 @@ private:
     std::string m_mainDbPath;
     std::string m_chargeDbPath;
     std::string m_feeDbPath;
+    std::string m_errorDbPath;
     
     // BY ZF: 共享内存指针
     void* m_shm;

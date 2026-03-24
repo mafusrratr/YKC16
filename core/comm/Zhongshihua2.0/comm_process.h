@@ -311,8 +311,9 @@ private:
     bool sendPlatformText(const std::string& text);
 
     // BY ZF: 大端二进制帧封装/发送
-    std::vector<uint8_t> buildPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body);
-    bool sendPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body);
+    std::vector<uint8_t> buildPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body, int seqOverride = -1);
+    bool sendPlatformFrame(uint8_t cmd, const std::vector<uint8_t>& body, int seqOverride = -1);
+    bool sendRemoteStopAck(uint8_t gunNoBcd, uint8_t result, uint8_t failReason, int seqOverride = -1);
 
     // BY ZF: 中石化2.0上线阶段信息体构造
     std::vector<uint8_t> buildLoginRequestBody() const;      // 0x01 登录认证请求体
@@ -323,6 +324,7 @@ private:
     std::vector<uint8_t> buildStartChargeResultBody(uint8_t gun) const; // 0x2D 启动完成结果体
     std::vector<uint8_t> buildBrmBody(uint8_t gun) const; // 0x15 BRM上送体
     std::vector<uint8_t> buildBcpBody(uint8_t gun) const; // 0x17 BCP参数配置上送体
+    std::vector<uint8_t> buildChargeEndStageBody(uint8_t gun, cJSON* stopCompleteData) const; // 0x19 结束阶段上送体
     std::vector<uint8_t> buildBstBody(uint8_t gun, cJSON* stopCompleteData) const; // 0x1D BST停止上送体
     std::vector<uint8_t> buildCstBody(uint8_t gun) const; // 0x21 CST充电中止上送体
     std::vector<uint8_t> buildBsmBody(uint8_t gun) const; // 0x25 BSM充电中止BMS信息体

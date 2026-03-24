@@ -68,12 +68,29 @@ SELECT * FROM operation_logs WHERE module = 'daemon' ORDER BY timestamp DESC;
 
 ---
 
+## 故障数据库 (error.db)
+
+### 1. `fault_records` - MQTT 故障记录表
+**用途**: 保存 `tcu/save/{gun}/event` 主题下 `type=Error` 的故障事件，供 HMI/查询模块直接读取。
+
+**字段说明**:
+- `id`: 主键，自增
+- `gun`: 枪号
+- `type`: 事件类型，当前固定为 `Error`
+- `occur_time`: 故障发生时间
+- `point_key`: 故障点位键
+- `fault_message`: 故障描述
+- `raw_value`: 原始值
+
+---
+
 ## 总结
 
 **简化设计**：
 - ✅ **统一日志表**: 所有日志（日常日志、系统事件、错误信息）统一存储到 `operation_logs` 表
 - ✅ **通过字段区分**: 使用 `level` 字段区分日志级别，使用 `module` 字段区分日志来源
 - ✅ **性能监控**: 单独的 `performance_logs` 表用于性能指标存储
+- ✅ **故障记录库**: `error.db` 中的 `fault_records` 表用于保存 MQTT `tcu/save/{gun}/event` 的 `type=Error` 事件
 
 **主要使用场景**:
 1. **`operation_logs`** - ⭐ 统一日志表，记录所有运行日志、系统事件、错误信息

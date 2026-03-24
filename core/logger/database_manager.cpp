@@ -130,7 +130,8 @@ static bool copyFileBinary(const std::string& srcPath, const std::string& dstPat
 
 bool DatabaseManager::initialize(const std::string& mainDbPath, 
                                 const std::string& chargeDbPath,
-                                const std::string& feeDbPath) {
+                                const std::string& feeDbPath,
+                                const std::string& errorDbPath) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
     if (m_initialized) {
@@ -144,11 +145,13 @@ bool DatabaseManager::initialize(const std::string& mainDbPath,
     std::cout << "Main database: " << mainDbPath << std::endl;
     std::cout << "Charge database: " << chargeDbPath << std::endl;
     std::cout << "Fee database: " << feeDbPath << std::endl;
+    std::cout << "Error database: " << errorDbPath << std::endl;
     
     // BY ZF: 确保数据库文件所在目录存在
     if (!ensureDirectoryExists(mainDbPath) || 
         !ensureDirectoryExists(chargeDbPath) || 
-        !ensureDirectoryExists(feeDbPath)) {
+        !ensureDirectoryExists(feeDbPath) ||
+        !ensureDirectoryExists(errorDbPath)) {
         std::cerr << "Failed to create database directories" << std::endl;
         return false;
     }
@@ -157,6 +160,7 @@ bool DatabaseManager::initialize(const std::string& mainDbPath,
     m_dbPaths[DB_MAIN] = mainDbPath;
     m_dbPaths[DB_CHARGE] = chargeDbPath;
     m_dbPaths[DB_FEE] = feeDbPath;
+    m_dbPaths[DB_ERROR] = errorDbPath;
     
     // 初始化各个数据库
     int result;
@@ -181,9 +185,16 @@ bool DatabaseManager::initialize(const std::string& mainDbPath,
         std::cout << "Failed to open fee database: " << sqlite3_errmsg(m_databases[DB_FEE]) << std::endl;
         return false;
     }
+
+    // 故障记录数据库
+    result = sqlite3_open(errorDbPath.c_str(), &m_databases[DB_ERROR]);
+    if (result != SQLITE_OK) {
+        std::cout << "Failed to open error database: " << sqlite3_errmsg(m_databases[DB_ERROR]) << std::endl;
+        return false;
+    }
     
     // 创建表结构
-    if (!createMainTables() || !createChargeTables() || !createFeeTables()) {
+    if (!createMainTables() || !createChargeTables() || !createFeeTables() || !createErrorTables()) {
         std::cout << "Failed to create database tables" << std::endl;
         cleanup();
         return false;
@@ -371,6 +382,41 @@ bool DatabaseManager::createFeeTables() {
     }
     
     std::cout << "Fee database tables created successfully" << std::endl;
+    return true;
+}
+
+bool DatabaseManager::createErrorTables() {
+    std::cout << "Creating error database tables..." << std::endl;
+
+    std::string sql = R"(
+        CREATE TABLE IF NOT EXISTS fault_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gun INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            occur_time TEXT,
+            point_key TEXT,
+            fault_message TEXT,
+            raw_value INTEGER DEFAULT 0
+        )
+    )";
+
+    if (!executeSQL(DB_ERROR, sql)) {
+        return false;
+    }
+    if (!executeSQL(DB_ERROR, "CREATE INDEX IF NOT EXISTS idx_fault_records_occur_time ON fault_records(occur_time)")) {
+        return false;
+    }
+    if (!executeSQL(DB_ERROR, "CREATE INDEX IF NOT EXISTS idx_fault_records_gun ON fault_records(gun)")) {
+        return false;
+    }
+    if (!executeSQL(DB_ERROR, "CREATE INDEX IF NOT EXISTS idx_fault_records_point_key ON fault_records(point_key)")) {
+        return false;
+    }
+    if (!executeSQL(DB_ERROR, "CREATE UNIQUE INDEX IF NOT EXISTS idx_fault_records_unique_event ON fault_records(gun, type, occur_time, point_key, raw_value)")) {
+        return false;
+    }
+
+    std::cout << "Error database tables created successfully" << std::endl;
     return true;
 }
 
@@ -702,6 +748,34 @@ bool DatabaseManager::loadUnconfirmedTradeRecords(std::vector<TradeRecord>& outR
     return true;
 }
 
+bool DatabaseManager::logFaultRecord(int gun,
+                                     const std::string& type,
+                                     const std::string& occurTime,
+                                     const std::string& pointKey,
+                                     const std::string& faultMessage,
+                                     unsigned int rawValue)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    const std::string safeType = escapeSqlString(type);
+    const std::string safeOccurTime = escapeSqlString(occurTime);
+    const std::string safePointKey = escapeSqlString(pointKey);
+    const std::string safeFaultMessage = escapeSqlString(faultMessage);
+
+    std::stringstream sql;
+    sql << "INSERT OR IGNORE INTO fault_records ("
+        << "gun, type, occur_time, point_key, fault_message, raw_value"
+        << ") VALUES ("
+        << gun << ", '"
+        << safeType << "', '"
+        << safeOccurTime << "', '"
+        << safePointKey << "', '"
+        << safeFaultMessage << "', "
+        << rawValue << ")";
+
+    return executeSQL(DB_ERROR, sql.str());
+}
+
 bool DatabaseManager::getFeeModel(const std::string& modelId, std::string& modelData) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
@@ -771,6 +845,7 @@ bool DatabaseManager::reopenDatabase(DatabaseType dbType) {
         case DB_MAIN:   tablesOk = createMainTables(); break;
         case DB_CHARGE: tablesOk = createChargeTables(); break;
         case DB_FEE:    tablesOk = createFeeTables(); break;
+        case DB_ERROR:  tablesOk = createErrorTables(); break;
         default:        tablesOk = true; break;
     }
     
@@ -796,7 +871,8 @@ bool DatabaseManager::backupSingleDatabase(DatabaseType dbType,
     std::string srcPath = pathIt->second;
     std::string prefix = (dbType == DB_MAIN) ? "tcu"
                         : (dbType == DB_CHARGE) ? "chargerecords"
-                        : "feemodel";
+                        : (dbType == DB_FEE) ? "feemodel"
+                        : "error";
     std::string backupFile = backupDir + "/" + prefix + "_" + timestamp + ".db";
     
     if (!ensureDirectoryExists(backupFile)) {

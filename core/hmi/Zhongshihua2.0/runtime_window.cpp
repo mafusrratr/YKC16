@@ -255,6 +255,20 @@ static QString chargeRecordReasonText(int reason)
     return QString::number(reason);
 }
 
+static QString faultRecordText(const std::string &faultName, const std::string &type)
+{
+    if (!faultName.empty()) {
+        return QString::fromUtf8(faultName.c_str());
+    }
+    if (type == "Error") {
+        return QString::fromUtf8("故障");
+    }
+    if (type == "Warning") {
+        return QString::fromUtf8("告警");
+    }
+    return QString::fromLatin1(type.c_str());
+}
+
 static QWidget *makeInfoCard(QWidget *parent, const QString &title, const QRect &rect)
 {
     QFrame *frame = new QFrame(parent);
@@ -408,6 +422,12 @@ RuntimeWindow::ChargeRecordItem::ChargeRecordItem()
 {
 }
 
+RuntimeWindow::FaultRecordItem::FaultRecordItem()
+    : id(0)
+    , gunNo(0)
+{
+}
+
 RuntimeWindow::RuntimeWindow(QWidget *parent)
     : QMainWindow(parent)
     , m_mqttReady(false)
@@ -424,6 +444,10 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_recordGunFilter(-1)
     , m_chargeRecordPage(0)
     , m_chargeRecordPageSize(8)
+    , m_lastFaultRecordCheckMs(0)
+    , m_faultGunFilter(-1)
+    , m_faultRecordPage(0)
+    , m_faultRecordPageSize(8)
     , m_stack(new QStackedWidget(this))
     , m_bottomTime(new QLabel(this))
     , m_idlePage(0)
@@ -433,6 +457,8 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_aboutPage(0)
     , m_aboutTabWidget(0)
     , m_feeChart(0)
+    , m_faultRecordTable(0)
+    , m_faultRecordPageLabel(0)
     , m_chargeRecordTable(0)
     , m_chargeRecordPageLabel(0)
 {
@@ -1126,7 +1152,114 @@ void RuntimeWindow::setupAboutTabs()
         deviceOverlay->show();
     }
 
+    setupFaultRecordTab();
     setupChargeRecordTab();
+}
+
+void RuntimeWindow::setupFaultRecordTab()
+{
+    // BY ZF: 故障记录按与充电记录一致的交互方式展示，支持 A/B/全部筛选与分页。
+    if (!m_aboutTabWidget) {
+        return;
+    }
+
+    QWidget *faultTab = m_aboutPage->findChild<QWidget *>("tab_3");
+    if (!faultTab) {
+        return;
+    }
+
+    int idx = m_aboutTabWidget->indexOf(faultTab);
+    if (idx >= 0) {
+        m_aboutTabWidget->setTabText(idx, QString::fromUtf8("故障记录"));
+    }
+
+    QList<QWidget *> tabChildren;
+    const QObjectList tabObjects = faultTab->children();
+    int i = 0;
+    for (i = 0; i < tabObjects.size(); ++i) {
+        QWidget *child = qobject_cast<QWidget *>(tabObjects.at(i));
+        if (child && child->parent() == faultTab) {
+            tabChildren.append(child);
+        }
+    }
+    for (i = 0; i < tabChildren.size(); ++i) {
+        tabChildren.at(i)->hide();
+    }
+
+    QWidget *recordOverlay = faultTab->findChild<QWidget *>("faultRecordOverlay");
+    if (recordOverlay) {
+        return;
+    }
+
+    recordOverlay = new QWidget(faultTab);
+    recordOverlay->setObjectName("faultRecordOverlay");
+    recordOverlay->setGeometry(0, 0, 755, 345);
+    recordOverlay->setStyleSheet("background:transparent;");
+
+    QFrame *filterBar = static_cast<QFrame *>(makeInfoCard(recordOverlay, QString(), QRect(12, 8, 731, 50)));
+    filterBar->setStyleSheet("QFrame{background:transparent;border:none;}");
+
+    QPushButton *btnAll = new QPushButton(QString::fromUtf8("全部"), filterBar);
+    btnAll->setObjectName("btnFaultRecordAll");
+    btnAll->setGeometry(18, 12, 92, 28);
+    btnAll->setStyleSheet("QPushButton{background:rgb(232,234,236);border:1px solid rgb(150,150,150);border-radius:8px;color:rgb(38,45,52);font:14px 'MS Shell Dlg 2';font-weight:bold;}"
+                          "QPushButton:pressed{background:rgb(205,208,210);}");
+    connect(btnAll, SIGNAL(clicked()), this, SLOT(showAllFaultRecords()));
+
+    QPushButton *btnA = new QPushButton(QString::fromUtf8("A枪"), filterBar);
+    btnA->setObjectName("btnFaultRecordA");
+    btnA->setGeometry(122, 12, 92, 28);
+    btnA->setStyleSheet(btnAll->styleSheet());
+    connect(btnA, SIGNAL(clicked()), this, SLOT(showAFaultRecords()));
+
+    QPushButton *btnB = new QPushButton(QString::fromUtf8("B枪"), filterBar);
+    btnB->setObjectName("btnFaultRecordB");
+    btnB->setGeometry(226, 12, 92, 28);
+    btnB->setStyleSheet(btnAll->styleSheet());
+    connect(btnB, SIGNAL(clicked()), this, SLOT(showBFaultRecords()));
+
+    m_faultRecordPageLabel = new QLabel(filterBar);
+    m_faultRecordPageLabel->setObjectName("lblFaultRecordPage");
+    m_faultRecordPageLabel->setGeometry(432, 12, 92, 28);
+    m_faultRecordPageLabel->setAlignment(Qt::AlignCenter);
+    m_faultRecordPageLabel->setStyleSheet("QLabel{color:rgb(38,45,52);background:transparent;font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+
+    QPushButton *btnPrev = new QPushButton(QString::fromUtf8("上一页"), filterBar);
+    btnPrev->setObjectName("btnFaultRecordPrev");
+    btnPrev->setGeometry(536, 12, 92, 28);
+    btnPrev->setStyleSheet(btnAll->styleSheet());
+    connect(btnPrev, SIGNAL(clicked()), this, SLOT(showPrevFaultRecordPage()));
+
+    QPushButton *btnNext = new QPushButton(QString::fromUtf8("下一页"), filterBar);
+    btnNext->setObjectName("btnFaultRecordNext");
+    btnNext->setGeometry(640, 12, 92, 28);
+    btnNext->setStyleSheet(btnAll->styleSheet());
+    connect(btnNext, SIGNAL(clicked()), this, SLOT(showNextFaultRecordPage()));
+
+    m_faultRecordTable = new QTableWidget(recordOverlay);
+    m_faultRecordTable->setObjectName("faultRecordTable");
+    m_faultRecordTable->setGeometry(12, 52, 731, 270);
+    m_faultRecordTable->setColumnCount(3);
+    m_faultRecordTable->setRowCount(0);
+    QStringList headers;
+    headers << QString::fromUtf8("枪号")
+            << QString::fromUtf8("发生时间")
+            << QString::fromUtf8("故障名称");
+    m_faultRecordTable->setHorizontalHeaderLabels(headers);
+    m_faultRecordTable->verticalHeader()->hide();
+    m_faultRecordTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_faultRecordTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_faultRecordTable->setFocusPolicy(Qt::NoFocus);
+    m_faultRecordTable->setShowGrid(true);
+    m_faultRecordTable->setAlternatingRowColors(true);
+    m_faultRecordTable->setStyleSheet(
+        "QTableWidget{background:rgb(244,246,247);alternate-background-color:rgb(236,238,239);"
+        "gridline-color:rgb(188,188,188);border:1px solid rgb(168,168,168);color:rgb(38,45,52);font:13px 'MS Shell Dlg 2';}"
+        "QHeaderView::section{background:rgb(214,217,219);color:rgb(38,45,52);border:1px solid rgb(168,168,168);font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+    m_faultRecordTable->setColumnWidth(0, 72);
+    m_faultRecordTable->setColumnWidth(1, 220);
+    m_faultRecordTable->setColumnWidth(2, 417);
+    recordOverlay->show();
 }
 
 void RuntimeWindow::setupChargeRecordTab()
@@ -1272,6 +1405,124 @@ void RuntimeWindow::setupChargeRecordTab()
     connect(btnNextRight, SIGNAL(clicked()), this, SLOT(showNextChargeRecordPage()));
     btnNextRight->hide();
     recordOverlay->show();
+}
+
+void RuntimeWindow::refreshFaultRecordCache(bool forceReload)
+{
+    const uint64_t now = nowMs();
+    if (!forceReload && now - m_lastFaultRecordCheckMs < 5000) {
+        return;
+    }
+    m_lastFaultRecordCheckMs = now;
+
+    const QString targetPathAbs = QString::fromUtf8("/mnt/nandflash/data/error.db");
+    const QString targetPathRel = QString::fromUtf8("mnt/nandflash/data/error.db");
+    const QString fallbackPath = QString::fromUtf8("/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/core/logger/release/error.db");
+    QString dbPath;
+    if (QFileInfo(targetPathAbs).exists()) {
+        dbPath = targetPathAbs;
+    } else if (QFileInfo(targetPathRel).exists()) {
+        dbPath = targetPathRel;
+    } else {
+        dbPath = fallbackPath;
+    }
+    if (!QFileInfo(dbPath).exists()) {
+        return;
+    }
+
+    sqlite3 *db = 0;
+    if (sqlite3_open(dbPath.toLocal8Bit().constData(), &db) != SQLITE_OK || !db) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return;
+    }
+
+    const char *sql =
+        "SELECT id,gun,occur_time,fault_message,type "
+        "FROM fault_records ORDER BY occur_time DESC,id DESC LIMIT 200;";
+    sqlite3_stmt *stmt = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
+        sqlite3_close(db);
+        return;
+    }
+
+    std::vector<FaultRecordItem> records;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        FaultRecordItem item;
+        item.id = sqlite3_column_int(stmt, 0);
+        item.gunNo = sqlite3_column_int(stmt, 1);
+        const char *occurTime = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
+        const char *faultMessage = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+        const char *type = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
+        item.occurTime = occurTime ? occurTime : "";
+        item.faultName = faultRecordText(faultMessage ? faultMessage : "", type ? type : "");
+        records.push_back(item);
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    m_faultRecords = records;
+}
+
+void RuntimeWindow::refreshFaultRecordTable()
+{
+    if (!m_faultRecordTable) {
+        return;
+    }
+
+    QPushButton *btnAll = m_aboutPage->findChild<QPushButton *>("btnFaultRecordAll");
+    QPushButton *btnA = m_aboutPage->findChild<QPushButton *>("btnFaultRecordA");
+    QPushButton *btnB = m_aboutPage->findChild<QPushButton *>("btnFaultRecordB");
+    const QString activeStyle =
+        "QPushButton{background:rgb(72,148,196);border:1px solid rgb(110,110,110);border-radius:8px;color:white;font:14px 'MS Shell Dlg 2';font-weight:bold;}";
+    const QString normalStyle =
+        "QPushButton{background:rgb(232,234,236);border:1px solid rgb(150,150,150);border-radius:8px;color:rgb(38,45,52);font:14px 'MS Shell Dlg 2';font-weight:bold;}";
+    if (btnAll) btnAll->setStyleSheet(m_faultGunFilter < 0 ? activeStyle : normalStyle);
+    if (btnA) btnA->setStyleSheet(m_faultGunFilter == 0 ? activeStyle : normalStyle);
+    if (btnB) btnB->setStyleSheet(m_faultGunFilter == 1 ? activeStyle : normalStyle);
+
+    std::vector<FaultRecordItem> filtered;
+    int i = 0;
+    for (i = 0; i < static_cast<int>(m_faultRecords.size()); ++i) {
+        const FaultRecordItem &item = m_faultRecords[i];
+        if (m_faultGunFilter >= 0 && item.gunNo != m_faultGunFilter) {
+            continue;
+        }
+        filtered.push_back(item);
+    }
+
+    const int totalPages = filtered.empty() ? 1 : ((static_cast<int>(filtered.size()) - 1) / m_faultRecordPageSize + 1);
+    if (m_faultRecordPage >= totalPages) {
+        m_faultRecordPage = totalPages - 1;
+    }
+    if (m_faultRecordPage < 0) {
+        m_faultRecordPage = 0;
+    }
+    if (m_faultRecordPageLabel) {
+        m_faultRecordPageLabel->setText(QString::fromUtf8("%1/%2").arg(m_faultRecordPage + 1).arg(totalPages));
+    }
+
+    QPushButton *btnPrev = m_aboutPage->findChild<QPushButton *>("btnFaultRecordPrev");
+    QPushButton *btnNext = m_aboutPage->findChild<QPushButton *>("btnFaultRecordNext");
+    const bool hasPrev = (m_faultRecordPage > 0);
+    const bool hasNext = (m_faultRecordPage + 1 < totalPages);
+    if (btnPrev) btnPrev->setEnabled(hasPrev);
+    if (btnNext) btnNext->setEnabled(hasNext);
+
+    m_faultRecordTable->setRowCount(0);
+    const int startIndex = m_faultRecordPage * m_faultRecordPageSize;
+    const int endIndex = qMin(startIndex + m_faultRecordPageSize, static_cast<int>(filtered.size()));
+    int displayRow = 0;
+    for (i = startIndex; i < endIndex; ++i) {
+        const FaultRecordItem &item = filtered[i];
+        m_faultRecordTable->insertRow(displayRow);
+        m_faultRecordTable->setItem(displayRow, 0,
+            new QTableWidgetItem(item.gunNo == 0 ? QString::fromUtf8("A枪") : QString::fromUtf8("B枪")));
+        m_faultRecordTable->setItem(displayRow, 1, new QTableWidgetItem(ymdhmsText(item.occurTime)));
+        m_faultRecordTable->setItem(displayRow, 2, new QTableWidgetItem(item.faultName));
+        ++displayRow;
+    }
 }
 
 void RuntimeWindow::refreshChargeRecordCache(bool forceReload)
@@ -1575,6 +1826,8 @@ void RuntimeWindow::showAboutPage()
         m_showAbout = true;
     }
     refreshFeeModelCache(true);
+    refreshFaultRecordCache(true);
+    refreshFaultRecordTable();
     refreshChargeRecordCache(true);
     refreshChargeRecordTable();
     m_stack->setCurrentWidget(m_aboutPage);
@@ -1648,6 +1901,44 @@ void RuntimeWindow::showNextChargeRecordPage()
 {
     ++m_chargeRecordPage;
     refreshChargeRecordTable();
+}
+
+void RuntimeWindow::showAllFaultRecords()
+{
+    m_faultGunFilter = -1;
+    m_faultRecordPage = 0;
+    refreshFaultRecordCache(true);
+    refreshFaultRecordTable();
+}
+
+void RuntimeWindow::showAFaultRecords()
+{
+    m_faultGunFilter = 0;
+    m_faultRecordPage = 0;
+    refreshFaultRecordCache(true);
+    refreshFaultRecordTable();
+}
+
+void RuntimeWindow::showBFaultRecords()
+{
+    m_faultGunFilter = 1;
+    m_faultRecordPage = 0;
+    refreshFaultRecordCache(true);
+    refreshFaultRecordTable();
+}
+
+void RuntimeWindow::showPrevFaultRecordPage()
+{
+    if (m_faultRecordPage > 0) {
+        --m_faultRecordPage;
+    }
+    refreshFaultRecordTable();
+}
+
+void RuntimeWindow::showNextFaultRecordPage()
+{
+    ++m_faultRecordPage;
+    refreshFaultRecordTable();
 }
 
 void RuntimeWindow::refreshIdlePage(const std::vector<GunUiData> &guns)
@@ -1897,6 +2188,8 @@ void RuntimeWindow::refreshCheckoutPage(const GunUiData &gun)
 void RuntimeWindow::refreshAboutPage()
 {
     refreshFeeModelCache(false);
+    refreshFaultRecordCache(false);
+    refreshFaultRecordTable();
     refreshChargeRecordCache(false);
     refreshChargeRecordTable();
     setLabelText(m_aboutPage, "label_id", QString::fromStdString(m_cdzNo.empty() ? m_cdzId : m_cdzNo));

@@ -129,14 +129,12 @@ bool LoggerProcess::initialize(const char* config)
     m_mqttKeepalive = m_config.getInt("MQTT", "mqtt_keepalive", 60);
     m_mqttClientId = m_config.getString("MQTT", "mqtt_client_id", "tcu_logger");
     m_mqttTopicPrefix = m_config.getString("MQTT", "mqtt_topic_prefix", "tcu");
-    if (!initMqttPublisher()) {
-        std::cerr << "Failed to initialize logger mqtt publisher" << std::endl;
-    }
     // 初始化数据库管理器
     m_dbManager = &DatabaseManager::getInstance();
     m_mainDbPath = m_config.getString("Database", "main_db_path", "/usr/app/data/tcu.db");
     m_chargeDbPath = m_config.getString("Database", "charge_db_path", "/usr/app/data/chargerecords.db");
     m_feeDbPath = m_config.getString("Database", "fee_db_path", "/usr/app/data/feemodel.db");
+    m_errorDbPath = m_config.getString("Database", "error_db_path", "/usr/app/data/error.db");
     
     // BY ZF: 备份配置
     m_backupDir = m_config.getString("Backup", "backup_dir", "");
@@ -158,9 +156,12 @@ bool LoggerProcess::initialize(const char* config)
         }
     }
     
-    if (!m_dbManager->initialize(m_mainDbPath, m_chargeDbPath, m_feeDbPath)) {
+    if (!m_dbManager->initialize(m_mainDbPath, m_chargeDbPath, m_feeDbPath, m_errorDbPath)) {
         std::cerr << "Failed to initialize database manager" << std::endl;
         return false;
+    }
+    if (!initMqttPublisher()) {
+        std::cerr << "Failed to initialize logger mqtt publisher" << std::endl;
     }
     
     if (m_backupEnabled) {
@@ -336,11 +337,15 @@ std::string LoggerProcess::queryOperationLogs(uint64_t startTime, uint64_t endTi
     return "{}";
 }
 
-void LoggerProcess::setDatabasePaths(const std::string& mainDbPath, const std::string& chargeDbPath, const std::string& feeDbPath)
+void LoggerProcess::setDatabasePaths(const std::string& mainDbPath,
+                                     const std::string& chargeDbPath,
+                                     const std::string& feeDbPath,
+                                     const std::string& errorDbPath)
 {
     m_mainDbPath = mainDbPath;
     m_chargeDbPath = chargeDbPath;
     m_feeDbPath = feeDbPath;
+    m_errorDbPath = errorDbPath;
 }
 
 void LoggerProcess::setBufferConfig(size_t maxSize, int flushInterval)
@@ -1035,6 +1040,63 @@ void LoggerProcess::parseAndLogMessage(const std::string& jsonData)
     addLogEntry(entry);
 }
 
+void LoggerProcess::handleMqttMessage(const std::string& topic, const std::string& payload)
+{
+    if (!parseAndSaveErrorEvent(topic, payload)) {
+        std::cerr << "[Logger][MQTT] Ignore unsupported payload, topic=" << topic << std::endl;
+    }
+}
+
+bool LoggerProcess::parseAndSaveErrorEvent(const std::string& topic, const std::string& payload)
+{
+    if (!m_dbManager) {
+        return false;
+    }
+
+    cJSON* root = cJSON_Parse(payload.c_str());
+    if (!root) {
+        std::cerr << "[Logger][MQTT] Failed to parse payload, topic=" << topic << std::endl;
+        return false;
+    }
+
+    bool ok = false;
+    do {
+        cJSON* typeItem = cJSON_GetObjectItem(root, "type");
+        if (!cJSON_IsString(typeItem) || !typeItem->valuestring) {
+            break;
+        }
+        if (std::string(typeItem->valuestring) != "Error") {
+            break;
+        }
+
+        cJSON* data = cJSON_GetObjectItem(root, "data");
+        if (!cJSON_IsObject(data)) {
+            break;
+        }
+
+        cJSON* gunItem = cJSON_GetObjectItem(root, "gun");
+        cJSON* occurTimeItem = cJSON_GetObjectItem(data, "occurTime");
+        cJSON* pointKeyItem = cJSON_GetObjectItem(data, "pointKey");
+        cJSON* faultMessageItem = cJSON_GetObjectItem(data, "faultMessage");
+        cJSON* rawValueItem = cJSON_GetObjectItem(data, "rawValue");
+
+        const int gun = cJSON_IsNumber(gunItem) ? gunItem->valueint : -1;
+        const std::string occurTime = (cJSON_IsString(occurTimeItem) && occurTimeItem->valuestring) ? occurTimeItem->valuestring : "";
+        const std::string pointKey = (cJSON_IsString(pointKeyItem) && pointKeyItem->valuestring) ? pointKeyItem->valuestring : "";
+        const std::string faultMessage = (cJSON_IsString(faultMessageItem) && faultMessageItem->valuestring) ? faultMessageItem->valuestring : "";
+        const unsigned int rawValue = cJSON_IsNumber(rawValueItem) ? static_cast<unsigned int>(rawValueItem->valueint) : 0U;
+
+        if (gun < 0 || pointKey.empty()) {
+            break;
+        }
+
+        ok = m_dbManager->logFaultRecord(gun, "Error", occurTime, pointKey, faultMessage, rawValue);
+    } while (false);
+
+    cJSON_Delete(root);
+    return ok;
+}
+
 // BY ZF: 直接接收业务层传入的 TradeRecord，完成长度校验并入库（不经过 MQ）
 void LoggerProcess::logTradeRecord(const TradeRecord& rec)
 {
@@ -1111,6 +1173,21 @@ bool LoggerProcess::initMqttPublisher()
     if (!m_mqtt.init(m_mqttClientId, true)) {
         return false;
     }
+    m_mqtt.setConnectHandler([this](int rc) {
+        if (rc != 0) {
+            std::cerr << "[Logger][MQTT] connect rc=" << rc << std::endl;
+            return;
+        }
+        const std::string topic = m_mqttTopicPrefix + "/save/+/event";
+        if (!m_mqtt.subscribe(topic, 2)) {
+            std::cerr << "[Logger][MQTT] subscribe failed: " << topic << std::endl;
+            return;
+        }
+        std::cout << "[Logger][MQTT] subscribed: " << topic << std::endl;
+    });
+    m_mqtt.setMessageHandler([this](const std::string& topic, const std::string& payload) {
+        handleMqttMessage(topic, payload);
+    });
     if (!m_mqtt.connect(m_mqttHost, m_mqttPort, m_mqttKeepalive)) {
         return false;
     }
