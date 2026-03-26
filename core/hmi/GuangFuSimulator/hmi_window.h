@@ -5,6 +5,7 @@
 #include <QMutex>
 #include <QTimer>
 #include <QRect>
+#include <QString>
 #include <stdint.h>
 #include <string>
 #include <vector>
@@ -92,6 +93,7 @@ private:
     };
 
     bool loadConfig();
+    bool loadSimulateCurve();
     bool initMqtt();
 
     void onMqttConnected(int rc);
@@ -103,6 +105,8 @@ private:
     void handlePileData(uint8_t gun, const std::string& payload);
     void handleMeterData(uint8_t gun, const std::string& payload);
     void publishLogicCmd(uint8_t gun, const char* cmd, bool v2g);
+    void publishOutputVACmd(uint8_t gun, double voltage, double current);
+    void publishCurveTargetIfNeeded();
 
     static bool parseTopicGun(const std::string& topic,
                               const std::string& prefix,
@@ -113,12 +117,41 @@ private:
     void drawActionButtons(QPainter& painter, const QRect& rect, const GunUiData& data, uint8_t gun);
     bool buttonVisible(const std::string& state, int btnType) const;
     QRect buttonRect(const QRect& panelRect, int index, int total) const;
+    QString buildCurveDisplayText() const;
 
 private:
     struct ButtonClickArea {
         uint8_t gun;
         int type; // 0=charge_start, 1=discharge_start, 2=stop
         QRect rect;
+    };
+
+    struct CurvePoint {
+        int minuteOfDay;
+        double voltage;
+        double current;
+
+        CurvePoint()
+            : minuteOfDay(0)
+            , voltage(0.0)
+            , current(0.0)
+        {
+        }
+    };
+
+    struct CurveSegment {
+        int startMinute;
+        int endMinute;
+        double voltage;
+        double current;
+
+        CurveSegment()
+            : startMinute(0)
+            , endMinute(0)
+            , voltage(0.0)
+            , current(0.0)
+        {
+        }
     };
 
     HmiConfig m_config;
@@ -134,6 +167,9 @@ private:
     std::string m_macAddr;
     std::vector<GunUiData> m_guns;
     std::vector<ButtonClickArea> m_clickAreas;
+    std::vector<CurveSegment> m_curveSegments;
+    QString m_curveDisplayText;
+    qint64 m_lastCurvePublishMs;
 };
 
 #endif // HMI_WINDOW_H

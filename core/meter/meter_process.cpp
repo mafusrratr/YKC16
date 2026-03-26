@@ -9,6 +9,7 @@
 #include <iostream>
 #include <ctime>
 #include <cctype>
+#include <cstring>
 #include <map>
 #include <thread>
 
@@ -45,6 +46,7 @@ namespace {
 MeterProcess::MeterProcess()
     : BaseProcess(PROC_METER, "tcu_meter")
     , m_seq(0)
+    , m_lastDaemonWatchdogFeed(std::chrono::steady_clock::now() - std::chrono::seconds(5))
 {
 }
 
@@ -77,6 +79,10 @@ bool MeterProcess::doInitialize()
 void MeterProcess::doRun()
 {
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    if (now - m_lastDaemonWatchdogFeed >= std::chrono::seconds(5)) {
+        feedDaemonWatchdog();
+        m_lastDaemonWatchdogFeed = now;
+    }
     if (now - m_lastPoll >= std::chrono::milliseconds(m_cfg.pollIntervalMs)) {
         pollOnce();
         m_lastPoll = now;
@@ -95,6 +101,20 @@ void MeterProcess::doCleanup()
     m_ports.clear();
     m_mqtt.loopStop(true);
     m_mqtt.disconnect();
+}
+
+void MeterProcess::feedDaemonWatchdog()
+{
+    // BY ZF: 通过守护进程看门狗消息队列上报 tcu_meter 存活状态。
+    static MessageQueue watchdogQueue(MSG_KEY_WATCHDOG);
+    static int queueReady = -1;
+    if (queueReady == -1) {
+        queueReady = watchdogQueue.open() ? 1 : (watchdogQueue.create() ? 1 : 0);
+    }
+    if (queueReady == 1) {
+        const char* processName = "tcu_meter";
+        watchdogQueue.send(MSG_WATCHDOG_FEED, processName, strlen(processName));
+    }
 }
 
 // BY ZF: 加载并校验配置

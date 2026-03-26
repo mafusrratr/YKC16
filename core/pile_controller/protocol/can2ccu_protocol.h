@@ -70,6 +70,7 @@ public:
     int encodeStartCharge();
     int encodeStopCharge();
     int encodePowerAdjust();
+    int encodeOutputVAControl();
     int encodeGetStatus(uint8_t gunNo);
     int encodeClearFault(uint8_t gunNo);
     
@@ -149,6 +150,7 @@ public:
      */
     int setStartChargeData(const TCU2CCU_CmdStartChargeData* cmdData);
     int setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmdData);
+    int setOutputVAData(const TCU2CCU_CmdOutputVAData* cmdData);
     int setVersionCheckData(const TCU2CCU_CmdVersionCheckData* cmdData);
     int setChargeParamData(const TCU2CCU_CmdChargeParamData* cmdData);
     
@@ -182,6 +184,7 @@ public:
      */
     int getStopChargeData(TCU2CCU_CmdStopChargeData* outCmdData) const;
     int getPowerAdjustData(TCU2CCU_CmdPowerAdjustData* outCmdData) const;
+    int getOutputVAData(TCU2CCU_CmdOutputVAData* outCmdData) const;
     
     /**
      * 获取停止充电应答数据（接收到的应答）
@@ -356,6 +359,10 @@ private:
     TCU2CCU_CmdPowerAdjustData m_cmdPowerAdjustData;
     bool m_cmdPowerAdjustDataValid;
 
+    // BY ZF: 输出电压电流调节命令数据（下发，4C帧）
+    TCU2CCU_CmdOutputVAData m_cmdOutputVAData;
+    bool m_cmdOutputVADataValid;
+
     // BY ZF: 功率调节应答标志（接收）
     bool m_powerAdjustResponseDataValid;
     
@@ -429,6 +436,7 @@ private:
      */
     int encodeStopChargeFrame();
     int encodePowerAdjustFrame();
+    int encodeOutputVAControlFrame();
     
     /**
      * 发送单帧数据（单帧发送器）
@@ -610,6 +618,7 @@ private:
     static const uint16_t PGN_VERSION_CHECK = 0x07;     // 版本校验
     static const uint16_t PGN_PILE_CONFIG = 0x09;      // 充电桩参数信息
     static const uint16_t PGN_POWER_ADJUST = 0x0F;     // 功率调节命令
+    static const uint16_t PGN_OUTPUT_VA_CTRL = 0x4C;   // 输出电压电流调节命令
     static const uint16_t PGN_START_CHARGE_ACK = 0x12; // 启动充电应答确认
     static const uint16_t PGN_STOP_CHARGE_ACK = 0x14;  // 停止充电应答确认
     static const uint16_t PGN_VIN_CONFIRM = 0x18;      // VIN信息确认

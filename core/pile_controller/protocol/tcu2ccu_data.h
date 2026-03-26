@@ -154,6 +154,15 @@ struct TCU2CCU_CmdSetParamsData {
 };
 
 /**
+ * 输出电压电流调节业务数据
+ * 对应命令：输出电压电流调节（4C帧）
+ */
+struct TCU2CCU_CmdOutputVAData {
+    uint16_t demandVoltage;        // 需求电压（0.1V，低字节在前）
+    uint16_t demandCurrent;        // 需求电流（0.1A，低字节在前）
+};
+
+/**
  * 清除故障业务数据
  * 对应命令：清除故障
  */

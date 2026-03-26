@@ -5,13 +5,21 @@
 #include <QMouseEvent>
 #include <QDateTime>
 #include <QString>
+#include <QStringList>
 #include <QMutexLocker>
 #include <QMetaObject>
+#include <QFile>
+#include <QFileInfo>
+#include <QTextStream>
+#include <QCoreApplication>
+#include <QTime>
 
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <iostream>
 #include <sstream>
+#include <algorithm>
 
 #include "../../base/common/config_manager_lite.h"
 #include "../../base/cjson/include/cjson/cJSON.h"
@@ -79,6 +87,7 @@ HmiWindow::HmiWindow(QWidget* parent)
     , m_operatorId("0")
     , m_macAddr("000000000000000000000000")
     , m_guns(2)
+    , m_lastCurvePublishMs(0)
 {
     // BY ZF: 默认准备 2 枪缓存，布局由 setConfig/gun_count 决定。
     m_guns[0].gun = 0;
@@ -101,6 +110,7 @@ bool HmiWindow::initialize()
     if (!loadConfig()) {
         return false;
     }
+    loadSimulateCurve();
 
     setWindowTitle(QString::fromUtf8("TCU HMI"));
     resize(m_config.screenWidth, m_config.screenHeight);
@@ -148,6 +158,114 @@ bool HmiWindow::loadConfig()
     // BY ZF: 广西DKY HMI 固定单枪显示。
     m_gunCount = 1;
 
+    return true;
+}
+
+bool HmiWindow::loadSimulateCurve()
+{
+    QStringList candidates;
+    candidates << QString::fromUtf8("/mnt/nandflash/simulate_curve.csv");
+    candidates << QCoreApplication::applicationDirPath() + QString::fromUtf8("/doc/simulate_curve.csv");
+    candidates << QString::fromUtf8("/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/core/hmi/GuangFuSimulator/doc/simulate_curve.csv");
+
+    QString csvPath;
+    for (int i = 0; i < candidates.size(); ++i) {
+        if (QFileInfo(candidates.at(i)).exists()) {
+            csvPath = candidates.at(i);
+            break;
+        }
+    }
+    if (csvPath.isEmpty()) {
+        m_curveSegments.clear();
+        m_curveDisplayText = QString::fromUtf8("模拟曲线文件未找到");
+        return false;
+    }
+
+    QFile file(csvPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        m_curveSegments.clear();
+        m_curveDisplayText = QString::fromUtf8("模拟曲线文件打开失败");
+        return false;
+    }
+
+    QTextStream in(&file);
+    std::vector<CurvePoint> points;
+    bool firstLine = true;
+    while (!in.atEnd()) {
+        QString line = in.readLine().trimmed();
+        if (line.isEmpty()) {
+            continue;
+        }
+        if (firstLine) {
+            firstLine = false;
+            if (line.contains(QString::fromUtf8("time"), Qt::CaseInsensitive)) {
+                continue;
+            }
+        }
+
+        const QStringList parts = line.split(',');
+        if (parts.size() < 3) {
+            continue;
+        }
+
+        bool okTime = false;
+        bool okV = false;
+        bool okA = false;
+        const int hhmm = parts.at(0).trimmed().toInt(&okTime);
+        const double voltage = parts.at(1).trimmed().toDouble(&okV);
+        const double current = parts.at(2).trimmed().toDouble(&okA);
+        if (!okTime || !okV || !okA) {
+            continue;
+        }
+
+        const int hh = hhmm / 100;
+        const int mm = hhmm % 100;
+        if (hh < 0 || hh > 23 || mm < 0 || mm > 59) {
+            continue;
+        }
+
+        CurvePoint point;
+        point.minuteOfDay = hh * 60 + mm;
+        point.voltage = voltage;
+        point.current = current;
+        points.push_back(point);
+    }
+    file.close();
+
+    std::sort(points.begin(), points.end(), [](const CurvePoint& a, const CurvePoint& b) {
+        return a.minuteOfDay < b.minuteOfDay;
+    });
+
+    m_curveSegments.clear();
+    if (points.empty()) {
+        m_curveDisplayText = QString::fromUtf8("模拟曲线为空");
+        return false;
+    }
+
+    if (points.front().minuteOfDay > 0) {
+        CurveSegment seg;
+        seg.startMinute = 0;
+        seg.endMinute = points.front().minuteOfDay;
+        seg.voltage = 0.0;
+        seg.current = 0.0;
+        m_curveSegments.push_back(seg);
+    }
+
+    for (size_t i = 0; i < points.size(); ++i) {
+        const int startMinute = points[i].minuteOfDay;
+        const int endMinute = (i + 1 < points.size()) ? points[i + 1].minuteOfDay : 24 * 60;
+        if (endMinute <= startMinute) {
+            continue;
+        }
+        CurveSegment seg;
+        seg.startMinute = startMinute;
+        seg.endMinute = endMinute;
+        seg.voltage = points[i].voltage;
+        seg.current = points[i].current;
+        m_curveSegments.push_back(seg);
+    }
+
+    m_curveDisplayText = buildCurveDisplayText();
     return true;
 }
 
@@ -375,6 +493,7 @@ bool HmiWindow::parseTopicGun(const std::string& topic,
 
 void HmiWindow::onRefreshUi()
 {
+    publishCurveTargetIfNeeded();
     update();
 }
 
@@ -437,7 +556,10 @@ void HmiWindow::drawGunPanel(QPainter& painter, const QRect& rect, const GunUiDa
     painter.drawText(rect.adjusted(16, 12, -16, -12), Qt::AlignLeft | Qt::AlignTop, title);
 
     painter.setFont(bodyFont);
-    painter.drawText(rect.adjusted(16, 44, -16, -12), Qt::AlignLeft | Qt::TextWordWrap, stateMessage(data.state, data.dischargeMode));
+    const int curveWidth = (rect.width() >= 600) ? 280 : 220;
+    const QRect stateRect = rect.adjusted(16, 44, -curveWidth - 24, -12);
+    const QRect curveRect(rect.right() - curveWidth - 16, rect.top() + 20, curveWidth, rect.height() - 40);
+    painter.drawText(stateRect, Qt::AlignLeft | Qt::TextWordWrap, stateMessage(data.state, data.dischargeMode));
 
     if (data.state == "CHARGING") {
         const double chargedMinutes = data.chargedTime / 60.0;
@@ -471,7 +593,8 @@ void HmiWindow::drawGunPanel(QPainter& painter, const QRect& rect, const GunUiDa
                          .arg(QString::number(data.totalEnergy, 'f', 3))
                          .arg(QString::number(chargedMinutes, 'f', 1));
         }
-        painter.drawText(rect.adjusted(16, 90, -16, -16), Qt::AlignLeft | Qt::AlignTop, detail);
+        painter.drawText(QRect(stateRect.left(), rect.top() + 90, stateRect.width(), rect.height() - 170),
+                         Qt::AlignLeft | Qt::AlignTop, detail);
     } else if (data.state == "STOPPED") {
         QString detail;
         if (data.dischargeMode) {
@@ -487,8 +610,19 @@ void HmiWindow::drawGunPanel(QPainter& painter, const QRect& rect, const GunUiDa
                          .arg(QString::number(data.totalEnergy, 'f', 3))
                          .arg(QString::number(data.totalAmount, 'f', 2));
         }
-        painter.drawText(rect.adjusted(16, 120, -16, -16), Qt::AlignLeft | Qt::AlignTop, detail);
+        painter.drawText(QRect(stateRect.left(), rect.top() + 120, stateRect.width(), rect.height() - 200),
+                         Qt::AlignLeft | Qt::AlignTop, detail);
     }
+
+    painter.setPen(QColor(80, 95, 110));
+    painter.drawLine(curveRect.left() - 10, curveRect.top(), curveRect.left() - 10, curveRect.bottom());
+    painter.setPen(QColor(20, 35, 55));
+    painter.setFont(QFont("WenQuanYi Zen Hei", singlePanel ? 18 : 14, QFont::Bold));
+    painter.drawText(curveRect.adjusted(0, 0, 0, 0), Qt::AlignLeft | Qt::AlignTop, QString::fromUtf8("模拟曲线"));
+    painter.setFont(smallFont);
+    painter.drawText(curveRect.adjusted(0, 28, 0, -80),
+                     Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                     m_curveDisplayText);
 
     drawActionButtons(painter, rect, data, static_cast<uint8_t>(data.gun));
 
@@ -595,12 +729,101 @@ void HmiWindow::publishLogicCmd(uint8_t gun, const char* cmd, bool v2g)
     if (std::strcmp(cmd, "start_charge") == 0 && gun < m_guns.size()) {
         QMutexLocker locker(&m_dataMutex);
         m_guns[gun].dischargeMode = v2g;
+        m_lastCurvePublishMs = 0;
     } else if (std::strcmp(cmd, "stop_charge") == 0 && gun < m_guns.size()) {
         QMutexLocker locker(&m_dataMutex);
         if (m_guns[gun].state == "IDLE" || m_guns[gun].state == "STOPPED") {
             m_guns[gun].dischargeMode = false;
         }
+        m_lastCurvePublishMs = 0;
     }
+}
+
+void HmiWindow::publishOutputVACmd(uint8_t gun, double voltage, double current)
+{
+    if (!m_mqttReady) {
+        std::cerr << "[HMI] mqtt not ready, skip outputVA_ctrl" << std::endl;
+        return;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "ts", static_cast<double>(QDateTime::currentDateTime().toTime_t()) * 1000.0);
+    cJSON_AddStringToObject(root, "source", "tcu_hmi");
+    cJSON_AddNumberToObject(root, "gun", gun);
+    cJSON_AddStringToObject(root, "cmd", "outputVA_ctrl");
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddNumberToObject(data, "demandVoltage", voltage);
+    cJSON_AddNumberToObject(data, "demandCurrent", current);
+    cJSON_AddItemToObject(root, "data", data);
+    char* txt = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!txt) {
+        return;
+    }
+
+    std::ostringstream topic;
+    topic << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gun) << "/cmd";
+    const bool ok = m_mqtt.publish(topic.str(), txt, 1, false);
+    std::cout << "[HMI][MQTT_TX] topic=" << topic.str()
+              << " cmd=outputVA_ctrl"
+              << " voltage=" << voltage
+              << " current=" << current
+              << " ok=" << (ok ? 1 : 0) << std::endl;
+    cJSON_free(txt);
+}
+
+void HmiWindow::publishCurveTargetIfNeeded()
+{
+    if (m_curveSegments.empty() || m_guns.empty()) {
+        return;
+    }
+
+    const QTime now = QTime::currentTime();
+    const int minuteOfDay = now.hour() * 60 + now.minute();
+
+    const CurveSegment* active = 0;
+    for (size_t i = 0; i < m_curveSegments.size(); ++i) {
+        if (minuteOfDay >= m_curveSegments[i].startMinute &&
+            minuteOfDay < m_curveSegments[i].endMinute) {
+            active = &m_curveSegments[i];
+            break;
+        }
+    }
+    if (!active) {
+        return;
+    }
+
+    const qint64 nowMs = static_cast<qint64>(QDateTime::currentDateTime().toTime_t()) * 1000LL;
+    if (m_lastCurvePublishMs > 0 && (nowMs - m_lastCurvePublishMs) < 30000) {
+        return;
+    }
+
+    publishOutputVACmd(0, active->voltage, active->current);
+    m_lastCurvePublishMs = nowMs;
+}
+
+QString HmiWindow::buildCurveDisplayText() const
+{
+    if (m_curveSegments.empty()) {
+        return QString::fromUtf8("模拟曲线为空");
+    }
+
+    QStringList lines;
+    for (size_t i = 0; i < m_curveSegments.size(); ++i) {
+        const CurveSegment& seg = m_curveSegments[i];
+        const int sh = seg.startMinute / 60;
+        const int sm = seg.startMinute % 60;
+        const int eh = seg.endMinute / 60;
+        const int em = seg.endMinute % 60;
+        lines << QString::fromUtf8("%1:%2-%3:%4  %5V / %6A")
+                     .arg(sh, 2, 10, QChar('0'))
+                     .arg(sm, 2, 10, QChar('0'))
+                     .arg(eh, 2, 10, QChar('0'))
+                     .arg(em, 2, 10, QChar('0'))
+                     .arg(QString::number(seg.voltage, 'f', 1))
+                     .arg(QString::number(seg.current, 'f', 1));
+    }
+    return lines.join(QString::fromUtf8("\n"));
 }
 
 void HmiWindow::mousePressEvent(QMouseEvent* event)

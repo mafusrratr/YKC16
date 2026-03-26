@@ -4,6 +4,7 @@
  */
 
 #include "comm_process.h"
+#include "../../base/common/message_queue.h"
 #include "../../base/cjson/include/cjson/cJSON.h"
 #include <iostream>
 #include <sstream>
@@ -37,6 +38,20 @@
 #endif
 
 namespace {
+    void feedDaemonWatchdog()
+    {
+        // BY ZF: 通过守护进程看门狗消息队列上报 tcu_comm 存活状态。
+        static MessageQueue watchdogQueue(MSG_KEY_WATCHDOG);
+        static int queueReady = -1;
+        if (queueReady == -1) {
+            queueReady = watchdogQueue.open() ? 1 : (watchdogQueue.create() ? 1 : 0);
+        }
+        if (queueReady == 1) {
+            const char* processName = "tcu_comm";
+            watchdogQueue.send(MSG_WATCHDOG_FEED, processName, strlen(processName));
+        }
+    }
+
     // BY ZF: 中石化2.0平台帧类型（表4-1，固定值，不走配置）。
     //登陆流程相关帧定义
     static const uint8_t kCmdLoginReq = 0x01;
@@ -56,6 +71,7 @@ namespace {
     static const uint8_t kCmdBcp = 0x17;
     static const uint8_t kCmdChargeEndStage = 0x19;
     static const uint8_t kCmdBst = 0x1D;
+    static const uint8_t kCmdBclBcsCcs = 0x23;
     static const uint8_t kCmdCst = 0x21;
     static const uint8_t kCmdBsm = 0x25;
     static const uint8_t kCmdStartChargeResult = 0x2D;
@@ -621,8 +637,10 @@ namespace {
         case 0x13: return "charge_info";
         case 0x15: return "brm";
         case 0x17: return "bcp";
+        case 0x19: return "bsd";
         case 0x1D: return "bst";
         case 0x21: return "cst";
+        case 0x23: return "bcl";
         case 0x25: return "bsm";
         case 0x2D: return "start_result";
         case 0x3D: return "upload_trade_record";
@@ -655,6 +673,7 @@ CommProcess::CommProcess()
     , m_heartbeatCounter(0)
     , m_sm4SessionKeyReady(false)
     , m_loginCryptoPrepared(false)
+    , m_platformOnlineEventActive(false)
 {
     m_sm4SessionKey.fill(0);
 }
@@ -669,6 +688,10 @@ bool CommProcess::doInitialize()
     if (!loadConfig()) {
         return false;
     }
+    if (m_config.offlineRunMode) {
+        // BY ZF: 离线模式下平台链路状态对外恒定为在线。
+        m_platformOnlineEventActive = true;
+    }
     if (!initMqtt()) {
         return false;
     }
@@ -681,12 +704,13 @@ bool CommProcess::doInitialize()
 void CommProcess::doRun()
 {
     m_running = true;
-    // BY ZF: 喂狗频率控制为 5 秒一次。
+    // BY ZF: 本地/daemon 喂狗频率统一控制为 5 秒一次。
     auto lastFeedTime = std::chrono::steady_clock::now() - std::chrono::seconds(5);
     while (m_running.load()) {
         const auto now = std::chrono::steady_clock::now();
         if (now - lastFeedTime >= std::chrono::seconds(5)) {
             feedWatchdog();
+            feedDaemonWatchdog();
             lastFeedTime = now;
         }
         // BY ZF: 平台 TCP 链路维护与登录流程状态机驱动。
@@ -727,6 +751,7 @@ bool CommProcess::loadConfig()
     // BY ZF: 按中石化2.0联调要求，心跳周期固定20秒。
     m_config.tcpHeartbeatSec = 20;
     m_config.loginRetrySec = cfg.getInt(section, "login_retry_sec", 10);
+    m_config.offlineRunMode = (cfg.getInt(section, "offline_run_mode", 0) != 0);
     m_config.debugTcp = (cfg.getInt(section, "debug", 0) != 0);
 
     m_config.gunIdList.clear();
@@ -813,6 +838,8 @@ void CommProcess::onMqttConnected(int rc)
     m_mqtt.subscribe(p + "/meter/+/data", 0);
     // BY ZF: MQTT重连后主动发布一次每枪setConfig（retain）。
     publishInitialSetConfig();
+    publishPlatformLinkEvent(m_platformOnlineEventActive,
+                             m_platformOnlineEventActive ? "login_ready" : "not_logged_in");
 }
 
 void CommProcess::onMqttMessage(const std::string& topic, const std::string& payload)
@@ -1641,6 +1668,10 @@ void CommProcess::closePlatformTcp()
     }
     m_platformConnected = false;
     m_loginState = LOGIN_IDLE;
+    if (m_platformOnlineEventActive && !m_config.offlineRunMode) {
+        m_platformOnlineEventActive = false;
+        publishPlatformLinkEvent(false, "tcp_closed");
+    }
     resetCryptoSession();
 }
 
@@ -2091,7 +2122,7 @@ std::vector<uint8_t> CommProcess::buildBrmBody(uint8_t gun) const
     // BY ZF: 预留1字节，当前固定0x00。
     body.push_back(0x00);
     fillAsciiFixed(body, rd.startCompleteData.vin, 17);
-
+    body.insert(body.end(), rd.startCompleteData.bmsSoftwareVersion.begin(), rd.startCompleteData.bmsSoftwareVersion.end());
     // BY ZF: 离线模式标记，当前在线固定 0x00。
     body.push_back(0x00);
     return body;
@@ -2289,6 +2320,71 @@ std::vector<uint8_t> CommProcess::buildBstBody(uint8_t gun, cJSON* stopCompleteD
     body.push_back(getU8("bmsStopErrorReason", 0));
     // 7) 是否离线模式下产生 BIN1（当前在线固定0x00）
     body.push_back(0x00);
+    return body;
+}
+
+std::vector<uint8_t> CommProcess::buildBclBcsCcsBody(uint8_t gun) const
+{
+    std::vector<uint8_t> body;
+    if (gun >= m_gunRuntimeData.size()) {
+        return body;
+    }
+
+    const GunRuntimeData& rd = m_gunRuntimeData[gun];
+
+    auto clampU8 = [](int v) -> uint8_t {
+        if (v < 0) v = 0;
+        if (v > 255) v = 255;
+        return static_cast<uint8_t>(v);
+    };
+    auto clampU16 = [](int v) -> uint16_t {
+        if (v < 0) v = 0;
+        if (v > 0xFFFF) v = 0xFFFF;
+        return static_cast<uint16_t>(v);
+    };
+
+    // BY ZF: 0x23 上送充电过程BMS需求与充电机输出报文（15秒周期）。
+    // 1) 交易流水号 BCD16
+    appendBcdFixed(body, rd.orderNo, 16);
+    // 2) 桩编号 BCD7
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    // 3) 枪号 BCD1（1..n）
+    const int gunNo = static_cast<int>(gun) + 1;
+    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
+
+    // 4) BCL BMS电压需求（0.1V）
+    appendU16LE(body, clampU16(static_cast<int>(rd.bmsReqVoltage * 10.0)));
+    // 5) BCL BMS电流需求（0.1A，偏移+800A）
+    appendU16LE(body, clampU16(static_cast<int>(rd.bmsReqCurrent * 10.0 + 8000.0)));
+    // 6) BCL BMS充电模式
+    body.push_back(clampU8(rd.ycChargeMode));
+    // 7) BCS BMS当前电压测量值（0.1V）
+    appendU16LE(body, clampU16(static_cast<int>(rd.bmsMeasuredVoltage * 10.0)));
+    // 8) BCS BMS当前电流测量值（0.1A，偏移+800A）
+    appendU16LE(body, clampU16(static_cast<int>(rd.bmsMeasuredCurrent * 10.0 + 8000.0)));
+    // BY ZF: 当前仅缓存最高/最低单体编号，分组号无来源，先按0上送。
+    const uint16_t cellMaxVoltageAndGroup =
+            static_cast<uint16_t>(clampU16(static_cast<int>(rd.cellMaxVoltage * 100.0)) & 0x0FFFU);
+    // 9) BCS 最高单体动力蓄电池电压及组号
+    appendU16LE(body, cellMaxVoltageAndGroup);
+    // 10) BCS 当前荷电状态SOC（%）
+    body.push_back(clampU8(static_cast<int>(rd.soc + 0.5)));
+    // 11) BCS 估算剩余充电时间（min）
+    appendU16LE(body, clampU16(static_cast<int>(rd.estimatedRemainTime)));
+    // 12) CCS 电桩电压输出值（0.1V）
+    appendU16LE(body, clampU16(static_cast<int>(rd.voltage * 10.0)));
+    // 13) CCS 电桩电流输出值（0.1A，偏移+800A）
+    appendU16LE(body, clampU16(static_cast<int>(rd.current * 10.0 + 8000.0)));
+    // 14) CCS 累计充电时间（min）
+    appendU16LE(body, clampU16(static_cast<int>(rd.chargedTime / 60.0)));
+    // 15) 是否离线模式下产生
+    body.push_back(0x00);
+    const uint16_t cellMinVoltageAndGroup =
+            static_cast<uint16_t>(clampU16(static_cast<int>(rd.cellMinVoltage * 100.0)) & 0x0FFFU);
+    // 16) 最低单体动力蓄电池电压及组号
+    appendU16LE(body, cellMinVoltageAndGroup);
+    // 17) 预留字段（BCD4）
+    body.insert(body.end(), 4, 0x00);
     return body;
 }
 
@@ -2556,6 +2652,13 @@ void CommProcess::reportChargeInfoPeriodic()
         const std::vector<uint8_t> body = buildChargeInfoBody(gun);
         if (!body.empty()) {
             sendPlatformFrame(kCmdChargeInfo, body);
+            // BY ZF: 充电中每15秒同步上送0x23 BCL/BCS/CCS信息。
+            if (charging) {
+                const std::vector<uint8_t> bclBcsCcsBody = buildBclBcsCcsBody(gun);
+                if (!bclBcsCcsBody.empty()) {
+                    sendPlatformFrame(kCmdBclBcsCcs, bclBcsCcsBody);
+                }
+            }
             // BY ZF: 充电中每15秒同步上送0x25 BSM信息。
             // if (charging) {
                 const std::vector<uint8_t> bsmBody = buildBsmBody(gun);
@@ -2792,6 +2895,10 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         // BY ZF: 收到有效0x0A后发起0x0B对时请求，序列号沿用平台下发帧。
         (void)sendPlatformFrame(kCmdTimeSyncReq, buildTimeSyncRequestBody(), rxSeq);
         m_loginState = LOGIN_ONLINE;
+        if (!m_platformOnlineEventActive) {
+            m_platformOnlineEventActive = true;
+            publishPlatformLinkEvent(true, "login_ready");
+        }
         m_lastHeartbeat = std::chrono::steady_clock::now() - std::chrono::seconds(m_config.tcpHeartbeatSec);
         m_logSender.info("platform_login_step", "fee_model_ack_ok");
         return;
@@ -3371,6 +3478,41 @@ bool CommProcess::publishSetConfig(uint8_t gun, cJSON* dataObj)
     }
     const std::string outTopic = buildTopic("plat", gun, "event");
     return m_mqtt.publish(outTopic, payload, 1, true);
+}
+
+void CommProcess::publishPlatformLinkEvent(bool online, const char* reason)
+{
+    // BY ZF: 离线运行模式下，统一对外上报平台通信正常，便于脱网联调。
+    if (m_config.offlineRunMode) {
+        online = true;
+        reason = "offline_mode";
+        m_platformOnlineEventActive = true;
+    }
+    for (uint8_t gun = 0; gun < m_config.gunCount; ++gun) {
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddNumberToObject(root, "ts", static_cast<double>(std::time(nullptr)) * 1000.0);
+        cJSON_AddNumberToObject(root, "seq", static_cast<double>(++m_seq));
+        cJSON_AddStringToObject(root, "source", "tcu_comm");
+        cJSON_AddNumberToObject(root, "gun", gun);
+        cJSON_AddStringToObject(root, "event", online ? "platform_online" : "platform_offline");
+
+        cJSON* data = cJSON_CreateObject();
+        cJSON_AddStringToObject(data, "reason", reason ? reason : "");
+        cJSON_AddItemToObject(root, "data", data);
+
+        char* out = cJSON_PrintUnformatted(root);
+        std::string payload;
+        if (out) {
+            payload = out;
+            free(out);
+        }
+        cJSON_Delete(root);
+        if (payload.empty()) {
+            continue;
+        }
+        const std::string outTopic = buildTopic("plat", gun, "event");
+        m_mqtt.publish(outTopic, payload, 1, true);
+    }
 }
 
 bool CommProcess::persistGunQrCodeToIni(uint8_t gun, const std::string& qrCode)

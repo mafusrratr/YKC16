@@ -1,0 +1,22 @@
+# 编译输出目录
+release/
+
+# Qt编译文件
+*.o
+*.pro.user
+*.qmake.stash
+Makefile
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# 可执行文件（本地编译的）
+tcu_update
+
+# 配置文件（本地配置）
+tcu_update.conf
+
+# 系统文件
+.DS_Store
+.DS_Store?
+._*

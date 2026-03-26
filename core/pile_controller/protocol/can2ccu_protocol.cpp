@@ -31,9 +31,10 @@ CAN2CCUProtocol::CAN2CCUProtocol()
     , m_cmdStartChargeDataValid(false)
     , m_startChargeResponseDataValid(false)
     , m_cmdStopChargeDataValid(false)
-    , m_stopChargeResponseDataValid(false)
     , m_cmdPowerAdjustDataValid(false)
+    , m_cmdOutputVADataValid(false)
     , m_powerAdjustResponseDataValid(false)
+    , m_stopChargeResponseDataValid(false)
     , m_cmdVersionCheckDataValid(false)
     , m_versionCheckResponseDataValid(false)
     , m_cmdChargeParamDataValid(false)
@@ -57,6 +58,7 @@ CAN2CCUProtocol::CAN2CCUProtocol()
     memset(&m_cmdStopChargeData, 0, sizeof(TCU2CCU_CmdStopChargeData));
     memset(&m_stopChargeResponseData, 0, sizeof(TCU2CCU_StopChargeResponseData));
     memset(&m_cmdPowerAdjustData, 0, sizeof(TCU2CCU_CmdPowerAdjustData));
+    memset(&m_cmdOutputVAData, 0, sizeof(TCU2CCU_CmdOutputVAData));
     memset(&m_cmdVersionCheckData, 0, sizeof(TCU2CCU_CmdVersionCheckData));
     memset(&m_versionCheckResponseData, 0, sizeof(TCU2CCU_VersionCheckResponseData));
     memset(&m_cmdChargeParamData, 0, sizeof(TCU2CCU_CmdChargeParamData));
@@ -166,6 +168,9 @@ void CAN2CCUProtocol::cleanup()
     m_startChargeResponseDataValid = false;
     m_cmdStopChargeDataValid = false;
     m_stopChargeResponseDataValid = false;
+    m_cmdPowerAdjustDataValid = false;
+    m_cmdOutputVADataValid = false;
+    m_powerAdjustResponseDataValid = false;
     m_cmdVersionCheckDataValid = false;
     m_versionCheckResponseDataValid = false;
     m_cmdChargeParamDataValid = false;
@@ -263,6 +268,16 @@ int CAN2CCUProtocol::setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmdDat
     return 0;
 }
 
+int CAN2CCUProtocol::setOutputVAData(const TCU2CCU_CmdOutputVAData* cmdData)
+{
+    if (cmdData == nullptr) {
+        return -1;
+    }
+    m_cmdOutputVAData = *cmdData;
+    m_cmdOutputVADataValid = true;
+    return 0;
+}
+
 int CAN2CCUProtocol::setVersionCheckData(const TCU2CCU_CmdVersionCheckData* cmdData)
 {
     if (cmdData == nullptr) {
@@ -298,6 +313,15 @@ int CAN2CCUProtocol::getPowerAdjustData(TCU2CCU_CmdPowerAdjustData* outCmdData) 
         return -1;
     }
     *outCmdData = m_cmdPowerAdjustData;
+    return 0;
+}
+
+int CAN2CCUProtocol::getOutputVAData(TCU2CCU_CmdOutputVAData* outCmdData) const
+{
+    if (outCmdData == nullptr || !m_cmdOutputVADataValid) {
+        return -1;
+    }
+    *outCmdData = m_cmdOutputVAData;
     return 0;
 }
 
@@ -443,6 +467,16 @@ int CAN2CCUProtocol::encodePowerAdjust()
     return encodePowerAdjustFrame();
 }
 
+int CAN2CCUProtocol::encodeOutputVAControl()
+{
+    // BY ZF: 输出电压电流控制使用 0x10/0x4C，业务层需提前设置需求电压电流。
+    if (!m_cmdOutputVADataValid) {
+        std::cerr << "[CAN2CCU] Output VA data not set\n";
+        return -1;
+    }
+    return encodeOutputVAControlFrame();
+}
+
 int CAN2CCUProtocol::encodeStopChargeFrame()
 {
     // BY ZF: 按表14 充电停止帧编码并发送
@@ -477,6 +511,24 @@ int CAN2CCUProtocol::encodePowerAdjustFrame()
     businessData[1] = static_cast<uint8_t>(m_cmdPowerAdjustData.adjustParam & 0xFF);
     businessData[2] = static_cast<uint8_t>((m_cmdPowerAdjustData.adjustParam >> 8) & 0xFF);
     return sendSingleFrame(0x10, PGN_POWER_ADJUST, businessData, 3);
+}
+
+int CAN2CCUProtocol::encodeOutputVAControlFrame()
+{
+    // BY ZF: 使用 0x10/0x4C 下发输出需求电压电流，业务区为“2字节电压 + 2字节电流”。
+    if (!m_cmdOutputVADataValid) {
+        return -1;
+    }
+    if (m_sendCallback == nullptr) {
+        std::cerr << "[CAN2CCU] Send callback not set\n";
+        return -1;
+    }
+    uint8_t businessData[4];
+    businessData[0] = static_cast<uint8_t>(m_cmdOutputVAData.demandVoltage & 0xFF);
+    businessData[1] = static_cast<uint8_t>((m_cmdOutputVAData.demandVoltage >> 8) & 0xFF);
+    businessData[2] = static_cast<uint8_t>(m_cmdOutputVAData.demandCurrent & 0xFF);
+    businessData[3] = static_cast<uint8_t>((m_cmdOutputVAData.demandCurrent >> 8) & 0xFF);
+    return sendSingleFrame(0x10, PGN_OUTPUT_VA_CTRL, businessData, 4);
 }
 
 int CAN2CCUProtocol::encodeStartCompleteAck(uint8_t loadControlSwitch, uint8_t confirmFlag)

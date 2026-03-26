@@ -45,9 +45,11 @@ public:
     int setStartChargeData(const TCU2CCU_CmdStartChargeData* cmd);
     int setStopChargeData(const TCU2CCU_CmdStopChargeData* cmd);
     int setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmd);
+    int setOutputVAData(const TCU2CCU_CmdOutputVAData* cmd);
     int setVersionCheckData(const TCU2CCU_CmdVersionCheckData* cmd);
     int setChargeParamData(const TCU2CCU_CmdChargeParamData* cmd);
     int powerAdjust();
+    int outputVAControl();
 
     int getStartChargeResponse(TCU2CCU_StartChargeResponseData* out) const;
     bool isStartChargeResponseValid() const;

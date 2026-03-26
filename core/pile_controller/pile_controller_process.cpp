@@ -311,8 +311,23 @@ void PileControllerProcess::doCleanup()
 
 void PileControllerProcess::feedWatchdog()
 {
-    // 通过消息队列发送心跳到守护进程
-    // TODO: 实现看门狗心跳
+    // BY ZF: 看门狗进程名必须与 daemon.ini 的进程键保持一致，这里使用 tcu_cdzctrl。
+    static MessageQueue watchdogQueue(MSG_KEY_WATCHDOG);
+    static int queueReady = -1;
+    static std::chrono::steady_clock::time_point lastFeedTime = std::chrono::steady_clock::now()
+        - std::chrono::seconds(5);
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    if ((now - lastFeedTime) < std::chrono::seconds(5)) {
+        return;
+    }
+    if (queueReady == -1) {
+        queueReady = watchdogQueue.open() ? 1 : (watchdogQueue.create() ? 1 : 0);
+    }
+    if (queueReady == 1) {
+        const char* processName = "tcu_cdzctrl";
+        watchdogQueue.send(MSG_WATCHDOG_FEED, processName, strlen(processName));
+        lastFeedTime = now;
+    }
 }
 
 void PileControllerProcess::processCommandMessage()
@@ -352,6 +367,19 @@ void PileControllerProcess::updateStatusFromController()
 
         DataCache& dataCache = m_dataCaches[i];
         EventCache& cache = m_eventCaches[i];
+        const uint8_t heartbeatCommStatus = can->getHeartbeatCommStatus();
+        if (!cache.hasHeartbeatCommStatus || cache.heartbeatCommStatus != heartbeatCommStatus) {
+            cache.hasHeartbeatCommStatus = true;
+            cache.heartbeatCommStatus = heartbeatCommStatus;
+            std::string payload = buildDataPayload(gunNo,
+                                                   (heartbeatCommStatus == 0x00) ? "pile_online" : "pile_offline",
+                                                   [heartbeatCommStatus](cJSON* data) {
+                cJSON_AddStringToObject(data, "reason",
+                                        (heartbeatCommStatus == 0x00) ? "heartbeat_ok" : "heartbeat_timeout");
+                cJSON_AddNumberToObject(data, "heartbeatCommStatus", heartbeatCommStatus);
+            });
+            publishCmdUpset(gunNo, payload, true);
+        }
         if (can->isYC20DataValid()) {
             TCU2CCU_DataYC20 yc20;
             if (can->getYC20Data(&yc20) == 0) {
@@ -702,6 +730,20 @@ bool PileControllerProcess::initMqtt()
             t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo - 1) << "/cmd";
             m_mqtt.subscribe(t.str(), 1);
         }
+        // BY ZF: MQTT重连后补发当前主控通信状态（retain），避免 retain 状态丢失。
+        for (size_t i = 0; i < m_eventCaches.size(); ++i) {
+            if (!m_eventCaches[i].hasHeartbeatCommStatus) {
+                continue;
+            }
+            const uint8_t gunNo = static_cast<uint8_t>(m_config.gunConfigs[i].gunNo - 1);
+            const bool online = (m_eventCaches[i].heartbeatCommStatus == 0x00);
+            std::string payload = buildDataPayload(gunNo, online ? "pile_online" : "pile_offline",
+                                                  [online](cJSON* data) {
+                cJSON_AddStringToObject(data, "reason", online ? "heartbeat_ok" : "heartbeat_timeout");
+                cJSON_AddNumberToObject(data, "heartbeatCommStatus", online ? 0 : 1);
+            });
+            publishCmdUpset(gunNo, payload, true);
+        }
     });
     if (!m_mqtt.connect(m_config.mqttHost, m_config.mqttPort, m_config.mqttKeepalive)) {
         return false;
@@ -729,11 +771,11 @@ void PileControllerProcess::publishData(uint8_t gunNo, const std::string& type, 
     m_mqtt.publish(t.str(), payload, 0, retain);
 }
 
-void PileControllerProcess::publishCmdUpset(uint8_t gunNo, const std::string& payload)
+void PileControllerProcess::publishCmdUpset(uint8_t gunNo, const std::string& payload, bool retain)
 {
     std::ostringstream t;
     t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo) << "/event";
-    m_mqtt.publish(t.str(), payload, 2, false);
+    m_mqtt.publish(t.str(), payload, 2, retain);
 }
 
 void PileControllerProcess::onMqttMessage(const std::string& topic, const std::string& payload)
@@ -829,6 +871,49 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
             adjustCmd.adjustParam = static_cast<uint16_t>(std::lround((powerKw + 1000.0) * 10.0));
             can->setPowerAdjustData(&adjustCmd);
             can->powerAdjust();
+        }
+    } else if (cmdStr == "outputVA_ctrl") {
+        double voltage = 0.0;
+        double current = 0.0;
+        bool hasVoltage = false;
+        bool hasCurrent = false;
+        if (cJSON_IsObject(data)) {
+            cJSON* v = cJSON_GetObjectItem(data, "demandVoltage");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(data, "outputVoltage");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(data, "voltage");
+            if (cJSON_IsNumber(v)) {
+                voltage = v->valuedouble;
+                hasVoltage = true;
+            }
+
+            v = cJSON_GetObjectItem(data, "demandCurrent");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(data, "outputCurrent");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(data, "current");
+            if (cJSON_IsNumber(v)) {
+                current = v->valuedouble;
+                hasCurrent = true;
+            }
+        }
+
+        if (hasVoltage && hasCurrent) {
+            std::cout << "[PileController][MQTT_RX] cmd=outputVA_ctrl"
+                      << " gun=" << gun
+                      << " voltage=" << voltage
+                      << " current=" << current << std::endl;
+            // BY ZF: 输出电压/电流使用绝对值下发，协议量纲分别为 0.1V/位、0.1A/位。
+            if (voltage < 0.0) voltage = 0.0;
+            if (voltage > 6553.5) voltage = 6553.5;
+            if (current < 0.0) current = 0.0;
+            if (current > 6553.5) current = 6553.5;
+
+            TCU2CCU_CmdOutputVAData outputCmd;
+            memset(&outputCmd, 0, sizeof(outputCmd));
+            outputCmd.demandVoltage = static_cast<uint16_t>(std::lround(voltage * 10.0));
+            outputCmd.demandCurrent = static_cast<uint16_t>(std::lround(current * 10.0));
+            can->setOutputVAData(&outputCmd);
+            can->outputVAControl();
+        } else {
+            std::cerr << "[PileController][MQTT_RX] outputVA_ctrl missing voltage/current" << std::endl;
         }
     }
 

@@ -1,36 +1,94 @@
 #include "runtime_window.h"
 
+#include <QApplication>
+#include <QAbstractButton>
 #include <QBrush>
 #include <QDateTime>
+#include <QDir>
+#include <QEvent>
 #include <QFileInfo>
+#include <QFile>
 #include <QFrame>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QListWidgetItem>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QMutexLocker>
 #include <QPalette>
 #include <QPixmap>
+#include <QProcess>
 #include <QPushButton>
+#include <QStyledItemDelegate>
 #include <QStackedWidget>
+#include <QStyleOptionButton>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTabWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 
 #include "../../base/common/config_manager_lite.h"
+#include "../../base/common/fault_reason_mapper.h"
+#include "../../base/common/message_queue.h"
 #include "../../base/cjson/include/cjson/cJSON.h"
 #include "../../logger/sql/sqlite3.h"
 #include "customwidgets.h"
+#include "exportprogressdlg.h"
 #include "uipages.h"
 
 namespace {
+
+class StorageCheckboxDelegate : public QStyledItemDelegate
+{
+public:
+    explicit StorageCheckboxDelegate(QObject *parent = 0)
+        : QStyledItemDelegate(parent)
+    {
+    }
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const
+    {
+        QStyleOptionViewItem textOption(option);
+        textOption.decorationSize = QSize(0, 0);
+        textOption.rect.setRight(option.rect.right() - 56);
+        QStyledItemDelegate::paint(painter, textOption, index);
+
+        if (index.flags() & Qt::ItemIsUserCheckable) {
+            const int checkboxSize = 32;
+            QStyleOptionButton checkboxOption;
+            checkboxOption.rect = QRect(option.rect.right() - checkboxSize - 10,
+                                        option.rect.top() + (option.rect.height() - checkboxSize) / 2,
+                                        checkboxSize,
+                                        checkboxSize);
+            checkboxOption.state = QStyle::State_Enabled;
+            if (static_cast<Qt::CheckState>(index.data(Qt::CheckStateRole).toInt()) == Qt::Checked) {
+                checkboxOption.state |= QStyle::State_On;
+            } else {
+                checkboxOption.state |= QStyle::State_Off;
+            }
+            QApplication::style()->drawControl(QStyle::CE_CheckBox, &checkboxOption, painter);
+        }
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const
+    {
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        if (index.flags() & Qt::ItemIsUserCheckable) {
+            size.setWidth(size.width() + 56);
+        }
+        return size;
+    }
+};
 
 static uint64_t nowMs()
 {
@@ -187,10 +245,70 @@ static QString idleCellText(double totalEnergy,
     return stateText(state);
 }
 
-static QString stopReasonText(const std::string &reason)
+static bool looksLikeMachineReasonText(const std::string &text)
 {
+    if (text.empty()) {
+        return false;
+    }
+    bool hasUnderscore = false;
+    size_t i = 0;
+    for (i = 0; i < text.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c >= 0x80) {
+            return false;
+        }
+        if (!(std::isalnum(c) || c == '_' || c == '-' || c == '.')) {
+            return false;
+        }
+        if (c == '_') {
+            hasUnderscore = true;
+        }
+    }
+    return hasUnderscore;
+}
+
+static QString stopReasonText(const RuntimeWindow::GunUiData &gun)
+{
+    const std::string &reason = gun.stopReason;
     if (!reason.empty()) {
-        return QString::fromStdString(reason);
+        char *endp = 0;
+        const unsigned long rawReason = std::strtoul(reason.c_str(), &endp, 0);
+        const bool isNumeric = (endp && *endp == 0);
+        if (!isNumeric) {
+            const FaultJudgeResult pointResult = JudgeFaultPoint(reason);
+            if (pointResult.valid && !pointResult.message.empty()) {
+                return QString::fromUtf8(pointResult.message.c_str());
+            }
+            return QString::fromUtf8(reason.c_str());
+        }
+
+        if (rawReason == 0UL) {
+            return QString::fromUtf8("正常停止");
+        }
+
+        const unsigned int stage = static_cast<unsigned int>(rawReason & 0xF0000UL);
+        const bool hasStage =
+            (stage == 0x10000U) ||
+            (stage == 0x20000U) ||
+            (stage == 0x30000U);
+        if (hasStage) {
+            const char *reasonText = QueryReasonText(static_cast<unsigned int>(rawReason));
+            if (reasonText && reasonText[0] != '\0') {
+                return QString::fromUtf8(reasonText);
+            }
+        }
+
+        const bool looksLikeStartFail =
+            (std::fabs(gun.totalEnergy) < 0.0001) &&
+            (std::fabs(gun.totalAmount) < 0.0001) &&
+            (std::fabs(gun.chargedTime) < 0.0001);
+        FaultJudgeResult result = looksLikeStartFail
+            ? JudgeStartFailPoint(MakeStartPointKey(static_cast<unsigned int>(rawReason)))
+            : JudgeChargingFailPoint(MakeChargingPointKey(static_cast<unsigned int>(rawReason)));
+        if (result.valid && !result.message.empty()) {
+            return QString::fromUtf8(result.message.c_str());
+        }
+        return QString::fromUtf8("故障码%1").arg(static_cast<unsigned int>(rawReason));
     }
     return QString::fromUtf8("充电完成");
 }
@@ -250,9 +368,38 @@ static QString ymdhmsText(const std::string &stamp)
         .arg(QString::fromStdString(stamp.substr(12, 2)));
 }
 
-static QString chargeRecordReasonText(int reason)
+static QString chargeRecordReasonText(const RuntimeWindow::ChargeRecordItem &item)
 {
-    return QString::number(reason);
+    const unsigned int rawReason = static_cast<unsigned int>(item.reason);
+    if (rawReason == 0U) {
+        return QString::fromUtf8("正常停止");
+    }
+
+    const unsigned int stage = rawReason & 0xF0000U;
+    const bool hasStage =
+        (stage == 0x10000U) ||
+        (stage == 0x20000U) ||
+        (stage == 0x30000U);
+    if (hasStage) {
+        const char *reasonText = QueryReasonText(rawReason);
+        if (reasonText && reasonText[0] != '\0') {
+            return QString::fromUtf8(reasonText);
+        }
+    }
+
+    const bool looksLikeStartFail =
+        (std::fabs(item.totalElect) < 0.0001) &&
+        (std::fabs(item.totalCost) < 0.0001) &&
+        (std::fabs(item.startSoc - item.endSoc) < 0.0001);
+
+    FaultJudgeResult result = looksLikeStartFail
+        ? JudgeStartFailPoint(MakeStartPointKey(rawReason))
+        : JudgeChargingFailPoint(MakeChargingPointKey(rawReason));
+    if (result.valid && !result.message.empty()) {
+        return QString::fromUtf8(result.message.c_str());
+    }
+
+    return QString::fromUtf8("故障码%1").arg(item.reason);
 }
 
 static QString faultRecordText(const std::string &faultName, const std::string &type)
@@ -292,6 +439,24 @@ static QLabel *makeValueLabel(QWidget *parent, const char *name, const QRect &re
                          .arg(pointSize)
                          .arg(bold ? 700 : 500));
     return label;
+}
+
+static void setRestrictedAboutTabsEnabled(QTabWidget *tabWidget, bool enabled)
+{
+    if (!tabWidget) {
+        return;
+    }
+    int i = 0;
+    for (i = 0; i < tabWidget->count(); ++i) {
+        QWidget *page = tabWidget->widget(i);
+        if (!page) {
+            continue;
+        }
+        const QString pageName = page->objectName();
+        if (pageName == QString::fromUtf8("tab_10")) {
+            tabWidget->setTabEnabled(i, enabled);
+        }
+    }
 }
 
 static bool readFeeModelFromStmt(sqlite3_stmt *stmt, RuntimeWindow::FeeModelData &model)
@@ -416,6 +581,8 @@ RuntimeWindow::FeeModelData::FeeModelData()
 RuntimeWindow::ChargeRecordItem::ChargeRecordItem()
     : id(0)
     , gunNo(0)
+    , startSoc(0.0)
+    , endSoc(0.0)
     , totalElect(0.0)
     , totalCost(0.0)
     , reason(0)
@@ -434,6 +601,7 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_showAbout(false)
     , m_forceIdleView(false)
     , m_manualFocusLocked(false)
+    , m_aboutPermissionGranted(false)
     , m_gunCount(1)
     , m_focusGun(0)
     , m_operatorId("0")
@@ -448,6 +616,7 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_faultGunFilter(-1)
     , m_faultRecordPage(0)
     , m_faultRecordPageSize(8)
+    , m_lastWatchdogFeedMs(0)
     , m_stack(new QStackedWidget(this))
     , m_bottomTime(new QLabel(this))
     , m_idlePage(0)
@@ -456,6 +625,9 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_checkoutPage(0)
     , m_aboutPage(0)
     , m_aboutTabWidget(0)
+    , m_aboutPermissionEdit(0)
+    , m_aboutPermissionHint(0)
+    , m_aboutPermissionPad(0)
     , m_feeChart(0)
     , m_faultRecordTable(0)
     , m_faultRecordPageLabel(0)
@@ -503,7 +675,7 @@ bool RuntimeWindow::initialize()
         return false;
     }
 
-    m_uiTimer.start(500);
+    m_uiTimer.start(1000);
     refreshUi();
 
     if (m_config.fullScreen) {
@@ -744,6 +916,7 @@ void RuntimeWindow::bindStaticUi()
     QTabWidget *tab = m_aboutPage->findChild<QTabWidget *>("tabWidget");
     if (tab) {
         tab->setCurrentIndex(0);
+        connect(tab, SIGNAL(currentChanged(int)), this, SLOT(handleAboutTabChanged(int)));
     }
     m_aboutTabWidget = tab;
     QLabel *aboutIcon = m_aboutPage->findChild<QLabel *>("label_cdz_icon");
@@ -850,10 +1023,17 @@ void RuntimeWindow::handleLogicEvent(uint8_t gun, const std::string &payload)
             if (!m_manualFocusLocked && m_guns[gun].state != "IDLE") {
                 m_focusGun = gun;
             }
-            m_guns[gun].stopReason = getString(data, "reasonText",
-                getString(data, "stopReasonText",
-                getString(data, "reason",
-                getString(data, "stopReason", m_guns[gun].stopReason))));
+            const std::string reasonText = getString(data, "reasonText",
+                getString(data, "stopReasonText", ""));
+            const std::string numericReason = getString(data, "reason",
+                getString(data, "stopReason", ""));
+            if (!numericReason.empty() && looksLikeMachineReasonText(reasonText)) {
+                m_guns[gun].stopReason = numericReason;
+            } else if (!reasonText.empty()) {
+                m_guns[gun].stopReason = reasonText;
+            } else if (!numericReason.empty()) {
+                m_guns[gun].stopReason = numericReason;
+            }
         }
     }
 
@@ -1027,9 +1207,16 @@ void RuntimeWindow::setupAboutTabs()
         return;
     }
 
+    QWidget *aboutTab = m_aboutPage->findChild<QWidget *>("tab_4");
+    int removeIdx = aboutTab ? m_aboutTabWidget->indexOf(aboutTab) : -1;
+    if (removeIdx >= 0) {
+        m_aboutTabWidget->removeTab(removeIdx);
+    }
+
     QWidget *feeTab = m_aboutTabWidget->widget(0);
     QWidget *deviceTab = m_aboutTabWidget->widget(1);
-    if (!feeTab || !deviceTab) {
+    QWidget *permissionTab = m_aboutPage->findChild<QWidget *>("tab_6");
+    if (!feeTab || !deviceTab || !permissionTab) {
         return;
     }
 
@@ -1152,8 +1339,87 @@ void RuntimeWindow::setupAboutTabs()
         deviceOverlay->show();
     }
 
+    QList<QWidget *> permissionChildren;
+    const QObjectList permissionObjects = permissionTab->children();
+    for (i = 0; i < permissionObjects.size(); ++i) {
+        QWidget *child = qobject_cast<QWidget *>(permissionObjects.at(i));
+        if (child && child->parent() == permissionTab) {
+            permissionChildren.append(child);
+        }
+    }
+    for (i = 0; i < permissionChildren.size(); ++i) {
+        permissionChildren.at(i)->hide();
+    }
+
+    QWidget *permissionOverlay = permissionTab->findChild<QWidget *>("permissionOverlay");
+    if (!permissionOverlay) {
+        permissionOverlay = new QWidget(permissionTab);
+        permissionOverlay->setObjectName("permissionOverlay");
+        permissionOverlay->setGeometry(0, 0, 755, 345);
+        permissionOverlay->setStyleSheet("background:transparent;");
+
+        QFrame *card = static_cast<QFrame *>(makeInfoCard(permissionOverlay, QString::fromUtf8("页面权限"), QRect(82, 42, 590, 270)));
+
+        m_aboutPermissionEdit = new WNumEdit(card);
+        m_aboutPermissionEdit->setObjectName("editAboutPermission");
+        m_aboutPermissionEdit->setGeometry(24, 88, 246, 56);
+        m_aboutPermissionEdit->setEchoMode(QLineEdit::Password);
+        m_aboutPermissionEdit->setMaxLength(4);
+        m_aboutPermissionEdit->setAlignment(Qt::AlignCenter);
+        m_aboutPermissionEdit->setStyleSheet("QLineEdit{background:white;border:2px solid rgb(150,150,150);border-radius:10px;color:rgb(38,45,52);font:28px 'MS Shell Dlg 2';font-weight:bold;padding:2px 8px;}");
+        m_aboutPermissionEdit->installEventFilter(this);
+        connect(m_aboutPermissionEdit, SIGNAL(returnPressed()), this, SLOT(submitAboutPermission()));
+
+        QPushButton *editClickMask = new QPushButton(card);
+        editClickMask->setObjectName("btnAboutPermissionMask");
+        editClickMask->setGeometry(m_aboutPermissionEdit->geometry());
+        editClickMask->setFlat(true);
+        editClickMask->setStyleSheet("QPushButton{background:transparent;border:none;}");
+        connect(editClickMask, SIGNAL(clicked()), this, SLOT(showAboutPermissionPad()));
+        editClickMask->raise();
+
+        QPushButton *submitBtn = new QPushButton(QString::fromUtf8("确认"), card);
+        submitBtn->setObjectName("btnAboutPermissionSubmit");
+        submitBtn->setGeometry(96, 166, 104, 36);
+        submitBtn->setStyleSheet("QPushButton{background:rgb(72,148,196);border:1px solid rgb(110,110,110);border-radius:8px;color:white;font:14px 'MS Shell Dlg 2';font-weight:bold;}"
+                                 "QPushButton:pressed{background:rgb(58,128,176);}");
+        connect(submitBtn, SIGNAL(clicked()), this, SLOT(submitAboutPermission()));
+
+        m_aboutPermissionHint = new QLabel(QString::fromUtf8("未授权"), card);
+        m_aboutPermissionHint->setObjectName("lblAboutPermissionHint");
+        m_aboutPermissionHint->setGeometry(24, 214, 246, 22);
+        m_aboutPermissionHint->setAlignment(Qt::AlignCenter);
+        m_aboutPermissionHint->setStyleSheet("QLabel{color:rgb(160,60,60);background:transparent;font:14px 'MS Shell Dlg 2';font-weight:bold;}");
+
+        m_aboutPermissionPad = new QFrame(permissionOverlay);
+        m_aboutPermissionPad->setObjectName("aboutPermissionPad");
+        m_aboutPermissionPad->setGeometry(362, 74, 270, 214);
+        m_aboutPermissionPad->setStyleSheet("QFrame{background:rgb(236,238,239);border:1px solid rgb(160,160,160);border-radius:10px;}");
+        const char *keys[] = {"1","2","3","4","5","6","7","8","9","清空","0","退格"};
+        for (i = 0; i < 12; ++i) {
+            QPushButton *key = new QPushButton(QString::fromLatin1(keys[i]), m_aboutPermissionPad);
+            key->setObjectName(QString::fromUtf8("btnPad_%1").arg(i));
+            const int row = i / 3;
+            const int col = i % 3;
+            key->setGeometry(12 + col * 82, 12 + row * 48, 74, 40);
+            key->setStyleSheet("QPushButton{background:white;border:1px solid rgb(150,150,150);border-radius:6px;color:rgb(38,45,52);font:18px 'MS Shell Dlg 2';font-weight:bold;}"
+                               "QPushButton:pressed{background:rgb(214,217,219);}");
+            connect(key, SIGNAL(clicked()), this, SLOT(submitAboutPermission()));
+        }
+        m_aboutPermissionPad->hide();
+        std::cerr << "[A3] permission pad setup geometry="
+                  << m_aboutPermissionPad->x() << ","
+                  << m_aboutPermissionPad->y() << ","
+                  << m_aboutPermissionPad->width() << ","
+                  << m_aboutPermissionPad->height() << std::endl;
+
+        permissionOverlay->show();
+    }
+
+    setRestrictedAboutTabsEnabled(m_aboutTabWidget, m_aboutPermissionGranted);
     setupFaultRecordTab();
     setupChargeRecordTab();
+    setupExternalStorageTab();
 }
 
 void RuntimeWindow::setupFaultRecordTab()
@@ -1557,7 +1823,7 @@ void RuntimeWindow::refreshChargeRecordCache(bool forceReload)
     }
 
     const char *sql =
-        "SELECT id,gun_no,trade_no,charge_start_time,charge_end_time,total_elect,total_cost,reason "
+        "SELECT id,gun_no,trade_no,charge_start_time,charge_end_time,start_soc,end_soc,total_elect,total_cost,reason "
         "FROM charge_trade_info ORDER BY charge_start_time DESC,id DESC LIMIT 100;";
     sqlite3_stmt *stmt = 0;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != SQLITE_OK) {
@@ -1576,9 +1842,11 @@ void RuntimeWindow::refreshChargeRecordCache(bool forceReload)
         item.tradeNo = tradeNo ? tradeNo : "";
         item.startTime = startTime ? startTime : "";
         item.endTime = endTime ? endTime : "";
-        item.totalElect = sqlite3_column_double(stmt, 5);
-        item.totalCost = sqlite3_column_double(stmt, 6);
-        item.reason = sqlite3_column_int(stmt, 7);
+        item.startSoc = sqlite3_column_double(stmt, 5);
+        item.endSoc = sqlite3_column_double(stmt, 6);
+        item.totalElect = sqlite3_column_double(stmt, 7);
+        item.totalCost = sqlite3_column_double(stmt, 8);
+        item.reason = sqlite3_column_int(stmt, 9);
         records.push_back(item);
     }
 
@@ -1650,7 +1918,7 @@ void RuntimeWindow::refreshChargeRecordTable()
         QTableWidgetItem *endItem = new QTableWidgetItem(ymdhmsText(item.endTime));
         QTableWidgetItem *electItem = new QTableWidgetItem(QString::number(item.totalElect, 'f', 3));
         QTableWidgetItem *costItem = new QTableWidgetItem(QString::number(item.totalCost, 'f', 2));
-        QTableWidgetItem *reasonItem = new QTableWidgetItem(chargeRecordReasonText(item.reason));
+        QTableWidgetItem *reasonItem = new QTableWidgetItem(chargeRecordReasonText(item));
         m_chargeRecordTable->setItem(displayRow, 0, idItem);
         m_chargeRecordTable->setItem(displayRow, 1, gunItem);
         m_chargeRecordTable->setItem(displayRow, 2, startItem);
@@ -1766,6 +2034,7 @@ void RuntimeWindow::handleMonEvent(const std::string &payload)
 
 void RuntimeWindow::refreshUi()
 {
+    feedWatchdog();
     // BY ZF: 统一在 UI 线程做页面选择和控件刷新，避免多线程直接改界面。
     std::vector<GunUiData> guns;
     int focusGun = 0;
@@ -1781,23 +2050,19 @@ void RuntimeWindow::refreshUi()
     }
     m_bottomTime->setText(nowText);
     m_bottomTime->raise();
-
-    applyIdleLayout();
-    refreshIdlePage(guns);
     if (focusGun < 0 || focusGun >= static_cast<int>(guns.size())) {
         focusGun = 0;
     }
-    refreshAuthorizePage(guns[focusGun]);
-    refreshChargingPage(guns[focusGun]);
-    refreshCheckoutPage(guns[focusGun]);
-    refreshAboutPage();
 
     if (showAbout) {
+        refreshAboutPage();
         m_stack->setCurrentWidget(m_aboutPage);
         return;
     }
 
     if (forceIdleView) {
+        applyIdleLayout();
+        refreshIdlePage(guns);
         m_stack->setCurrentWidget(m_idlePage);
         return;
     }
@@ -1809,13 +2074,38 @@ void RuntimeWindow::refreshUi()
     }
 
     if (page == PageIdle) {
+        applyIdleLayout();
+        refreshIdlePage(guns);
         m_stack->setCurrentWidget(m_idlePage);
     } else if (page == PageAuthorize) {
+        refreshAuthorizePage(guns[focusGun]);
         m_stack->setCurrentWidget(m_authorizePage);
     } else if (page == PageCharging) {
+        refreshChargingPage(guns[focusGun]);
         m_stack->setCurrentWidget(m_chargingPage);
     } else if (page == PageCheckout) {
+        refreshCheckoutPage(guns[focusGun]);
         m_stack->setCurrentWidget(m_checkoutPage);
+    }
+}
+
+void RuntimeWindow::feedWatchdog()
+{
+    const uint64_t now = nowMs();
+    if (m_lastWatchdogFeedMs != 0 && (now - m_lastWatchdogFeedMs) < 5000ULL) {
+        return;
+    }
+
+    // BY ZF: 通过守护进程看门狗消息队列上报 tcu_hmi 存活状态。
+    static MessageQueue watchdogQueue(MSG_KEY_WATCHDOG);
+    static int queueReady = -1;
+    if (queueReady == -1) {
+        queueReady = watchdogQueue.open() ? 1 : (watchdogQueue.create() ? 1 : 0);
+    }
+    if (queueReady == 1) {
+        const char* processName = "tcu_hmi";
+        watchdogQueue.send(MSG_WATCHDOG_FEED, processName, strlen(processName));
+        m_lastWatchdogFeedMs = now;
     }
 }
 
@@ -1830,6 +2120,10 @@ void RuntimeWindow::showAboutPage()
     refreshFaultRecordTable();
     refreshChargeRecordCache(true);
     refreshChargeRecordTable();
+    setRestrictedAboutTabsEnabled(m_aboutTabWidget, m_aboutPermissionGranted);
+    if (m_aboutTabWidget && m_aboutTabWidget->currentIndex() < 0) {
+        m_aboutTabWidget->setCurrentIndex(0);
+    }
     m_stack->setCurrentWidget(m_aboutPage);
 }
 
@@ -1838,8 +2132,515 @@ void RuntimeWindow::leaveAboutPage()
     {
         QMutexLocker locker(&m_dataMutex);
         m_showAbout = false;
+        m_aboutPermissionGranted = false;
+    }
+    if (m_aboutPermissionEdit) {
+        m_aboutPermissionEdit->clear();
+    }
+    if (m_aboutPermissionHint) {
+        m_aboutPermissionHint->setText(QString::fromUtf8("未授权"));
+        m_aboutPermissionHint->setStyleSheet("QLabel{color:rgb(160,60,60);background:transparent;font:14px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+    if (m_aboutPermissionPad) {
+        m_aboutPermissionPad->hide();
+    }
+    setRestrictedAboutTabsEnabled(m_aboutTabWidget, false);
+    if (m_aboutTabWidget) {
+        m_aboutTabWidget->setCurrentIndex(0);
     }
     refreshUi();
+}
+
+void RuntimeWindow::submitAboutPermission()
+{
+    QObject *src = sender();
+    QPushButton *btn = qobject_cast<QPushButton *>(src);
+    if (btn && m_aboutPermissionEdit && btn->objectName().startsWith("btnPad_")) {
+        const QString key = btn->text();
+        if (key == QString::fromUtf8("清空")) {
+            m_aboutPermissionEdit->clear();
+        } else if (key == QString::fromUtf8("退格")) {
+            QString text = m_aboutPermissionEdit->text();
+            if (!text.isEmpty()) {
+                text.chop(1);
+                m_aboutPermissionEdit->setText(text);
+            }
+        } else if (m_aboutPermissionEdit->text().size() < 4) {
+            m_aboutPermissionEdit->setText(m_aboutPermissionEdit->text() + key);
+        }
+        return;
+    }
+
+    const QString password = m_aboutPermissionEdit ? m_aboutPermissionEdit->text().trimmed() : QString();
+    if (password == QString::fromUtf8("6186")) {
+        m_aboutPermissionGranted = true;
+        setRestrictedAboutTabsEnabled(m_aboutTabWidget, true);
+        if (m_aboutPermissionHint) {
+            m_aboutPermissionHint->setText(QString::fromUtf8("验证通过"));
+            m_aboutPermissionHint->setStyleSheet("QLabel{color:rgb(32,132,82);background:transparent;font:14px 'MS Shell Dlg 2';font-weight:bold;}");
+        }
+        if (m_aboutPermissionEdit) {
+            m_aboutPermissionEdit->clear();
+        }
+        if (m_aboutPermissionPad) {
+            m_aboutPermissionPad->hide();
+        }
+        return;
+    }
+
+    m_aboutPermissionGranted = false;
+    setRestrictedAboutTabsEnabled(m_aboutTabWidget, false);
+    if (m_aboutPermissionHint) {
+        m_aboutPermissionHint->setText(QString::fromUtf8("密码错误"));
+        m_aboutPermissionHint->setStyleSheet("QLabel{color:rgb(160,60,60);background:transparent;font:14px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+}
+
+void RuntimeWindow::showAboutPermissionPad()
+{
+    std::cerr << "[A3] showAboutPermissionPad clicked" << std::endl;
+    if (m_aboutPermissionPad) {
+        m_aboutPermissionPad->show();
+        m_aboutPermissionPad->raise();
+        std::cerr << "[A3] permission pad visible="
+                  << (m_aboutPermissionPad->isVisible() ? 1 : 0)
+                  << " geometry="
+                  << m_aboutPermissionPad->x() << ","
+                  << m_aboutPermissionPad->y() << ","
+                  << m_aboutPermissionPad->width() << ","
+                  << m_aboutPermissionPad->height() << std::endl;
+    }
+    if (m_aboutPermissionEdit) {
+        m_aboutPermissionEdit->setFocus();
+    }
+}
+
+void RuntimeWindow::handleAboutTabChanged(int index)
+{
+    if (!m_aboutTabWidget) {
+        return;
+    }
+
+    QWidget *currentTab = m_aboutTabWidget->widget(index);
+    if (!currentTab) {
+        return;
+    }
+
+    const QString tabName = currentTab->objectName();
+    const bool restricted = (tabName == QString::fromUtf8("tab_10"));
+    if (!restricted || m_aboutPermissionGranted) {
+        if (tabName == QString::fromUtf8("tab_10")) {
+            scanExternalStorage();
+        }
+        return;
+    }
+
+    QWidget *permissionTab = m_aboutPage ? m_aboutPage->findChild<QWidget *>("tab_6") : 0;
+    const int permissionIndex = permissionTab ? m_aboutTabWidget->indexOf(permissionTab) : -1;
+    if (permissionIndex >= 0 && permissionIndex != index) {
+        m_aboutTabWidget->setCurrentIndex(permissionIndex);
+    }
+    if (m_aboutPermissionHint) {
+        m_aboutPermissionHint->setText(QString::fromUtf8("请先输入密码获取权限"));
+        m_aboutPermissionHint->setStyleSheet("QLabel{color:rgb(160,60,60);background:transparent;font:14px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+}
+
+void RuntimeWindow::setupExternalStorageTab()
+{
+    if (!m_aboutPage) {
+        return;
+    }
+
+    QWidget *storageTab = m_aboutPage->findChild<QWidget *>("tab_10");
+    if (!storageTab) {
+        return;
+    }
+
+    QListWidget *storageList = storageTab->findChild<QListWidget *>("listWidget_storage");
+    QListWidget *fileList = storageTab->findChild<QListWidget *>("listWidget_files");
+    QAbstractButton *btnRefresh = storageTab->findChild<QAbstractButton *>("btn_filebrowser_refresh");
+    QAbstractButton *btnExport = storageTab->findChild<QAbstractButton *>("btn_export_log");
+    QAbstractButton *btnUpgrade = storageTab->findChild<QAbstractButton *>("btn_upgrade");
+    QAbstractButton *btnBack = storageTab->findChild<QAbstractButton *>("btn_filebrowser_back");
+    if (!storageList || !fileList || !btnRefresh || !btnExport || !btnUpgrade || !btnBack) {
+        std::cerr << "[A3] setupExternalStorageTab missing widgets"
+                  << " storageList=" << (storageList ? 1 : 0)
+                  << " fileList=" << (fileList ? 1 : 0)
+                  << " refresh=" << (btnRefresh ? 1 : 0)
+                  << " export=" << (btnExport ? 1 : 0)
+                  << " upgrade=" << (btnUpgrade ? 1 : 0)
+                  << " back=" << (btnBack ? 1 : 0)
+                  << std::endl;
+        return;
+    }
+
+    storageList->disconnect(this);
+    fileList->disconnect(this);
+    btnRefresh->disconnect(this);
+    btnExport->disconnect(this);
+    btnUpgrade->disconnect(this);
+    btnBack->disconnect(this);
+
+    connect(storageList, SIGNAL(itemClicked(QListWidgetItem*)), this, SLOT(onStorageItemClicked(QListWidgetItem*)));
+    connect(storageList, SIGNAL(itemPressed(QListWidgetItem*)), this, SLOT(onStorageItemClicked(QListWidgetItem*)));
+    connect(fileList, SIGNAL(itemDoubleClicked(QListWidgetItem*)), this, SLOT(onStorageFileItemDoubleClicked(QListWidgetItem*)));
+    connect(btnRefresh, SIGNAL(clicked()), this, SLOT(onStorageRefreshClicked()));
+    connect(btnExport, SIGNAL(clicked()), this, SLOT(onStorageExportLogClicked()));
+    connect(btnUpgrade, SIGNAL(clicked()), this, SLOT(onStorageUpgradeClicked()));
+    connect(btnBack, SIGNAL(clicked()), this, SLOT(onStorageBackClicked()));
+
+    storageList->setAlternatingRowColors(true);
+    fileList->setAlternatingRowColors(true);
+    storageList->setSelectionMode(QAbstractItemView::SingleSelection);
+    storageList->setItemDelegate(new StorageCheckboxDelegate(storageList));
+    storageList->setStyleSheet("QListWidget{background:rgb(244,246,247);alternate-background-color:rgb(236,238,239);border:1px solid rgb(168,168,168);color:rgb(38,45,52);font:18px 'MS Shell Dlg 2';}"
+                               "QListWidget::item{height:46px;padding-left:8px;}"
+                               "QListWidget::item:selected{background:rgb(72,148,196);color:white;}");
+    fileList->setStyleSheet(storageList->styleSheet());
+    scanExternalStorage();
+}
+
+void RuntimeWindow::scanExternalStorage()
+{
+    if (!m_aboutPage) {
+        return;
+    }
+
+    QListWidget *storageList = m_aboutPage->findChild<QListWidget *>("listWidget_storage");
+    QListWidget *fileList = m_aboutPage->findChild<QListWidget *>("listWidget_files");
+    QLabel *pathLabel = m_aboutPage->findChild<QLabel *>("label_filebrowser_path");
+    if (!storageList || !fileList || !pathLabel) {
+        return;
+    }
+
+    storageList->clear();
+    fileList->clear();
+    m_storageCurrentPath.clear();
+    pathLabel->setText(QString::fromUtf8("当前路径: "));
+
+    QDir mediaDir(QString::fromUtf8("/run/media"));
+    if (!mediaDir.exists()) {
+        std::cerr << "[A3] storage scan: /run/media missing" << std::endl;
+        storageList->addItem(QString::fromUtf8("未找到/run/media目录"));
+        return;
+    }
+
+    const QStringList entries = mediaDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    std::cerr << "[A3] storage scan entries=" << entries.size() << std::endl;
+    const QStringList excludeList = QStringList()
+        << QString::fromUtf8("mmcblk1p1")
+        << QString::fromUtf8("mmcblk1p3")
+        << QString::fromUtf8("mmcblk1p4");
+
+    bool found = false;
+    int i = 0;
+    for (i = 0; i < entries.size(); ++i) {
+        const QString entry = entries.at(i);
+        bool shouldExclude = false;
+        int j = 0;
+        for (j = 0; j < excludeList.size(); ++j) {
+            if (entry.contains(excludeList.at(j))) {
+                shouldExclude = true;
+                break;
+            }
+        }
+        if (shouldExclude) {
+            continue;
+        }
+
+        QListWidgetItem *item = new QListWidgetItem(entry, storageList);
+        item->setData(Qt::UserRole, mediaDir.absoluteFilePath(entry));
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(Qt::Unchecked);
+        std::cerr << "[A3] storage add " << mediaDir.absoluteFilePath(entry).toLocal8Bit().constData() << std::endl;
+        found = true;
+    }
+
+    if (!found) {
+        std::cerr << "[A3] storage scan: no external storage found" << std::endl;
+        storageList->addItem(QString::fromUtf8("未找到外置存储设备"));
+    }
+}
+
+void RuntimeWindow::loadStorageFileList(const QString &path)
+{
+    if (!m_aboutPage) {
+        return;
+    }
+
+    QListWidget *fileList = m_aboutPage->findChild<QListWidget *>("listWidget_files");
+    QLabel *pathLabel = m_aboutPage->findChild<QLabel *>("label_filebrowser_path");
+    if (!fileList || !pathLabel) {
+        return;
+    }
+
+    fileList->clear();
+    m_storageCurrentPath = path;
+    pathLabel->setText(QString::fromUtf8("当前路径: ") + path);
+
+    QDir dir(path);
+    if (!dir.exists()) {
+        fileList->addItem(QString::fromUtf8("路径不存在"));
+        return;
+    }
+
+    const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
+    int i = 0;
+    for (i = 0; i < entries.size(); ++i) {
+        const QFileInfo info = entries.at(i);
+        QString displayName = info.fileName();
+        if (info.isDir()) {
+            displayName = QString::fromUtf8("[目录] ") + displayName;
+        } else {
+            const qint64 size = info.size();
+            QString sizeStr;
+            if (size < 1024) {
+                sizeStr = QString::number(size) + QString::fromUtf8(" B");
+            } else if (size < 1024 * 1024) {
+                sizeStr = QString::number(size / 1024.0, 'f', 2) + QString::fromUtf8(" KB");
+            } else {
+                sizeStr = QString::number(size / (1024.0 * 1024.0), 'f', 2) + QString::fromUtf8(" MB");
+            }
+            displayName += QString::fromUtf8(" (") + sizeStr + QString::fromUtf8(")");
+        }
+
+        QListWidgetItem *item = new QListWidgetItem(displayName, fileList);
+        item->setData(Qt::UserRole, info.absoluteFilePath());
+        item->setData(Qt::UserRole + 1, info.isDir() ? 1 : 0);
+    }
+}
+
+QString RuntimeWindow::selectedStoragePath() const
+{
+    if (!m_aboutPage) {
+        return QString();
+    }
+
+    QListWidget *storageList = m_aboutPage->findChild<QListWidget *>("listWidget_storage");
+    if (!storageList) {
+        return QString();
+    }
+
+    int i = 0;
+    for (i = 0; i < storageList->count(); ++i) {
+        QListWidgetItem *item = storageList->item(i);
+        if (item && item->checkState() == Qt::Checked) {
+            return item->data(Qt::UserRole).toString();
+        }
+    }
+
+    QListWidgetItem *current = storageList->currentItem();
+    if (current) {
+        return current->data(Qt::UserRole).toString();
+    }
+    return QString();
+}
+
+void RuntimeWindow::onStorageItemClicked(QListWidgetItem *item)
+{
+    if (!item) {
+        return;
+    }
+
+    item->setSelected(true);
+    item->setCheckState(Qt::Checked);
+    QListWidget *storageList = m_aboutPage ? m_aboutPage->findChild<QListWidget *>("listWidget_storage") : 0;
+    if (storageList) {
+        int i = 0;
+        for (i = 0; i < storageList->count(); ++i) {
+            QListWidgetItem *other = storageList->item(i);
+            if (other && other != item && (other->flags() & Qt::ItemIsUserCheckable)) {
+                other->setCheckState(Qt::Unchecked);
+            }
+        }
+    }
+    const QString path = item->data(Qt::UserRole).toString();
+    if (!path.isEmpty()) {
+        loadStorageFileList(path);
+    }
+}
+
+void RuntimeWindow::onStorageFileItemDoubleClicked(QListWidgetItem *item)
+{
+    if (!item) {
+        return;
+    }
+    if (item->data(Qt::UserRole + 1).toInt() != 1) {
+        return;
+    }
+    const QString path = item->data(Qt::UserRole).toString();
+    if (!path.isEmpty()) {
+        loadStorageFileList(path);
+    }
+}
+
+void RuntimeWindow::onStorageBackClicked()
+{
+    if (m_storageCurrentPath.isEmpty()) {
+        return;
+    }
+
+    QDir dir(m_storageCurrentPath);
+    if (!dir.cdUp()) {
+        return;
+    }
+
+    const QString parentPath = dir.absolutePath();
+    if (parentPath == QString::fromUtf8("/run/media")) {
+        m_storageCurrentPath.clear();
+        scanExternalStorage();
+        return;
+    }
+    loadStorageFileList(parentPath);
+}
+
+void RuntimeWindow::onStorageRefreshClicked()
+{
+    if (!m_storageCurrentPath.isEmpty()) {
+        loadStorageFileList(m_storageCurrentPath);
+    } else {
+        scanExternalStorage();
+    }
+}
+
+void RuntimeWindow::onStorageExportLogClicked()
+{
+    QAbstractButton *btnExport = m_aboutPage ? m_aboutPage->findChild<QAbstractButton *>("btn_export_log") : 0;
+    if (btnExport && !btnExport->isEnabled()) {
+        return;
+    }
+
+    const QString targetPath = selectedStoragePath();
+    if (targetPath.isEmpty()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("请先选择一个外置存储设备"));
+        return;
+    }
+    if (!QDir(QString::fromUtf8("/mnt/nandflash/data")).exists()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("日志目录不存在: /mnt/nandflash/data"));
+        return;
+    }
+    if (!QDir(targetPath).exists()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("选中的存储设备路径不存在"));
+        return;
+    }
+
+    const QString pileId = QString::fromStdString(m_cdzNo.empty() ? m_cdzId : m_cdzNo);
+    const QString fileName = QString::fromUtf8("data_%1.tar.gz").arg(pileId.isEmpty() ? QString::fromUtf8("tcu") : pileId);
+    const QString tarFilePath = QDir(targetPath).absoluteFilePath(fileName);
+    if (QFile::exists(tarFilePath)) {
+        QFile::remove(tarFilePath);
+    }
+
+    qint64 sourceTotalSize = 0;
+    QProcess sizeProcess;
+    sizeProcess.start(QString::fromUtf8("du"),
+                      QStringList() << QString::fromUtf8("-sb") << QString::fromUtf8("/mnt/nandflash/data"));
+    if (sizeProcess.waitForFinished(3000)) {
+        const QString output = QString::fromLocal8Bit(sizeProcess.readAllStandardOutput()).trimmed();
+        const QStringList parts = output.split(QChar('\t'));
+        if (!parts.isEmpty()) {
+            bool ok = false;
+            sourceTotalSize = parts.at(0).toLongLong(&ok);
+            if (!ok) {
+                sourceTotalSize = 0;
+            }
+        }
+    }
+
+    qint64 pid = 0;
+    const bool started = QProcess::startDetached(QString::fromUtf8("sh"),
+                                                 QStringList() << QString::fromUtf8("-c")
+                                                               << QString::fromUtf8("tar -czf \"%1\" -C /mnt/nandflash data && sync").arg(tarFilePath),
+                                                 QDir::rootPath(),
+                                                 &pid);
+    if (!started || pid == 0) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("无法启动导出任务"));
+        return;
+    }
+
+    if (btnExport) {
+        btnExport->setEnabled(false);
+    }
+
+    ExportProgressDlg progressDlg(this);
+    progressDlg.setExportInfo(pid, tarFilePath, targetPath, sourceTotalSize);
+    progressDlg.exec();
+
+    if (btnExport) {
+        btnExport->setEnabled(true);
+    }
+
+    if (!m_storageCurrentPath.isEmpty()) {
+        loadStorageFileList(m_storageCurrentPath);
+    }
+}
+
+void RuntimeWindow::onStorageUpgradeClicked()
+{
+    const QString targetPath = selectedStoragePath();
+    if (targetPath.isEmpty()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("请先选择一个外置存储设备"));
+        return;
+    }
+    const QString installPackagePath = QDir(targetPath).absoluteFilePath(QString::fromUtf8("install.tar.gz"));
+    QFileInfo packageFile(installPackagePath);
+    if (!packageFile.exists()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"),
+                             QString::fromUtf8("未找到升级包 install.tar.gz"));
+        return;
+    }
+    if (!packageFile.isReadable()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"),
+                             QString::fromUtf8("升级包不可读"));
+        return;
+    }
+
+    const int ret = QMessageBox::question(this, QString::fromUtf8("确认"),
+                                          QString::fromUtf8("确认执行升级？\n%1").arg(installPackagePath),
+                                          QMessageBox::Yes | QMessageBox::No,
+                                          QMessageBox::No);
+    if (ret != QMessageBox::Yes) {
+        return;
+    }
+
+    MessageQueue systemQueue(MSG_KEY_SYSTEM);
+    if (!systemQueue.open()) {
+        QMessageBox::critical(this, QString::fromUtf8("错误"), QString::fromUtf8("无法打开系统消息队列"));
+        return;
+    }
+
+    const QByteArray pathBytes = installPackagePath.toLocal8Bit();
+    const int sendResult = systemQueue.send(MSG_UPDATE_REQUEST, pathBytes.constData(), pathBytes.size());
+    if (sendResult != 0) {
+        QMessageBox::critical(this, QString::fromUtf8("错误"), QString::fromUtf8("发送升级请求失败"));
+        return;
+    }
+
+    QMessageBox::information(this, QString::fromUtf8("提示"),
+                             QString::fromUtf8("升级请求已发送\n%1").arg(installPackagePath));
+}
+
+bool RuntimeWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_aboutPermissionEdit && event &&
+        (event->type() == QEvent::MouseButtonPress ||
+         event->type() == QEvent::MouseButtonRelease ||
+         event->type() == QEvent::FocusIn)) {
+        std::cerr << "[A3] permission edit event type=" << static_cast<int>(event->type()) << std::endl;
+        if (m_aboutPermissionPad) {
+            m_aboutPermissionPad->show();
+            m_aboutPermissionPad->raise();
+            std::cerr << "[A3] permission pad from edit visible="
+                      << (m_aboutPermissionPad->isVisible() ? 1 : 0)
+                      << " geometry="
+                      << m_aboutPermissionPad->x() << ","
+                      << m_aboutPermissionPad->y() << ","
+                      << m_aboutPermissionPad->width() << ","
+                      << m_aboutPermissionPad->height() << std::endl;
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void RuntimeWindow::handleCellClick(int port)
@@ -2182,7 +2983,7 @@ void RuntimeWindow::refreshCheckoutPage(const GunUiData &gun)
     setLabelText(m_checkoutPage, "lblMoney", QString::fromUtf8("%1元").arg(formatMoney(gun.totalAmount)));
     setLabelText(m_checkoutPage, "lblKwh", QString::fromUtf8("%1kWh").arg(formatEnergy(gun.totalEnergy)));
     setLabelText(m_checkoutPage, "lblendmoney", QString::fromUtf8("请手机中查看"));
-    setLabelText(m_checkoutPage, "stop_reason", stopReasonText(gun.stopReason));
+    setLabelText(m_checkoutPage, "stop_reason", stopReasonText(gun));
 }
 
 void RuntimeWindow::refreshAboutPage()

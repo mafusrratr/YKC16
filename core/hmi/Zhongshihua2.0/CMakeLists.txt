@@ -13,10 +13,16 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 add_executable(tcu_hmi
     ../../base/common/config_manager_lite.cpp
     ../../base/common/config_manager_lite.h
+    ../../base/common/fault_reason_mapper.cpp
+    ../../base/common/fault_reason_mapper.h
+    ../../base/common/message_queue.cpp
+    ../../base/common/message_queue.h
     ../../base/mqtt/mqtt_client.cpp
     ../../base/mqtt/mqtt_client.h
     customwidgets.cpp
     customwidgets.h
+    exportprogressdlg.cpp
+    exportprogressdlg.h
     main.cpp
     previewwindow.cpp
     previewwindow.h

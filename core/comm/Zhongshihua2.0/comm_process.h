@@ -46,6 +46,7 @@ struct CommConfig {
     std::vector<uint8_t> gunTypeList; // 枪类型列表（固定0x01：直流枪）
     int tcpHeartbeatSec;              // 登录成功后的心跳周期
     int loginRetrySec;                // 登录阶段重发周期
+    bool offlineRunMode;              // 离线运行模式（开启后平台链路事件始终上报在线）
     bool debugTcp;                    // TCP调试开关（打印TX/RX与帧类型）
 
     
@@ -59,6 +60,7 @@ struct CommConfig {
         , chargerType(0x01)
         , tcpHeartbeatSec(30)
         , loginRetrySec(10)
+        , offlineRunMode(false)
         , debugTcp(false)
     {}
 };
@@ -325,6 +327,7 @@ private:
     std::vector<uint8_t> buildBrmBody(uint8_t gun) const; // 0x15 BRM上送体
     std::vector<uint8_t> buildBcpBody(uint8_t gun) const; // 0x17 BCP参数配置上送体
     std::vector<uint8_t> buildChargeEndStageBody(uint8_t gun, cJSON* stopCompleteData) const; // 0x19 结束阶段上送体
+    std::vector<uint8_t> buildBclBcsCcsBody(uint8_t gun) const; // 0x23 BCL/BCS/CCS上送体
     std::vector<uint8_t> buildBstBody(uint8_t gun, cJSON* stopCompleteData) const; // 0x1D BST停止上送体
     std::vector<uint8_t> buildCstBody(uint8_t gun) const; // 0x21 CST充电中止上送体
     std::vector<uint8_t> buildBsmBody(uint8_t gun) const; // 0x25 BSM充电中止BMS信息体
@@ -366,6 +369,7 @@ private:
     // BY ZF: 平台命令发布
     bool publishPlatCommand(uint8_t gun, const char* cmd, cJSON* dataObj);
     bool publishSetConfig(uint8_t gun, cJSON* dataObj);
+    void publishPlatformLinkEvent(bool online, const char* reason);
     bool persistGunQrCodeToIni(uint8_t gun, const std::string& qrCode);
 
 private:
@@ -395,6 +399,7 @@ private:
     std::array<uint8_t, 16> m_sm4SessionKey;         // 登录后会话SM4密钥A（16字节）
     bool m_sm4SessionKeyReady;                       // 会话密钥已生成并可用于解密
     bool m_loginCryptoPrepared;                      // 当前登录轮次已完成密钥准备
+    bool m_platformOnlineEventActive;                // 平台在线事件状态（完成登录流程后才为true）
     std::string m_sm2PublicKeyActive;                // 当前生效SM2公钥（可被平台下发更新）
     
 };

@@ -7,6 +7,7 @@
 #define TCU_METER_PROCESS_H
 
 #include "../base/process/base_process.h"
+#include "../base/common/message_queue.h"
 #include "../base/mqtt/mqtt_client.h"
 #include "dlt645_meter.h"
 #include <string>
@@ -89,6 +90,7 @@ private:
     bool readGunMeter(uint8_t gun, MeterReading& out, std::string& err);
     void publishData(uint8_t gun, const MeterReading& value);
     void publishEvent(uint8_t gun, const std::string& event, const std::string& reason);
+    void feedDaemonWatchdog();
     static std::string buildPortKey(const MeterSerialConfig& sc);
 
 private:
@@ -98,6 +100,7 @@ private:
     std::vector<GunRuntime> m_gunState;
     std::atomic<uint64_t> m_seq;
     std::chrono::steady_clock::time_point m_lastPoll;
+    std::chrono::steady_clock::time_point m_lastDaemonWatchdogFeed;
 };
 
 #endif // TCU_METER_PROCESS_H

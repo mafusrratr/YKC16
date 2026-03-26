@@ -1,0 +1,42 @@
+# 生成的升级包
+*.tar.gz
+install/
+
+# Qt编译文件
+*.o
+*.pro.user
+*.qmake.stash
+Makefile
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# 编译输出目录
+release/
+
+# IDE文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 临时文件
+*.tmp
+*.bak
+*.log
+
+# 系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 可执行文件（本地编译的）
+update_handle/tcu_update
+
+# 配置文件（本地配置）
+update_handle/tcu_update.conf

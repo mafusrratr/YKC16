@@ -20,6 +20,20 @@
 #include <chrono>
 
 namespace {
+    void feedDaemonWatchdog()
+    {
+        // BY ZF: 通过守护进程看门狗消息队列上报 tcu_logic 存活状态。
+        static MessageQueue watchdogQueue(MSG_KEY_WATCHDOG);
+        static int queueReady = -1;
+        if (queueReady == -1) {
+            queueReady = watchdogQueue.open() ? 1 : (watchdogQueue.create() ? 1 : 0);
+        }
+        if (queueReady == 1) {
+            const char* processName = "tcu_logic";
+            watchdogQueue.send(MSG_WATCHDOG_FEED, processName, strlen(processName));
+        }
+    }
+
     bool parseTopicGun(const std::string& topic, const std::string& prefix, uint8_t& gunOut, std::string& tailOut) {
         if (topic.find(prefix) != 0) {
             return false;
@@ -239,91 +253,84 @@ bool ChargeLogicProcess::doInitialize()
 
 void ChargeLogicProcess::doRun()
 {
-    m_running = true;
-    m_mainThread = std::thread([this]() {
-        while (m_running.load()) {
-            // BY ZF: STOPPING 定时重发与结算窗口
-            auto now = std::chrono::steady_clock::now();
-            for (size_t i = 0; i < m_gunStates.size(); i++) {
-                GunState& gs = m_gunStates[i];
-                if (gs.state == STATE_CHARGING) {
-                    maybeTriggerTcuStopByPrecharge(static_cast<uint8_t>(i));
-                    // BY ZF: feeData 保底机制，充电中即便电量未变化也至少 15 秒发布一次。
-                    if (gs.lastFeeDataPublishTime.time_since_epoch().count() == 0 ||
-                        (now - gs.lastFeeDataPublishTime) >= std::chrono::seconds(15)) {
-                        publishFeeData(static_cast<uint8_t>(i));
+    // BY ZF: doRun 只执行一次循环迭代，避免在信号 stop() 时被 join 阻塞导致需要二次 Ctrl+C。
+    static std::chrono::steady_clock::time_point lastFeedTime = std::chrono::steady_clock::now()
+        - std::chrono::seconds(5);
+    auto now = std::chrono::steady_clock::now();
+    if (now - lastFeedTime >= std::chrono::seconds(5)) {
+        feedWatchdog();
+        feedDaemonWatchdog();
+        lastFeedTime = now;
+    }
+    for (size_t i = 0; i < m_gunStates.size(); i++) {
+        GunState& gs = m_gunStates[i];
+        if (gs.state == STATE_CHARGING) {
+            maybeTriggerTcuStopByPrecharge(static_cast<uint8_t>(i));
+            // BY ZF: feeData 保底机制，充电中即便电量未变化也至少 15 秒发布一次。
+            if (gs.lastFeeDataPublishTime.time_since_epoch().count() == 0 ||
+                (now - gs.lastFeeDataPublishTime) >= std::chrono::seconds(15)) {
+                publishFeeData(static_cast<uint8_t>(i));
+            }
+        }
+        if (gs.state == STATE_STARTING) {
+            if (gs.startingEnterTime.time_since_epoch().count() != 0) {
+                const auto elapsed = now - gs.startingEnterTime;
+                // BY ZF: STARTING 持续 30s 未完成，重发一次启动命令
+                if (!gs.startingRetrySent && elapsed >= std::chrono::seconds(30)) {
+                    cJSON* retryData = nullptr;
+                    if (!gs.lastStartCmdData.empty()) {
+                        retryData = cJSON_Parse(gs.lastStartCmdData.c_str());
                     }
+                    if (retryData) {
+                        publishPileCmd(static_cast<uint8_t>(i), "start_charge", retryData);
+                        cJSON_Delete(retryData);
+                    } else {
+                        cJSON* pileStartData = buildPileStartData(nullptr);
+                        publishPileCmd(static_cast<uint8_t>(i), "start_charge", pileStartData);
+                        cJSON_Delete(pileStartData);
+                    }
+                    gs.startingRetrySent = true;
                 }
-                if (gs.state == STATE_STARTING) {
-                    if (gs.startingEnterTime.time_since_epoch().count() != 0) {
-                        const auto elapsed = now - gs.startingEnterTime;
-                        // BY ZF: STARTING 持续 30s 未完成，重发一次启动命令
-                        if (!gs.startingRetrySent && elapsed >= std::chrono::seconds(30)) {
-                            cJSON* retryData = nullptr;
-                            if (!gs.lastStartCmdData.empty()) {
-                                retryData = cJSON_Parse(gs.lastStartCmdData.c_str());
-                            }
-                            if (retryData) {
-                                publishPileCmd(static_cast<uint8_t>(i), "start_charge", retryData);
-                                cJSON_Delete(retryData);
-                            } else {
-                                cJSON* pileStartData = buildPileStartData(nullptr);
-                                publishPileCmd(static_cast<uint8_t>(i), "start_charge", pileStartData);
-                                cJSON_Delete(pileStartData);
-                            }
-                            gs.startingRetrySent = true;
-                        }
-                        // BY ZF: STARTING 持续 60s 未完成，进入停机流程
-                        if (elapsed >= std::chrono::seconds(60)) {
-                            const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0xF001U));
-                            if (result.valid) {
-                                gs.stopReason = result.reason;
-                            }
-                            handleEvent(static_cast<uint8_t>(i), EVT_STOP_CMD, "starting_timeout_60s");
-                            continue;
-                        }
+                // BY ZF: STARTING 持续 60s 未完成，进入停机流程
+                if (elapsed >= std::chrono::seconds(60)) {
+                    const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0xF001U));
+                    if (result.valid) {
+                        gs.stopReason = result.reason;
                     }
-                }
-                if (gs.state == STATE_STOPPING) {
-                    // BY ZF: 收到 stop_complete 后停止重发 stop_charge
-                    if (!gs.stopCompleteSeen) {
-                        if (gs.lastStopCmdTime.time_since_epoch().count() == 0 ||
-                            now - gs.lastStopCmdTime >= std::chrono::seconds(2)) {
-                            publishPileCmd(static_cast<uint8_t>(i), "stop_charge", nullptr);
-                            gs.lastStopCmdTime = now;
-                        }
-                    }
-                    // BY ZF: 进入 STOPPING 后固定等待 15s，或电表连续3次无变化提前收敛
-                    if (gs.hasMeterValue && gs.meterStableCount >= 3) {
-                        handleEvent(static_cast<uint8_t>(i), EVT_METER_STALE, "meter_stable_3x");
-                        continue;
-                    }
-                    if (gs.stoppingEnterTime.time_since_epoch().count() != 0 &&
-                        now - gs.stoppingEnterTime >= std::chrono::seconds(15)) {
-                        handleEvent(static_cast<uint8_t>(i), EVT_METER_STALE, "stopping_settle_15s");
-                        continue;
-                    }
-                    // BY ZF: 兜底保护，避免 STOPPING 长时间滞留
-                    if (gs.stoppingEnterTime.time_since_epoch().count() != 0 &&
-                        now - gs.stoppingEnterTime >= std::chrono::seconds(30)) {
-                        handleEvent(static_cast<uint8_t>(i), EVT_METER_STALE, "stopping_force_timeout_30s");
-                    }
+                    handleEvent(static_cast<uint8_t>(i), EVT_STOP_CMD, "starting_timeout_60s");
+                    continue;
                 }
             }
-            replayBufferedUnconfirmedRecords();
-            // BY ZF: doRun 主循环节流 10ms
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-    });
-    m_mainThread.join();
+        if (gs.state == STATE_STOPPING) {
+            // BY ZF: 收到 stop_complete 后停止重发 stop_charge
+            if (!gs.stopCompleteSeen) {
+                if (gs.lastStopCmdTime.time_since_epoch().count() == 0 ||
+                    now - gs.lastStopCmdTime >= std::chrono::seconds(2)) {
+                    publishPileCmd(static_cast<uint8_t>(i), "stop_charge", nullptr);
+                    gs.lastStopCmdTime = now;
+                }
+            }
+            // BY ZF: 进入 STOPPING 后固定等待 15s，或电表连续3次无变化提前收敛
+            if (gs.hasMeterValue && gs.meterStableCount >= 3) {
+                handleEvent(static_cast<uint8_t>(i), EVT_METER_STALE, "meter_stable_3x");
+                continue;
+            }
+            // BY ZF: 兜底保护，避免 STOPPING 长时间滞留
+            if (gs.stoppingEnterTime.time_since_epoch().count() != 0 &&
+                now - gs.stoppingEnterTime >= std::chrono::seconds(30)) {
+                handleEvent(static_cast<uint8_t>(i), EVT_METER_STALE, "stopping_force_timeout_30s");
+            }
+        }
+    }
+    replayBufferedUnconfirmedRecords();
+    // BY ZF: doRun 主循环节流 10ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
 void ChargeLogicProcess::doCleanup()
 {
     m_running = false;
-    if (m_mainThread.joinable()) {
-        m_mainThread.join();
-    }
     m_mqtt.loopStop(true);
     m_mqtt.disconnect();
 }
@@ -362,19 +369,23 @@ bool ChargeLogicProcess::initMqtt()
             return;
         }
         for (uint8_t gun = 0; gun < m_config.gunCount; gun++) {
-            std::ostringstream t1, t2, t3, t4, t5, t6;
+            std::ostringstream t1, t2, t2e, t3, t4, t5, t6, t7;
             t1 << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gun) << "/cmd";
             t2 << m_config.mqttTopicPrefix << "/plat/" << static_cast<int>(gun) << "/cmd";
+            t2e << m_config.mqttTopicPrefix << "/plat/" << static_cast<int>(gun) << "/event";
             t3 << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gun) << "/event";
             t4 << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gun) << "/data";
             t5 << m_config.mqttTopicPrefix << "/meter/" << static_cast<int>(gun) << "/data";
             t6 << m_config.mqttTopicPrefix << "/logger/" << static_cast<int>(gun) << "/event";
+            t7 << m_config.mqttTopicPrefix << "/meter/" << static_cast<int>(gun) << "/event";
             m_mqtt.subscribe(t1.str(), 1);
             m_mqtt.subscribe(t2.str(), 1);
+            m_mqtt.subscribe(t2e.str(), 1);
             m_mqtt.subscribe(t3.str(), 2);
             m_mqtt.subscribe(t4.str(), 0);
             m_mqtt.subscribe(t5.str(), 0);
             m_mqtt.subscribe(t6.str(), 2);
+            m_mqtt.subscribe(t7.str(), 1);
         }
     });
 
@@ -412,6 +423,10 @@ void ChargeLogicProcess::onMqttMessage(const std::string& topic, const std::stri
         const char* cmd = getString(root, "cmd");
         cJSON* data = cJSON_GetObjectItem(root, "data");
         handlePlatCmd(gun, cmd, data);
+    } else if (parseTopicGun(topic, prefixPlat, gun, tail) && tail == "event") {
+        const char* event = getString(root, "event");
+        cJSON* data = cJSON_GetObjectItem(root, "data");
+        handlePlatEvent(gun, event ? event : "", data);
     } else if (parseTopicGun(topic, prefixPile, gun, tail)) {
         if (tail == "event") {
             const char* type = getString(root, "type");
@@ -438,9 +453,15 @@ void ChargeLogicProcess::onMqttMessage(const std::string& topic, const std::stri
                 }
             }
         }
-    } else if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/meter/", gun, tail) && tail == "data") {
-        cJSON* data = cJSON_GetObjectItem(root, "data");
-        handleMeterData(gun, data);
+    } else if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/meter/", gun, tail)) {
+        if (tail == "data") {
+            cJSON* data = cJSON_GetObjectItem(root, "data");
+            handleMeterData(gun, data);
+        } else if (tail == "event") {
+            const char* event = getString(root, "event");
+            cJSON* data = cJSON_GetObjectItem(root, "data");
+            handleMeterEvent(gun, event ? event : "", data);
+        }
     }
 
     cJSON_Delete(root);
@@ -605,6 +626,7 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
     if (gun >= m_gunStates.size()) {
         return;
     }
+    GunState& gs = m_gunStates[gun];
 
     if (type == "start_complete") {
         bool ok = true;
@@ -649,10 +671,12 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
             cJSON* r = cJSON_GetObjectItem(data, "stopReason");
             if (r && cJSON_IsNumber(r) && r->valueint >= 0) {
                 stopReasonRaw = static_cast<unsigned int>(r->valueint) & 0xFFFFU;
-                const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(stopReasonRaw));  
-                //如果充电启动完成帧表示成功启动，则才处理启动完成帧给的reason，否则防止覆盖考虑，仅保存启动完成的
-                if (m_gunStates[gun].startSuccessFlag ) {
-                    m_gunStates[gun].stopReason = result.reason;                
+                const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(stopReasonRaw));
+                // BY ZF: 已进入充电中后才允许 stop_complete 更新原因；若当前已存在非0故障原因，则正常停机原因不能覆盖它。
+                if (m_gunStates[gun].startSuccessFlag && result.valid) {
+                    if (result.reason != 0U || m_gunStates[gun].stopReason == 0U) {
+                        m_gunStates[gun].stopReason = result.reason;
+                    }
                 }
             }
             cJSON* soc = cJSON_GetObjectItem(data, "stopSoc");
@@ -678,6 +702,45 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
     }
 
     if (type == "stop_response") {
+        return;
+    }
+    if (type == "pile_online") {
+        gs.pileOfflineFaultActive = false;
+        if (gs.state == STATE_ERROR && !gs.meterOfflineFaultActive && !gs.platformOfflineFaultActive) {
+            if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
+                transitionTo(gun, STATE_PREPARE, "pile_online");
+            } else {
+                transitionTo(gun, STATE_IDLE, "pile_online");
+            }
+        }
+        return;
+    }
+    if (type == "pile_offline") {
+        gs.pileOfflineFaultActive = true;
+        if (gs.state == STATE_STARTING) {
+            const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0x0104U));
+            if (result.valid) {
+                gs.stopReason = result.reason;
+            }
+            handleEvent(gun, EVT_DEVICE_ERR, "pile_offline");
+            return;
+        }
+        if (gs.state == STATE_CHARGING) {
+            const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(0x0104U));
+            if (result.valid) {
+                gs.stopReason = result.reason;
+            }
+            handleEvent(gun, EVT_DEVICE_ERR, "pile_offline");
+            return;
+        }
+        if (gs.state == STATE_STOPPING) {
+            return;
+        }
+        const FaultJudgeResult result = JudgeStandbyFaultPoint(MakeStandbyPointKey(0x0104U));
+        publishSaveErrorEvent(gun, result, 0x0104U, "pile");
+        if (gs.state != STATE_ERROR) {
+            handleEvent(gun, EVT_DEVICE_ERR, "pile_offline");
+        }
         return;
     }
     if (type == "deviceErr_on" || type == "deviceErr") {
@@ -719,9 +782,9 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
             if (!gs.hasOtherFault || gs.lastOtherFault != otherFault) {
                 gs.hasOtherFault = true;
                 gs.lastOtherFault = otherFault;
+                // BY ZF: 常态故障仅按状态阶段判断，不能再附加 workStatus==0 过滤，否则双枪公共故障可能漏记右枪。
                 if (otherFault != 0U &&
-                    (gs.state == STATE_IDLE || gs.state == STATE_PREPARE || gs.state == STATE_ERROR || gs.state == STATE_STOPPED) &&
-                    gs.hasWorkStatus && gs.lastWorkStatus == 0) {
+                    (gs.state == STATE_IDLE || gs.state == STATE_PREPARE || gs.state == STATE_ERROR || gs.state == STATE_STOPPED)) {
                     const FaultJudgeResult result = JudgeStandbyFaultPoint(MakeStandbyPointKey(otherFault));
                     publishSaveErrorEvent(gun, result, otherFault, "pile_yx");
                 }
@@ -737,6 +800,9 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
                 handleEvent(gun, EVT_VEHICLE_CONNECTED, "vehicle_connected");
             } else if (gs.state == STATE_PREPARE && gs.lastVehicleConnectStatus == 0) {
                 handleEvent(gun, EVT_VEHICLE_DISCONNECTED, "vehicle_disconnected");
+            } else if (gs.state == STATE_STOPPING && gs.lastVehicleConnectStatus == 0) {
+                // BY ZF: STOPPING 阶段若已断枪，记录标志，待进入 STOPPED 后直接回到 IDLE。
+                gs.vehicleDisconnectedDuringStopping = true;
             } else if (gs.state == STATE_STOPPED && gs.lastVehicleConnectStatus == 0) {
                 handleEvent(gun, EVT_VEHICLE_DISCONNECTED, "vehicle_disconnected");
             }
@@ -824,6 +890,111 @@ void ChargeLogicProcess::handleMeterData(uint8_t gun, cJSON* data)
             currService != gs.feeLastPublishedServiceAmount) {
             publishFeeData(gun);
         }
+    }
+}
+
+void ChargeLogicProcess::handleMeterEvent(uint8_t gun, const std::string& event, cJSON* data)
+{
+    (void)data;
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+    GunState& gs = m_gunStates[gun];
+    if (event == "meter_online") {
+        // BY ZF: 电表恢复在线后清除离线故障态；若当前处于 ERROR，则按插枪状态恢复到 IDLE/PREPARE。
+        gs.meterOfflineFaultActive = false;
+        if (gs.state == STATE_ERROR && !gs.platformOfflineFaultActive && !gs.pileOfflineFaultActive) {
+            if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
+                transitionTo(gun, STATE_PREPARE, "meter_online");
+            } else {
+                transitionTo(gun, STATE_IDLE, "meter_online");
+            }
+        }
+        return;
+    }
+    if (event != "meter_offline") {
+        return;
+    }
+
+    gs.meterOfflineFaultActive = true;
+    // BY ZF: 电表通信离线按当前阶段映射到统一故障点位，并驱动对应状态转换。
+    if (gs.state == STATE_STARTING) {
+        const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0x0101U));
+        if (result.valid) {
+            gs.stopReason = result.reason;
+        }
+        handleEvent(gun, EVT_DEVICE_ERR, "meter_offline");
+        return;
+    }
+    if (gs.state == STATE_CHARGING) {
+        const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(0x0101U));
+        if (result.valid) {
+            gs.stopReason = result.reason;
+        }
+        handleEvent(gun, EVT_DEVICE_ERR, "meter_offline");
+        return;
+    }
+    if (gs.state == STATE_STOPPING) {
+        return;
+    }
+
+    const FaultJudgeResult result = JudgeStandbyFaultPoint(MakeStandbyPointKey(0x0101U));
+    publishSaveErrorEvent(gun, result, 0x0101U, "meter");
+    if (gs.state != STATE_ERROR) {
+        handleEvent(gun, EVT_DEVICE_ERR, "meter_offline");
+    }
+}
+
+void ChargeLogicProcess::handlePlatEvent(uint8_t gun, const std::string& event, cJSON* data)
+{
+    (void)data;
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    if (event == "platform_online") {
+        // BY ZF: 平台恢复在线后清除离线故障态；若当前处于 ERROR，则按插枪状态恢复到 IDLE/PREPARE。
+        gs.platformOfflineFaultActive = false;
+        if (gs.state == STATE_ERROR && !gs.meterOfflineFaultActive && !gs.pileOfflineFaultActive) {
+            if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
+                transitionTo(gun, STATE_PREPARE, "platform_online");
+            } else {
+                transitionTo(gun, STATE_IDLE, "platform_online");
+            }
+        }
+        return;
+    }
+    if (event != "platform_offline") {
+        return;
+    }
+
+    gs.platformOfflineFaultActive = true;
+    // BY ZF: 平台通信离线按当前阶段映射到统一故障点位，并驱动对应状态转换。
+    if (gs.state == STATE_STARTING) {
+        const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0x0102U));
+        if (result.valid) {
+            gs.stopReason = result.reason;
+        }
+        handleEvent(gun, EVT_DEVICE_ERR, "platform_offline");
+        return;
+    }
+    if (gs.state == STATE_CHARGING) {
+        const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(0x0102U));
+        if (result.valid) {
+            gs.stopReason = result.reason;
+        }
+        handleEvent(gun, EVT_DEVICE_ERR, "platform_offline");
+        return;
+    }
+    if (gs.state == STATE_STOPPING) {
+        return;
+    }
+
+    const FaultJudgeResult result = JudgeStandbyFaultPoint(MakeStandbyPointKey(0x0102U));
+    publishSaveErrorEvent(gun, result, 0x0102U, "platform");
+    if (gs.state != STATE_ERROR) {
+        handleEvent(gun, EVT_DEVICE_ERR, "platform_offline");
     }
 }
 
@@ -991,6 +1162,13 @@ void ChargeLogicProcess::publishStateChange(uint8_t gun, ChargeState from, Charg
     cJSON_AddStringToObject(data, "to", stateToString(to));
     if (reason) {
         cJSON_AddStringToObject(data, "reason", reason);
+    }
+    if (gun < m_gunStates.size() && m_gunStates[gun].stopReason != 0U) {
+        cJSON_AddNumberToObject(data, "stopReason", static_cast<double>(m_gunStates[gun].stopReason));
+        const char* stopReasonText = QueryReasonText(m_gunStates[gun].stopReason);
+        if (stopReasonText && stopReasonText[0] != '\0') {
+            cJSON_AddStringToObject(data, "stopReasonText", stopReasonText);
+        }
     }
     publishLogicEvent(gun, "state_change", data);
     cJSON_Delete(data);
@@ -1480,7 +1658,12 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
     switch (gs.state) {
     case STATE_IDLE:
         if (evt == EVT_VEHICLE_CONNECTED) {
-            transitionTo(gun, STATE_PREPARE, reason);
+            // BY ZF: 电表离线故障是持续状态，未恢复在线前插枪应直接进入故障态，不能进入 PREPARE。
+            if (gs.meterOfflineFaultActive || gs.platformOfflineFaultActive || gs.pileOfflineFaultActive) {
+                transitionTo(gun, STATE_ERROR, "link_fault_active");
+            } else {
+                transitionTo(gun, STATE_PREPARE, reason);
+            }
         } else if (evt == EVT_TOTAL_FAULT || evt == EVT_DEVICE_ERR) {
             transitionTo(gun, STATE_ERROR, reason);
         } else if (evt == EVT_RESET_ERROR) {
@@ -1566,12 +1749,15 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
         if (evt == EVT_STOP_COMPLETE) {
             gs.stopCompleteSeen = true;
         } else if (evt == EVT_METER_STALE) {
-            transitionTo(gun, STATE_STOPPED, reason);
+            // BY ZF: 电表稳定/超时只是 STOPPING->STOPPED 的内部收敛条件，不能覆盖真实停机原因。
+            transitionTo(gun, STATE_STOPPED, "");
         }
         break;
     case STATE_STOPPED:
         if (evt == EVT_VEHICLE_DISCONNECTED) {
             transitionTo(gun, STATE_IDLE, reason);
+        } else if (evt == EVT_TOTAL_FAULT || evt == EVT_DEVICE_ERR) {
+            transitionTo(gun, STATE_ERROR, reason);
         }
         break;
     case STATE_ERROR:
@@ -1610,10 +1796,14 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
     } else if (to == STATE_IDLE) {
         gs.chargingEnterTime = std::chrono::steady_clock::time_point();
         gs.startSuccessFlag = false;
+        gs.vehicleDisconnectedDuringStopping = false;
     }
     publishStateChange(gun, prev, to, reason);
     if (to == STATE_STOPPED ) {
         logTradeRecordOnStopped(gun, reason);
+        if (gs.vehicleDisconnectedDuringStopping) {
+            handleEvent(gun, EVT_VEHICLE_DISCONNECTED, "vehicle_disconnected_after_stopping");
+        }
     }
     if (to == STATE_IDLE) {
         // BY ZF: 回到空闲态时清理本次充电流程上下文
@@ -1639,6 +1829,7 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.startingRetrySent = false;
     gs.stopCompleteSeen = false;
     gs.tcuStopReqSent = false;
+    gs.vehicleDisconnectedDuringStopping = false;
     gs.meterStableCount = 0;
     gs.lastStopCmdTime = std::chrono::steady_clock::time_point();
     gs.startingEnterTime = std::chrono::steady_clock::time_point();
@@ -1754,6 +1945,7 @@ void ChargeLogicProcess::enterStopping(uint8_t gun, const char* reason)
 {
     // BY ZF: 进入 STOPPING 并下发 stop_charge
     transitionTo(gun, STATE_STOPPING, reason);
+    m_gunStates[gun].vehicleDisconnectedDuringStopping = false;
     m_gunStates[gun].stopCompleteSeen = false;
     m_gunStates[gun].meterStableCount = 0;
     m_gunStates[gun].stoppingEnterTime = std::chrono::steady_clock::now();

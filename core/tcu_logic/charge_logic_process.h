@@ -92,6 +92,9 @@ private:
         bool hasVehicleConnectStatus;           // 是否收到过 vehicleConnectStatus
         bool hasTotalFault;                     // 是否收到过 totalFault
         bool hasOtherFault;                     // 是否收到过 otherFault
+        bool meterOfflineFaultActive;           // 电表离线故障是否激活
+        bool platformOfflineFaultActive;        // 平台离线故障是否激活
+        bool pileOfflineFaultActive;            // 主控心跳超时故障是否激活
         bool hasMeterValue;                     // 是否收到过电量
         double lastMeterValue;                  // 最近电量(kWh)
         bool hasMeterVoltage;                   // 是否收到过电压
@@ -144,6 +147,7 @@ private:
         bool pendingStart;                      // 已收 start_charge，等待 PREPARE 窗口处理
         bool stopCompleteSeen;                  // 是否收到 stop_complete
         bool startSuccessFlag;                  // 启动成功标志
+        bool vehicleDisconnectedDuringStopping; // STOPPING 阶段是否已检测到断枪，进入 STOPPED 后可直接回到 IDLE
         std::string pendingStartData;           // 缓存启动命令 data JSON
         std::string lastStartCmdData;           // 最近一次下发给 pile 的启动参数
         bool startingRetrySent;                 // STARTING 30s 重发是否已执行
@@ -163,6 +167,9 @@ private:
             , hasVehicleConnectStatus(false)
             , hasTotalFault(false)
             , hasOtherFault(false)
+            , meterOfflineFaultActive(true)
+            , platformOfflineFaultActive(true)
+            , pileOfflineFaultActive(true)
             , hasMeterValue(false)
             , lastMeterValue(0.0)
             , hasMeterVoltage(false)
@@ -200,6 +207,7 @@ private:
             , pendingStart(false)
             , stopCompleteSeen(false)
             , startSuccessFlag(false)
+            , vehicleDisconnectedDuringStopping(false)
             , startingRetrySent(false)
         {}
     };
@@ -213,9 +221,11 @@ private:
     // BY ZF: 各来源命令/数据处理
     void handleLogicCmd(uint8_t gun, const std::string& cmd, cJSON* data);
     void handlePlatCmd(uint8_t gun, const std::string& cmd, cJSON* data);
+    void handlePlatEvent(uint8_t gun, const std::string& event, cJSON* data);
     void handlePileEvent(uint8_t gun, const std::string& type, cJSON* data);
     void handlePileData(uint8_t gun, const std::string& type, cJSON* data);
     void handleMeterData(uint8_t gun, cJSON* data);
+    void handleMeterEvent(uint8_t gun, const std::string& event, cJSON* data);
 
     // BY ZF: 对外发布（下发 pile 命令、上报 logic 事件/计费）
     void publishPileCmd(uint8_t gun, const std::string& cmd, cJSON* data);

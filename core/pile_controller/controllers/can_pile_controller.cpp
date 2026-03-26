@@ -308,6 +308,24 @@ int CANPileController::powerAdjust()
     return 0;
 }
 
+int CANPileController::outputVAControl()
+{
+    if (!m_initialized) {
+        return -1;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_protocolMutex);
+        if (m_protocol->encodeOutputVAControl() != 0) {
+            std::cerr << "[CANPileController] Failed to encode and send output VA control command\n";
+            return -1;
+        }
+    }
+
+    std::cout << "[CANPileController] Output VA control command sent\n";
+    return 0;
+}
+
 void CANPileController::taskThread()
 {
     using namespace std::chrono;
@@ -487,6 +505,14 @@ int CANPileController::setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmd)
         return -1;
     }
     return m_protocol->setPowerAdjustData(cmd);
+}
+
+int CANPileController::setOutputVAData(const TCU2CCU_CmdOutputVAData* cmd)
+{
+    if (!m_initialized || !m_protocol) {
+        return -1;
+    }
+    return m_protocol->setOutputVAData(cmd);
 }
 
 int CANPileController::setChargeParamData(const TCU2CCU_CmdChargeParamData* cmd)

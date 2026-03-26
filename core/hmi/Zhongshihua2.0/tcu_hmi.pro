@@ -21,8 +21,11 @@ isEmpty(QRPATH) {
 
 SOURCES += \
     ../../base/common/config_manager_lite.cpp \
+    ../../base/common/fault_reason_mapper.cpp \
+    ../../base/common/message_queue.cpp \
     ../../base/mqtt/mqtt_client.cpp \
     customwidgets.cpp \
+    exportprogressdlg.cpp \
     main.cpp \
     previewwindow.cpp \
     runtime_window.cpp \
@@ -44,8 +47,11 @@ exists($$QRPATH/qrencode.h) {
 
 HEADERS += \
     ../../base/common/config_manager_lite.h \
+    ../../base/common/fault_reason_mapper.h \
+    ../../base/common/message_queue.h \
     ../../base/mqtt/mqtt_client.h \
     customwidgets.h \
+    exportprogressdlg.h \
     previewwindow.h \
     runtime_window.h \
     uipages.h

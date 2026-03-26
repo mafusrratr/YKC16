@@ -13,6 +13,10 @@
 #include "../../base/mqtt/mqtt_client.h"
 
 class QLabel;
+class QAbstractButton;
+class QLineEdit;
+class QListWidget;
+class QListWidgetItem;
 class QPushButton;
 class QStackedWidget;
 class QTableWidget;
@@ -30,6 +34,9 @@ public:
 
     bool initialize();
 
+protected:
+    bool eventFilter(QObject *watched, QEvent *event);
+
 private slots:
     void refreshUi();
     void showAboutPage();
@@ -46,6 +53,15 @@ private slots:
     void showBFaultRecords();
     void showPrevFaultRecordPage();
     void showNextFaultRecordPage();
+    void submitAboutPermission();
+    void showAboutPermissionPad();
+    void handleAboutTabChanged(int index);
+    void onStorageItemClicked(QListWidgetItem *item);
+    void onStorageFileItemDoubleClicked(QListWidgetItem *item);
+    void onStorageBackClicked();
+    void onStorageRefreshClicked();
+    void onStorageExportLogClicked();
+    void onStorageUpgradeClicked();
 
 public:
     enum PageId {
@@ -145,6 +161,8 @@ public:
         std::string tradeNo;
         std::string startTime;
         std::string endTime;
+        double startSoc;
+        double endSoc;
         double totalElect;
         double totalCost;
         int reason;
@@ -187,12 +205,17 @@ private:
     void setupChargeRecordTab();
     void refreshChargeRecordCache(bool forceReload);
     void refreshChargeRecordTable();
+    void setupExternalStorageTab();
+    void scanExternalStorage();
+    void loadStorageFileList(const QString &path);
+    QString selectedStoragePath() const;
     void refreshIdlePage(const std::vector<GunUiData> &guns);
     void refreshAuthorizePage(const GunUiData &gun);
     void refreshChargingPage(const GunUiData &gun);
     void refreshCheckoutPage(const GunUiData &gun);
     void refreshAboutPage();
     PageId decidePage(const std::vector<GunUiData> &guns, int &focusGun) const;
+    void feedWatchdog();
 
     static bool parseTopicGun(const std::string &topic,
                               const std::string &prefix,
@@ -206,6 +229,7 @@ private:
     bool m_showAbout;
     bool m_forceIdleView;
     bool m_manualFocusLocked;
+    bool m_aboutPermissionGranted;
 
     QTimer m_uiTimer;
     QMutex m_dataMutex;
@@ -230,6 +254,7 @@ private:
     int m_faultGunFilter;
     int m_faultRecordPage;
     int m_faultRecordPageSize;
+    uint64_t m_lastWatchdogFeedMs;
 
     QStackedWidget *m_stack;
     QLabel *m_bottomTime;
@@ -239,11 +264,15 @@ private:
     QWidget *m_checkoutPage;
     QWidget *m_aboutPage;
     QTabWidget *m_aboutTabWidget;
+    QLineEdit *m_aboutPermissionEdit;
+    QLabel *m_aboutPermissionHint;
+    QWidget *m_aboutPermissionPad;
     FeeModelChartWidget *m_feeChart;
     QTableWidget *m_faultRecordTable;
     QLabel *m_faultRecordPageLabel;
     QTableWidget *m_chargeRecordTable;
     QLabel *m_chargeRecordPageLabel;
+    QString m_storageCurrentPath;
 };
 
 #endif

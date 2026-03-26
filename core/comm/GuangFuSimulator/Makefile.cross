@@ -1,0 +1,63 @@
+# tcu_comm process cross Makefile (GuangxiDKY Modbus)
+# BY ZF
+
+CROSS_COMPILE = arm-linux-gnueabihf-
+CXX = $(CROSS_COMPILE)g++
+AR = $(CROSS_COMPILE)ar
+CXXFLAGS = -Wall -O2 -std=c++11
+INCLUDES = -I../../base -I../../interfaces -I../../base/mqtt -I../../base/mqtt/include -I../../base/cjson/include
+
+OBJ_DIR = obj
+RELEASE_DIR = release
+TARGET = $(RELEASE_DIR)/tcu_comm
+
+SOURCES = main.cpp comm_process.cpp \
+          ../../base/mqtt/mqtt_client.cpp \
+          ../../base/communication/serial_communication.cpp
+BASE_SOURCES = ../../base/common/config_manager_lite.cpp \
+               ../../base/common/message_queue.cpp \
+               ../../base/logger/log_sender.cpp \
+               ../../base/process/base_process.cpp
+
+OBJECTS = $(OBJ_DIR)/main.o \
+          $(OBJ_DIR)/comm_process.o \
+          $(OBJ_DIR)/mqtt/mqtt_client.o \
+          $(OBJ_DIR)/communication/serial_communication.o \
+          $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
+
+LIBDIRS = -L../../../extraLib
+LIBS = -lpthread -lmosquitto -lcjson
+
+all: directories $(TARGET)
+
+directories:
+	@mkdir -p $(OBJ_DIR) $(RELEASE_DIR)
+
+$(TARGET): $(OBJECTS)
+	$(CXX) $(OBJECTS) -o $(TARGET) $(LIBDIRS) $(LIBS) -s
+	@echo "Build completed: $(TARGET)"
+
+$(OBJ_DIR)/%.o: %.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/mqtt/%.o: ../../base/mqtt/%.cpp
+	@mkdir -p $(OBJ_DIR)/mqtt
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/communication/%.o: ../../base/communication/%.cpp
+	@mkdir -p $(OBJ_DIR)/communication
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/%.o: ../../base/common/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/%.o: ../../base/logger/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/%.o: ../../base/process/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+clean:
+	rm -rf $(OBJ_DIR) $(RELEASE_DIR)
+
+.PHONY: all clean directories
