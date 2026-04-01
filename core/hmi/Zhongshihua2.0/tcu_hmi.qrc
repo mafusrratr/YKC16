@@ -76,6 +76,8 @@
         <file>Resources/hb.png</file>
         <file>Resources/hb_fd.png</file>
         <file>Resources/host_0.png</file>
+        <file>Resources/host_not.png</file>
+        <file>Resources/host_yes.png</file>
         <file>Resources/jianpan.png</file>
         <file>Resources/jianpan_2.png</file>
         <file>Resources/k-0.png</file>

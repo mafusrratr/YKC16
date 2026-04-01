@@ -295,10 +295,15 @@ void DaemonProcess::doCleanup()
 void DaemonProcess::addBusinessProcess(const std::string& processName, const std::string& executablePath, const std::vector<std::string>& args)
 {
     std::lock_guard<std::mutex> lock(m_externalMutex);
+    bool isNewProcess = (m_externalProcesses.find(processName) == m_externalProcesses.end());
     ProcessInfo info;
     info.executablePath = executablePath;
     info.args = args;
     m_externalProcesses[processName] = info;
+    // BY ZF: 仅在首次添加时记录启动顺序，避免重复项
+    if (isNewProcess) {
+        m_processStartOrder.push_back(processName);
+    }
     std::cout << "Added external process: " << processName << " -> " << executablePath;
     if (!args.empty()) {
         std::cout << " with args:";
@@ -380,15 +385,28 @@ bool DaemonProcess::startAllProcesses()
 {
     bool allStarted = true;
     
-    // BY ZF: 启动外部进程（可执行文件）
+    // BY ZF: 按配置process_list顺序构建启动列表，避免map按字典序打乱顺序
+    std::vector<std::pair<std::string, ProcessInfo> > startList;
     {
         std::lock_guard<std::mutex> lock(m_externalMutex);
-        for (const auto& pair : m_externalProcesses) {
-            if (!startExternalProcess(pair.first, pair.second.executablePath, pair.second.args)) {
-                std::cout << "Failed to start external process: " << pair.first << std::endl;
-                allStarted = false;
+        for (size_t i = 0; i < m_processStartOrder.size(); ++i) {
+            const std::string& processName = m_processStartOrder[i];
+            std::map<std::string, ProcessInfo>::const_iterator it = m_externalProcesses.find(processName);
+            if (it != m_externalProcesses.end()) {
+                startList.push_back(std::make_pair(processName, it->second));
             }
         }
+    }
+    
+    // BY ZF: 启动外部进程（可执行文件），每个进程间隔2秒
+    for (size_t i = 0; i < startList.size(); ++i) {
+        const std::string& processName = startList[i].first;
+        const ProcessInfo& processInfo = startList[i].second;
+        if (!startExternalProcess(processName, processInfo.executablePath, processInfo.args)) {
+            std::cout << "Failed to start external process: " << processName << std::endl;
+            allStarted = false;
+        }
+        sleep(2);
     }
     
     if (allStarted) {
@@ -1014,7 +1032,7 @@ bool DaemonProcess::performUpdate(const std::string& updatePackagePath)
     stopAllProcesses();
     
     // 等待所有进程完全停止（确保安全）
-    sleep(2);
+    sleep(15);
     
     // 记录更新状态为UPDATING
     recordUpdateStatus("UPDATING", updatePackagePath);

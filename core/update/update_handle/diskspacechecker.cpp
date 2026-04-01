@@ -68,28 +68,41 @@ QList<SpaceInfo> DiskSpaceChecker::checkSpace(
     return results;
 }
 
+QString DiskSpaceChecker::resolveExistingPath(const QString &path)
+{
+    QString realPath = path;
+    QFileInfo fileInfo(path);
+    
+    // BY ZF: 目标通常是文件路径，不存在时先回退到父目录
+    if (fileInfo.exists()) {
+        if (fileInfo.isFile()) {
+            realPath = fileInfo.absolutePath();
+        } else if (fileInfo.isDir()) {
+            realPath = fileInfo.absoluteFilePath();
+        }
+    } else {
+        realPath = fileInfo.absolutePath();
+    }
+    
+    // BY ZF: 持续向上查找，直到找到真实存在的目录
+    QDir dir(realPath);
+    while (!dir.exists() && dir.absolutePath() != "/") {
+        if (!dir.cdUp()) {
+            break;
+        }
+    }
+    
+    if (!dir.exists()) {
+        return "/";
+    }
+    
+    return dir.absolutePath();
+}
+
 qint64 DiskSpaceChecker::getAvailableSpace(const QString &path)
 {
     struct statvfs vfs;
-    QString realPath = path;
-    
-    // 如果是文件，获取其所在目录
-    QFileInfo fileInfo(path);
-    if (fileInfo.isFile()) {
-        realPath = fileInfo.absolutePath();
-    } else if (fileInfo.isDir()) {
-        realPath = fileInfo.absoluteFilePath();
-    }
-    
-    // 确保路径存在
-    if (!QFileInfo(realPath).exists()) {
-        // 路径不存在，尝试获取父目录
-        QDir dir(realPath);
-        if (!dir.exists()) {
-            dir.cdUp();
-            realPath = dir.absolutePath();
-        }
-    }
+    QString realPath = resolveExistingPath(path);
     
     if (statvfs(realPath.toLocal8Bit().constData(), &vfs) == 0) {
         return (qint64)vfs.f_bavail * vfs.f_frsize;
@@ -101,25 +114,7 @@ qint64 DiskSpaceChecker::getAvailableSpace(const QString &path)
 qint64 DiskSpaceChecker::getTotalSpace(const QString &path)
 {
     struct statvfs vfs;
-    QString realPath = path;
-    
-    // 如果是文件，获取其所在目录
-    QFileInfo fileInfo(path);
-    if (fileInfo.isFile()) {
-        realPath = fileInfo.absolutePath();
-    } else if (fileInfo.isDir()) {
-        realPath = fileInfo.absoluteFilePath();
-    }
-    
-    // 确保路径存在
-    if (!QFileInfo(realPath).exists()) {
-        // 路径不存在，尝试获取父目录
-        QDir dir(realPath);
-        if (!dir.exists()) {
-            dir.cdUp();
-            realPath = dir.absolutePath();
-        }
-    }
+    QString realPath = resolveExistingPath(path);
     
     if (statvfs(realPath.toLocal8Bit().constData(), &vfs) == 0) {
         return (qint64)vfs.f_blocks * vfs.f_frsize;
@@ -130,25 +125,7 @@ qint64 DiskSpaceChecker::getTotalSpace(const QString &path)
 
 QString DiskSpaceChecker::getPartitionForPath(const QString &path)
 {
-    QString realPath = path;
-    
-    // 如果是文件，获取其所在目录
-    QFileInfo fileInfo(path);
-    if (fileInfo.isFile()) {
-        realPath = fileInfo.absolutePath();
-    } else if (fileInfo.isDir()) {
-        realPath = fileInfo.absoluteFilePath();
-    }
-    
-    // 确保路径存在
-    if (!QFileInfo(realPath).exists()) {
-        // 路径不存在，尝试获取父目录
-        QDir dir(realPath);
-        if (!dir.exists()) {
-            dir.cdUp();
-            realPath = dir.absolutePath();
-        }
-    }
+    QString realPath = resolveExistingPath(path);
     
     // 规范化路径（解析符号链接）
     QFileInfo info(realPath);
@@ -191,4 +168,3 @@ QSet<QString> DiskSpaceChecker::getUniquePartitions(const QList<UpdateFile> &fil
     
     return partitions;
 }
-

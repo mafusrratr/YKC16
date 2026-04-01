@@ -58,6 +58,8 @@ bool SerialCommunication::open(const std::string& devicePath, const SerialParams
     speed_t speed = B115200;
     // BY ZF: 扩展低速波特率支持（电表/工控设备常用 1200/2400/4800）
     switch (params.baudrate) {
+
+        case 300: speed = B300; break;
         case 1200: speed = B1200; break;
         case 2400: speed = B2400; break;
         case 4800: speed = B4800; break;

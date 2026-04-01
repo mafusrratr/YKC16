@@ -197,6 +197,7 @@ private:
     
     // 外部进程列表（可执行文件）
     std::map<std::string, ProcessInfo> m_externalProcesses;  // name -> process info
+    std::vector<std::string> m_processStartOrder;            // BY ZF: 按配置process_list保存启动顺序
     std::map<std::string, pid_t> m_externalPids;            // name -> process id
     std::map<std::string, std::chrono::milliseconds> m_externalWatchdogs;  // name -> last feed time
     mutable std::mutex m_externalMutex;

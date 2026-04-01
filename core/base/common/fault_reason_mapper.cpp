@@ -370,7 +370,7 @@ namespace {
         m[0x27] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x27), "BSM 报文中动力蓄电池温度过高");
         m[0x28] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x28), "BSM 报文中动力蓄电池绝缘状态异常");
         m[0x29] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x29), "BSM 报文中连接器连接状态异常");
-        m[0x2A] = MakeRule(false, FaultTypeDef::CHARGING_FAIL, 0, "BMS 正常终止充电");
+        m[0x2A] = MakeRule(false, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x23), "BMS 正常终止充电");
         m[0x2B] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x2B), "BMS 异常终止充电");
         m[0x2C] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x2C), "充电桩判断BMS 其他异常终止");
         m[0x2D] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x2D), "预留");

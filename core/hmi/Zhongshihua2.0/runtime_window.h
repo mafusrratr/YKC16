@@ -14,10 +14,12 @@
 
 class QLabel;
 class QAbstractButton;
+class QButtonGroup;
 class QLineEdit;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
+class QRadioButton;
 class QStackedWidget;
 class QTableWidget;
 class QTabWidget;
@@ -62,6 +64,12 @@ private slots:
     void onStorageRefreshClicked();
     void onStorageExportLogClicked();
     void onStorageUpgradeClicked();
+    void onConfigEditMaskClicked();
+    void onConfigKeyboardButtonClicked();
+    void onConfigGunCountChanged();
+    void onConfigSubmitClicked();
+    void onConfigResetClicked();
+    void rebootSystem();
 
 public:
     enum PageId {
@@ -108,6 +116,9 @@ public:
         int soc;
         std::string qrPayload;
         std::string stopReason;
+        std::string lastFaultPointKey;
+        std::string lastFaultMessage;
+        std::string lastFaultOccurTime;
         uint64_t lastStateChangeMs;
 
         GunUiData();
@@ -193,6 +204,7 @@ private:
     void handleFeeData(uint8_t gun, const std::string &payload);
     void handlePileData(uint8_t gun, const std::string &payload);
     void handlePlatEvent(uint8_t gun, const std::string &payload);
+    void handleSaveEvent(uint8_t gun, const std::string &payload);
     void handleMonEvent(const std::string &payload);
 
     void rebuildQrPayload(int gun);
@@ -205,10 +217,19 @@ private:
     void setupChargeRecordTab();
     void refreshChargeRecordCache(bool forceReload);
     void refreshChargeRecordTable();
+    void setupConfigTab();
+    void loadMeterConfigToUi();
+    bool saveMeterConfigFromUi();
+    void loadCommConfigToUi();
+    bool saveCommConfigFromUi();
+    bool saveHmiConfigFromUi();
+    bool savePileConfigFromUi();
     void setupExternalStorageTab();
     void scanExternalStorage();
     void loadStorageFileList(const QString &path);
     QString selectedStoragePath() const;
+    void openConfigKeyboard(QLineEdit *target, bool numericOnly);
+    void refreshConfigKeyboardLayout();
     void refreshIdlePage(const std::vector<GunUiData> &guns);
     void refreshAuthorizePage(const GunUiData &gun);
     void refreshChargingPage(const GunUiData &gun);
@@ -255,9 +276,11 @@ private:
     int m_faultRecordPage;
     int m_faultRecordPageSize;
     uint64_t m_lastWatchdogFeedMs;
+    bool m_platformOnline;
 
     QStackedWidget *m_stack;
     QLabel *m_bottomTime;
+    QLabel *m_bottomHostState;
     QWidget *m_idlePage;
     QWidget *m_authorizePage;
     QWidget *m_chargingPage;
@@ -267,6 +290,25 @@ private:
     QLineEdit *m_aboutPermissionEdit;
     QLabel *m_aboutPermissionHint;
     QWidget *m_aboutPermissionPad;
+    QLineEdit *m_configPileNoEdit;
+    QLineEdit *m_configSecretEdit;
+    QLineEdit *m_configMeterAddr1Edit;
+    QLineEdit *m_configMeterAddr2Edit;
+    QLineEdit *m_configKeyboardTarget;
+    QLabel *m_configHintLabel;
+    QWidget *m_configKeyboard;
+    QWidget *m_configMeter2Row;
+    QPushButton *m_configKeyButtons[30];
+    QPushButton *m_configShiftButton;
+    QPushButton *m_configModeButton;
+    QPushButton *m_configBackspaceButton;
+    QPushButton *m_configClearButton;
+    QPushButton *m_configConfirmButton;
+    QRadioButton *m_configGunSingle;
+    QRadioButton *m_configGunDual;
+    bool m_configKeyboardUppercase;
+    bool m_configKeyboardNumberMode;
+    bool m_configKeyboardNumericOnly;
     FeeModelChartWidget *m_feeChart;
     QTableWidget *m_faultRecordTable;
     QLabel *m_faultRecordPageLabel;

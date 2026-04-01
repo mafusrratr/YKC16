@@ -45,7 +45,7 @@ public:
 
 private:
     static QSet<QString> getUniquePartitions(const QList<UpdateFile> &files);
+    static QString resolveExistingPath(const QString &path);
 };
 
 #endif // DISKSPACECHECKER_H
-

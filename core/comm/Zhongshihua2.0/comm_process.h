@@ -279,6 +279,7 @@ private:
         LOGIN_IDLE = 0,          // 已连TCP，等待发起登录认证
         LOGIN_REQ_AUTH,          // 周期发送0x01登录认证，请求0x02应答
         LOGIN_REQ_FEE_MODEL,     // 周期发送0x0D枪计费模型请求，等待0x0A应答
+        LOGIN_REQ_TIME_SYNC,     // 周期发送0x0B对时请求，等待0x0C应答
         LOGIN_ONLINE             // 已上线，维持0x03心跳与业务上送
     };
 
@@ -365,6 +366,8 @@ private:
     bool parseQrCodeSet05A(const uint8_t* body, size_t bodyLen, uint8_t& gun, uint8_t& gunNoBcd, cJSON** outData) const;
     bool parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeModel& feeModel);
     bool buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data, std::vector<uint8_t>& body);
+    uint16_t mapTradeStopReasonToPlatform(int mqttReason) const;
+    std::string buildGunQrCode(uint8_t gun) const;
 
     // BY ZF: 平台命令发布
     bool publishPlatCommand(uint8_t gun, const char* cmd, cJSON* dataObj);
@@ -382,13 +385,17 @@ private:
     PlatformLoginState m_loginState;                  // 登录状态机状态
     std::chrono::steady_clock::time_point m_lastTcpConnectTry; // 最近重连尝试时间
     std::chrono::steady_clock::time_point m_lastLoginAction;   // 最近登录动作时间
+    std::chrono::steady_clock::time_point m_nextLoginAllowedTime; // 登录流程限流截止时间
     std::chrono::steady_clock::time_point m_lastHeartbeat;     // 最近心跳发送时间
 
 
     std::chrono::steady_clock::time_point m_lastHeartbeatRecv;     // 最近心跳应答接受时间
 
     std::chrono::steady_clock::time_point m_lastChargeInfoReport; // reportChargeInfoPeriodic调度节拍
+    std::chrono::steady_clock::time_point m_lastPeriodicSetConfigPublish; // 周期setConfig广播节拍
     std::vector<std::chrono::steady_clock::time_point> m_lastChargeInfoReportByGun; // 每枪最近0x13上报时间
+    std::vector<std::chrono::steady_clock::time_point> m_lastSetConfigPublishByGun;  // 每枪最近setConfig发布时间
+    std::vector<std::string> m_lastSetConfigPayloadByGun;                              // 每枪最近setConfig内容
     std::vector<uint8_t> m_runtimeChangedByGun;      // 每枪运行态变化标记（1=有变化待立即上送）
     
     std::vector<uint8_t> m_tcpRxCache;                // TCP 粘包缓存

@@ -670,6 +670,7 @@ CommProcess::CommProcess()
     , m_tcpFd(-1)
     , m_loginState(LOGIN_IDLE)
     , m_lastChargeInfoReport(std::chrono::steady_clock::now())
+    , m_lastPeriodicSetConfigPublish(std::chrono::steady_clock::now())
     , m_heartbeatCounter(0)
     , m_sm4SessionKeyReady(false)
     , m_loginCryptoPrepared(false)
@@ -695,6 +696,9 @@ bool CommProcess::doInitialize()
     if (!initMqtt()) {
         return false;
     }
+    m_lastSetConfigPublishByGun.assign(static_cast<size_t>(m_config.gunCount),
+                                       std::chrono::steady_clock::now() - std::chrono::seconds(3600));
+    m_lastSetConfigPayloadByGun.assign(static_cast<size_t>(m_config.gunCount), std::string());
     m_lastChargeInfoReportByGun.assign(static_cast<size_t>(m_config.gunCount), std::chrono::steady_clock::now());
     m_runtimeChangedByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
     m_logSender.info("init_completed", std::string("gun_count=") + std::to_string(m_config.gunCount));
@@ -712,6 +716,11 @@ void CommProcess::doRun()
             feedWatchdog();
             feedDaemonWatchdog();
             lastFeedTime = now;
+        }
+        // BY ZF: 运行期间每30秒补发一次每枪 setConfig（retain），便于订阅端周期获取最新配置。
+        if (now - m_lastPeriodicSetConfigPublish >= std::chrono::seconds(30)) {
+            publishInitialSetConfig();
+            m_lastPeriodicSetConfigPublish = now;
         }
         // BY ZF: 平台 TCP 链路维护与登录流程状态机驱动。
         maintainPlatformTcp();
@@ -838,8 +847,10 @@ void CommProcess::onMqttConnected(int rc)
     m_mqtt.subscribe(p + "/meter/+/data", 0);
     // BY ZF: MQTT重连后主动发布一次每枪setConfig（retain）。
     publishInitialSetConfig();
-    publishPlatformLinkEvent(m_platformOnlineEventActive,
-                             m_platformOnlineEventActive ? "login_ready" : "not_logged_in");
+    // BY ZF: 仅在已确认平台在线时补发在线事件，避免把“尚未完成登录”误判成平台离线。
+    if (m_platformOnlineEventActive || m_config.offlineRunMode) {
+        publishPlatformLinkEvent(true, m_config.offlineRunMode ? "offline_mode" : "login_ready");
+    }
 }
 
 void CommProcess::onMqttMessage(const std::string& topic, const std::string& payload)
@@ -1361,7 +1372,7 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
     // 15) 交易时间 CP56Time2a 7字节（取结束时间）
     appendCp56Time2aFromYmdHms(body, endTime);
     // 16) 停止原因 BIN2
-    appendU16LE(body, static_cast<uint16_t>(reason < 0 ? 0 : reason));
+    appendU16LE(body, mapTradeStopReasonToPlatform(reason));
     // 17) 物理卡号 BIN8（不足补0，优先十六进制串）
     std::string hexDigits;
     for (size_t i = 0; i < cardNumber.size(); ++i) {
@@ -1585,6 +1596,208 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
     return true;
 }
 
+uint16_t CommProcess::mapTradeStopReasonToPlatform(int mqttReason) const
+{
+    // BY ZF: 这里预留“MQTT reason -> 平台停机原因点表”映射入口。
+    // BY ZF: 后续和平台点表对齐后，在这里补充 switch/case 或查表逻辑即可。
+    // BY ZF: 当前默认保持原值透传，仅做协议范围兜底。
+    if (mqttReason < 0) {
+        return 0U;
+    }
+
+    // BY ZF: 统一维护“MQTT reason -> 平台停机原因”映射。
+    switch (mqttReason) {
+    // BY ZF: 启动阶段映射，同步自 doc/faulttemp。
+    case 0x1000F: return 0x0102U;
+    case 0x10008: return 0x0103U;
+    case 0x10009: return 0x0103U;
+    case 0x1000A: return 0x0103U;
+    case 0x1000B: return 0x0105U;
+    case 0x1000C: return 0x0105U;
+    case 0x10018: return 0x0105U;
+    case 0x10019: return 0x0105U;
+    case 0x1003A: return 0x0105U;
+    case 0x1001A: return 0x0106U;
+    case 0x10003: return 0x011DU;
+    case 0x10001: return 0x011EU;
+    case 0x10004: return 0x0123U;
+    case 0x1002B: return 0x0123U;
+    case 0x1002C: return 0x0126U;
+    case 0x1002D: return 0x0126U;
+    case 0x10006: return 0x0127U;
+    case 0x1002A: return 0x2007U;
+    case 0x10022: return 0x0202U;
+    case 0x10023: return 0x0202U;
+    case 0x10024: return 0x0203U;
+    case 0x10025: return 0x0203U;
+    case 0x10026: return 0x0204U;
+    case 0x10027: return 0x0205U;
+    case 0x10029: return 0x0206U;
+    case 0x1001C: return 0x0315U;
+    case 0x1001D: return 0x0316U;
+    case 0x1001E: return 0x0317U;
+    case 0x1001F: return 0x0318U;
+    case 0x10020: return 0x0319U;
+    case 0x10021: return 0x031AU;
+    case 0x10032: return 0x0325U;
+    case 0x10033: return 0x0326U;
+    case 0x10034: return 0x0326U;
+    case 0x10035: return 0x0326U;
+    case 0x10036: return 0x0326U;
+    case 0x1003E: return 0x0328U;
+    case 0x1003F: return 0x0328U;
+    case 0x10042: return 0x0328U;
+    case 0x10043: return 0x0328U;
+    case 0x10031: return 0x03F1U;
+    case 0x1003D: return 0x0401U;
+    case 0x10017: return 0x0402U;
+    case 0x1001B: return 0x0402U;
+    case 0x1003C: return 0x0402U;
+    case 0x1000E: return 0x0405U;
+    case 0x10002: return 0x0406U;
+    case 0x10010: return 0x0406U;
+    case 0x10011: return 0x0406U;
+    case 0x10012: return 0x0406U;
+    case 0x10013: return 0x0406U;
+    case 0x10014: return 0x0406U;
+    case 0x10015: return 0x0406U;
+    case 0x10041: return 0x0406U;
+    case 0x10102: return 0x0406U;
+    case 0x10104: return 0x0406U;
+    case 0x10037: return 0x0407U;
+    case 0x10038: return 0x0407U;
+    case 0x10039: return 0x0407U;
+    case 0x10101: return 0x0408U;
+    case 0x10005: return 0x0409U;
+    case 0x1000D: return 0x040AU;
+    case 0x10007: return 0x040BU;
+    case 0x1002E: return 0x0420U;
+    case 0x1002F: return 0x0420U;
+    case 0x10030: return 0x0420U;
+    case 0x10040: return 0x04F0U;
+    case 0x1F001: return 0x04FFU;
+    case 0x1003B: return 0xFF3BU;
+    case 0x10028: return 0xFFFFU;
+    case 0x100FF: return 0xFFFFU;
+
+    // BY ZF: 充电中阶段映射，沿用当前已整理内容。
+    case 0x2000C:
+    case 0x2000D:
+    case 0x2000E:
+    case 0x2000F:
+        return 0x0103U;
+    case 0x20013:
+    case 0x20014:
+    case 0x20015:
+    case 0x20016:
+    case 0x20017:
+    case 0x20018:
+    case 0x2001E:
+    case 0x2002C:
+        return 0x0104U;
+    case 0x20010:
+    case 0x20011:
+    case 0x2001B:
+    case 0x2001C:
+    case 0x20034:
+        return 0x0105U;
+    case 0x2001D:
+    case 0x20031:
+        return 0x0106U;
+    case 0x20002:
+        return 0x010BU;
+    case 0x20036:
+        return 0x0112U;
+    case 0x20037:
+        return 0x0113U;
+    case 0x20038:
+        return 0x0114U;
+    case 0x2001A:
+        return 0x0119U;
+    case 0x20008:
+        return 0x011DU;
+    case 0x20005:
+    case 0x20019:
+    case 0x2002E:
+    case 0x2002F:
+    case 0x20030:
+        return 0x011EU;
+    case 0x2000A:
+        return 0x0120U;
+    case 0x20012:
+        return 0x0122U;
+    case 0x20009:
+        return 0x0123U;
+    case 0x2000B:
+        return 0x0127U;
+    case 0x2001F:
+        return 0x0206U;
+    case 0x20020:
+        return 0x0207U;
+    case 0x20021:
+        return 0x0208U;
+    case 0x20022:
+        return 0x0301U;
+    case 0x20023:
+        return 0x0302U;
+    case 0x20024:
+        return 0x0303U;
+    case 0x20025:
+        return 0x0304U;
+    case 0x20026:
+        return 0x0305U;
+    case 0x20027:
+        return 0x0306U;
+    case 0x20028:
+        return 0x0307U;
+    case 0x20029:
+        return 0x0308U;
+    case 0x2002B:
+        return 0x0313U;
+    case 0x20035:
+        return 0x032CU;
+    case 0x20004:
+        return 0x04FFU;
+    case 0x2003D:
+        return 0x0501U;
+    case 0x20039:
+        return 0x0510U;
+    case 0x2003A:
+        return 0x0511U;
+    case 0x2003B:
+        return 0x0512U;
+    case 0x2003C:
+        return 0x0513U;
+    case 0x20102:
+        return 0x0514U;
+    case 0x20101:
+        return 0x0515U;
+    case 0x20003:
+    case 0x20006:
+    case 0x20104:
+        return 0x0516U;
+    case 0x20000:
+        return 0x0701U;
+    // BY ZF: 原始整理内容里出现了重复 0x20023 -> 0x0707，当前先保留 0x0302 映射，待你确认后再修正。
+    case 0x20007:
+        return 0x07FFU;
+    case 0x20032:
+        return 0xFF32U;
+    case 0x20033:
+        return 0xFF33U;
+    case 0x2002D:
+    case 0x200FF:
+        return 0xFFFFU;
+    default:
+        break;
+    }
+
+    if (mqttReason > 0xFFFF) {
+        return 0xFFFFU;
+    }
+    return static_cast<uint16_t>(mqttReason);
+}
+
 std::string CommProcess::ensureGunField(const std::string& payload, uint8_t gun) const
 {
     cJSON* root = cJSON_Parse(payload.c_str());
@@ -1632,16 +1845,44 @@ bool CommProcess::connectPlatformTcp()
     setsockopt(m_tcpFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(m_tcpFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
+    bool connected = false;
+
+    // BY ZF: 优先按 IPv4 字面量处理，兼容现有配置。
     struct sockaddr_in addr;
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(m_config.masterPort));
-    if (::inet_pton(AF_INET, m_config.masterHost.c_str(), &addr.sin_addr) != 1) {
-        closePlatformTcp();
-        return false;
+    if (::inet_pton(AF_INET, m_config.masterHost.c_str(), &addr.sin_addr) == 1) {
+        connected = (::connect(m_tcpFd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0);
+    } else {
+        // BY ZF: master_host 支持域名，解析成功后按 IPv4 地址逐个尝试连接。
+        struct addrinfo hints;
+        struct addrinfo* result = NULL;
+        std::memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+
+        const int gaiRet = ::getaddrinfo(m_config.masterHost.c_str(), NULL, &hints, &result);
+        if (gaiRet == 0 && result) {
+            for (struct addrinfo* rp = result; rp != NULL; rp = rp->ai_next) {
+                if (!rp->ai_addr || rp->ai_addrlen < static_cast<socklen_t>(sizeof(struct sockaddr_in))) {
+                    continue;
+                }
+                struct sockaddr_in resolvedAddr;
+                std::memcpy(&resolvedAddr, rp->ai_addr, sizeof(resolvedAddr));
+                resolvedAddr.sin_port = htons(static_cast<uint16_t>(m_config.masterPort));
+                if (::connect(m_tcpFd, reinterpret_cast<struct sockaddr*>(&resolvedAddr), sizeof(resolvedAddr)) == 0) {
+                    connected = true;
+                    break;
+                }
+            }
+        }
+        if (result) {
+            ::freeaddrinfo(result);
+        }
     }
 
-    if (::connect(m_tcpFd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
+    if (!connected) {
         closePlatformTcp();
         return false;
     }
@@ -1668,10 +1909,9 @@ void CommProcess::closePlatformTcp()
     }
     m_platformConnected = false;
     m_loginState = LOGIN_IDLE;
-    if (m_platformOnlineEventActive && !m_config.offlineRunMode) {
-        m_platformOnlineEventActive = false;
-        publishPlatformLinkEvent(false, "tcp_closed");
-    }
+    // BY ZF: 返回登录流程时增加 10 秒限流，避免链路异常时连续刷 0x01 登录请求。
+    m_nextLoginAllowedTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    // BY ZF: TCP断开不直接判平台通信故障，统一由心跳接收超时触发 offline 事件。
     resetCryptoSession();
 }
 
@@ -2680,6 +2920,10 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
 
     switch (m_loginState) {
     case LOGIN_IDLE:
+        if (m_nextLoginAllowedTime.time_since_epoch().count() != 0 &&
+            now < m_nextLoginAllowedTime) {
+            break;
+        }
         prepareLoginCryptoContext();
         m_loginState = LOGIN_REQ_AUTH;
         m_lastLoginAction = now - std::chrono::seconds(m_config.loginRetrySec);
@@ -2704,6 +2948,19 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
         }
         break;
     }
+    case LOGIN_REQ_TIME_SYNC:
+        if (now - m_lastLoginAction >= std::chrono::seconds(m_config.loginRetrySec)) {
+            const std::vector<uint8_t> timeSyncBody = buildTimeSyncRequestBody();
+            if (timeSyncBody.empty()) {
+                m_logSender.warn("platform_login_step", "time_sync_req_build_fail");
+            } else if (sendPlatformFrame(kCmdTimeSyncReq, timeSyncBody)) {
+                m_logSender.info("platform_login_step", "time_sync_req_sent");
+            } else {
+                closePlatformTcp();
+            }
+            m_lastLoginAction = now;
+        }
+        break;
     case LOGIN_REQ_AUTH:
         if (now - m_lastLoginAction >= std::chrono::seconds(m_config.loginRetrySec)) {
             const std::vector<uint8_t> loginBody = buildLoginRequestBody();
@@ -2718,14 +2975,14 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
         }
         break;
     case LOGIN_ONLINE: {
-        // BY ZF: 心跳接收超时 30 秒，超时则关闭 TCP 以触发重连
-        if (now - m_lastHeartbeatRecv >= std::chrono::seconds(30)) {
-            m_logSender.warn("platform_heartbeat", "recv_timeout_30s");
-            closePlatformTcp();
-            break;
-        }
+        // BY ZF: 平台离线按更宽松的心跳超时判定，避免短时链路波动触发停机。
+       
         if (now - m_lastHeartbeat >= std::chrono::seconds(m_config.tcpHeartbeatSec)) {
             if (!sendPlatformFrame(kCmdHeartbeat, buildHeartbeatBody())) {
+                m_logSender.warn("platform_heartbeat", "send_fail");
+                if (m_config.debugTcp) {
+                    std::cout << "[Comm][TCP][CLOSE_REASON] heartbeat_send_fail" << std::endl;
+                }
                 closePlatformTcp();
             } else {
                 m_lastHeartbeat = now;
@@ -2753,6 +3010,14 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
 void CommProcess::maintainPlatformTcp()
 {
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    const int heartbeatTimeoutSec = std::max(m_config.tcpHeartbeatSec * 3, 90);
+    // BY ZF: 平台通信故障统一按心跳超时判定；即使底层TCP已断，也要按最后一次心跳时间决定是否上报offline。
+    if (m_platformOnlineEventActive &&
+        !m_config.offlineRunMode &&
+        now - m_lastHeartbeatRecv >= std::chrono::seconds(heartbeatTimeoutSec)) {
+        m_platformOnlineEventActive = false;
+        publishPlatformLinkEvent(false, "heartbeat_timeout");
+    }
 
     if (!m_platformConnected.load()) {
         if (m_lastTcpConnectTry.time_since_epoch().count() == 0 ||
@@ -2766,10 +3031,20 @@ void CommProcess::maintainPlatformTcp()
     char buf[512];
     const ssize_t n = ::recv(m_tcpFd, buf, sizeof(buf), MSG_DONTWAIT);
     if (n == 0) {
+        m_logSender.warn("platform_tcp", "peer_closed");
+        if (m_config.debugTcp) {
+            std::cout << "[Comm][TCP][CLOSE_REASON] peer_closed" << std::endl;
+        }
         closePlatformTcp();
         return;
     }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        m_logSender.warn("platform_tcp",
+                         std::string("recv_error_") + std::strerror(errno));
+        if (m_config.debugTcp) {
+            std::cout << "[Comm][TCP][CLOSE_REASON] recv_error errno=" << errno
+                      << " msg=" << std::strerror(errno) << std::endl;
+        }
         closePlatformTcp();
         return;
     }
@@ -2872,6 +3147,29 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     }
     const uint8_t* body = decBody.empty() ? nullptr : decBody.data();
     const size_t decBodyLen = decBody.size();
+    // BY ZF: 关键业务指令接收留痕，便于联调追踪关键时刻。
+    switch (cmd) {
+    case kCmdMergeChargeApply:
+    case kCmdMergeChargeApplyAck:
+    case kCmdMergeStartReply:
+    case kCmdRemoteMergeStart:
+    case kCmdStartApply:
+    case kCmdStartApplyAck:
+    case kCmdRemoteStartAck:
+    case kCmdRemoteStartCmd:
+    case kCmdRemoteStopAck:
+    case kCmdRemoteStopCmd:
+    case kCmdUploadTradeRecord:
+    case kCmdRecordConfirm:
+        {
+            std::ostringstream oss;
+            oss << "cmd=0x" << std::hex << std::uppercase << static_cast<int>(cmd);
+            m_logSender.info("plat_cmd_rx", oss.str());
+        }
+        break;
+    default:
+        break;
+    }
 
     if (cmd == kCmdFeeModelAck) {
         // BY ZF: 仅在全枪均非充电中时更新计费模型，避免充电过程中切换费率。
@@ -2892,14 +3190,14 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         }
         m_logSender.saveFeeModel(feeModel);
 
-        // BY ZF: 收到有效0x0A后发起0x0B对时请求，序列号沿用平台下发帧。
-        (void)sendPlatformFrame(kCmdTimeSyncReq, buildTimeSyncRequestBody(), rxSeq);
-        m_loginState = LOGIN_ONLINE;
-        if (!m_platformOnlineEventActive) {
-            m_platformOnlineEventActive = true;
-            publishPlatformLinkEvent(true, "login_ready");
+        // BY ZF: 收到有效0x0A后，先进入对时请求阶段，等待0x0C后再切在线。
+        if (sendPlatformFrame(kCmdTimeSyncReq, buildTimeSyncRequestBody(), rxSeq)) {
+            m_loginState = LOGIN_REQ_TIME_SYNC;
+            m_lastLoginAction = std::chrono::steady_clock::now();
+        } else {
+            closePlatformTcp();
+            return;
         }
-        m_lastHeartbeat = std::chrono::steady_clock::now() - std::chrono::seconds(m_config.tcpHeartbeatSec);
         m_logSender.info("platform_login_step", "fee_model_ack_ok");
         return;
     }
@@ -2908,6 +3206,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         if (m_loginState == LOGIN_REQ_AUTH) {
             if (!body || decBodyLen < 8) {
                 m_loginState = LOGIN_IDLE;
+                m_nextLoginAllowedTime = std::chrono::steady_clock::now() + std::chrono::seconds(30);
                 m_logSender.warn("platform_login_step", "login_ack_invalid");
                 return;
             }
@@ -2916,6 +3215,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             const uint8_t feedbackResult = body[7];
             if (feedbackResult != 0x00) {
                 m_loginState = LOGIN_IDLE;
+                m_nextLoginAllowedTime = std::chrono::steady_clock::now() + std::chrono::seconds(30);
                 m_logSender.warn("platform_login_step", "login_ack_invalid");
                 return;
             }
@@ -2943,6 +3243,16 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             const int month = t[5] & 0x0F;
             const int year = 2000 + (t[6] & 0x7F);
             syncSystemTime(year, month, day, hour, minute, second);
+        }
+        if (m_loginState == LOGIN_REQ_TIME_SYNC) {
+            m_loginState = LOGIN_ONLINE;
+            if (!m_platformOnlineEventActive) {
+                m_platformOnlineEventActive = true;
+                publishPlatformLinkEvent(true, "login_ready");
+            }
+            m_lastHeartbeat = std::chrono::steady_clock::now();
+            m_lastHeartbeatRecv = std::chrono::steady_clock::now();
+            m_logSender.info("platform_login_step", "time_sync_ack_ok");
         }
         return;
     }
@@ -2993,6 +3303,8 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         cJSON* startData = nullptr;
         FeeModel parsedFeeModel;
         if (parseRemoteStart0A8(body, decBodyLen, gun, &startData, parsedFeeModel)) {
+            m_logSender.info("platform_remote_start_rx",
+                             std::string("gun=") + std::to_string(static_cast<int>(gun)));
             if (!parsedFeeModel.feeModelId.empty() && gun < m_feeModelByGun.size()) {
                 m_feeModelByGun[gun] = parsedFeeModel;
             }
@@ -3030,6 +3342,8 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         const uint8_t gunNoBcd = (decBodyLen >= 8U) ? body[7] : 0x01;
         cJSON* stopData = nullptr;
         if (parseRemoteStop036(body, decBodyLen, gun, &stopData)) {
+            m_logSender.info("platform_remote_stop_rx",
+                             std::string("gun=") + std::to_string(static_cast<int>(gun)));
             publishPlatCommand(gun, "stop_charge", stopData);
             // BY ZF: 0x35 停机应答成功：停止结果0x01，失败原因0x00。
             (void)sendRemoteStopAck(gunNoBcd, 0x01, 0x00, rxSeq);
@@ -3048,6 +3362,8 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         uint8_t gun = 0;
         cJSON* cfmData = nullptr;
         if (parseRecordConfirm040(body, decBodyLen, gun, &cfmData)) {
+            m_logSender.info("platform_record_confirm_rx",
+                             std::string("gun=") + std::to_string(static_cast<int>(gun)));
             publishPlatCommand(gun, "record_cfm", cfmData);
         }
         if (cfmData) {
@@ -3453,6 +3769,15 @@ bool CommProcess::publishPlatCommand(uint8_t gun, const char* cmd, cJSON* dataOb
     return publishPlatCmd(gun, payload);
 }
 
+std::string CommProcess::buildGunQrCode(uint8_t gun) const
+{
+    // BY ZF: 二维码统一按 “固定前缀 + cdzNo + 两位枪号” 生成。
+    static const char* kQrPrefix = "https://ne.gdsz.sinopec.com/h5/MPAGE/index.html?pNum=";
+    char gunNoText[3] = {0};
+    std::snprintf(gunNoText, sizeof(gunNoText), "%02u", static_cast<unsigned int>(gun + 1));
+    return std::string(kQrPrefix) + m_config.cdzNo + gunNoText;
+}
+
 bool CommProcess::publishSetConfig(uint8_t gun, cJSON* dataObj)
 {
     if (!dataObj) {
@@ -3464,7 +3789,14 @@ bool CommProcess::publishSetConfig(uint8_t gun, cJSON* dataObj)
     cJSON_AddStringToObject(root, "source", "tcu_comm");
     cJSON_AddNumberToObject(root, "gun", gun);
     cJSON_AddStringToObject(root, "type", "setConfig");
-    cJSON_AddItemToObject(root, "data", cJSON_Duplicate(dataObj, 1));
+    cJSON* dataCopy = cJSON_Duplicate(dataObj, 1);
+    if (!dataCopy) {
+        cJSON_Delete(root);
+        return false;
+    }
+    const std::string qrCode = buildGunQrCode(gun);
+    cJSON_ReplaceItemInObject(dataCopy, "qrCode", cJSON_CreateString(qrCode.c_str()));
+    cJSON_AddItemToObject(root, "data", dataCopy);
 
     char* out = cJSON_PrintUnformatted(root);
     std::string payload;
@@ -3475,6 +3807,15 @@ bool CommProcess::publishSetConfig(uint8_t gun, cJSON* dataObj)
     cJSON_Delete(root);
     if (payload.empty()) {
         return false;
+    }
+    if (gun < m_lastSetConfigPayloadByGun.size() && gun < m_lastSetConfigPublishByGun.size()) {
+        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+        const bool samePayload = (m_lastSetConfigPayloadByGun[gun] == payload);
+        if (samePayload && (now - m_lastSetConfigPublishByGun[gun]) < std::chrono::seconds(10)) {
+            return true;
+        }
+        m_lastSetConfigPayloadByGun[gun] = payload;
+        m_lastSetConfigPublishByGun[gun] = now;
     }
     const std::string outTopic = buildTopic("plat", gun, "event");
     return m_mqtt.publish(outTopic, payload, 1, true);
@@ -3544,7 +3885,7 @@ void CommProcess::publishInitialSetConfig()
         cJSON_AddStringToObject(data, "cdzNo", m_config.cdzNo.c_str());
         cJSON_AddStringToObject(data, "factoryCreditCode", m_config.factoryCreditCode.c_str());
         cJSON_AddStringToObject(data, "macAddr", m_config.macAddr.c_str());
-        const std::string qr = (gun < m_config.gunQrCodeList.size()) ? m_config.gunQrCodeList[gun] : "";
+        const std::string qr = buildGunQrCode(gun);
         cJSON_AddStringToObject(data, "qrCode", qr.c_str());
 
         if (!publishSetConfig(gun, data)) {

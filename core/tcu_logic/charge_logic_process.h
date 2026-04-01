@@ -93,8 +93,9 @@ private:
         bool hasTotalFault;                     // 是否收到过 totalFault
         bool hasOtherFault;                     // 是否收到过 otherFault
         bool meterOfflineFaultActive;           // 电表离线故障是否激活
-        bool platformOfflineFaultActive;        // 平台离线故障是否激活
+        bool meterOfflineEventLatched;          // 电表离线事件是否已确认生效
         bool pileOfflineFaultActive;            // 主控心跳超时故障是否激活
+        bool pileOfflineEventLatched;           // 主控离线事件是否已确认生效
         bool hasMeterValue;                     // 是否收到过电量
         double lastMeterValue;                  // 最近电量(kWh)
         bool hasMeterVoltage;                   // 是否收到过电压
@@ -158,6 +159,8 @@ private:
         std::chrono::steady_clock::time_point lastMeterMsgTime;   // 最近电表消息时间
         std::chrono::steady_clock::time_point lastMeterValueTime; // 最近电量变化时间
         std::chrono::steady_clock::time_point lastStopCmdTime;    // 最近 stop_charge 下发时间
+        std::chrono::steady_clock::time_point meterOfflinePendingTime;    // 电表离线待确认开始时间
+        std::chrono::steady_clock::time_point pileOfflinePendingTime;     // 主控离线待确认开始时间
         GunState()
             : state(STATE_IDLE)
             , lastWorkStatus(0)
@@ -168,8 +171,9 @@ private:
             , hasTotalFault(false)
             , hasOtherFault(false)
             , meterOfflineFaultActive(true)
-            , platformOfflineFaultActive(true)
+            , meterOfflineEventLatched(false)
             , pileOfflineFaultActive(true)
+            , pileOfflineEventLatched(false)
             , hasMeterValue(false)
             , lastMeterValue(0.0)
             , hasMeterVoltage(false)
@@ -246,6 +250,8 @@ private:
     int getCurrentMinuteOfDay() const;
     void applyEnergyDeltaToFee(uint8_t gun, double deltaKwh);
     void maybeTriggerTcuStopByPrecharge(uint8_t gun);
+    bool maybeConfirmMeterOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
+    bool maybeConfirmPileOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     // BY ZF: 状态机入口与迁移
     void handleEvent(uint8_t gun, EventType evt, const char* reason);
     void transitionTo(uint8_t gun, ChargeState to, const char* reason);
@@ -262,6 +268,7 @@ private:
     std::thread m_mainThread;            // 主循环线程
     std::vector<std::deque<TradeRecord> > m_unconfirmedRecordBuffer; // 未确认记录缓冲（按枪）
     std::chrono::steady_clock::time_point m_lastReplayTime;          // 上次空闲重发时间
+    std::chrono::steady_clock::time_point m_lastUnconfirmedQueryTime; // 上次向 logger 查询未确认记录时间
     std::mutex m_unconfirmedMutex;                                    // 缓冲互斥锁
 };
 

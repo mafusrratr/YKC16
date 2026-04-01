@@ -23,6 +23,7 @@
 #include <QPixmap>
 #include <QProcess>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QStyledItemDelegate>
 #include <QStackedWidget>
 #include <QStyleOptionButton>
@@ -269,6 +270,9 @@ static bool looksLikeMachineReasonText(const std::string &text)
 
 static QString stopReasonText(const RuntimeWindow::GunUiData &gun)
 {
+    if (gun.state == "ERROR" && !gun.lastFaultMessage.empty()) {
+        return QString::fromUtf8(gun.lastFaultMessage.c_str());
+    }
     const std::string &reason = gun.stopReason;
     if (!reason.empty()) {
         char *endp = 0;
@@ -311,6 +315,17 @@ static QString stopReasonText(const RuntimeWindow::GunUiData &gun)
         return QString::fromUtf8("故障码%1").arg(static_cast<unsigned int>(rawReason));
     }
     return QString::fromUtf8("充电完成");
+}
+
+static QString currentFaultCodeText(const RuntimeWindow::GunUiData &gun)
+{
+    if (!gun.lastFaultPointKey.empty()) {
+        return QString::fromUtf8(gun.lastFaultPointKey.c_str());
+    }
+    if (!gun.stopReason.empty()) {
+        return QString::fromUtf8(gun.stopReason.c_str());
+    }
+    return QString::fromUtf8("--");
 }
 
 static void setLabelText(QWidget *page, const char *name, const QString &text)
@@ -453,7 +468,7 @@ static void setRestrictedAboutTabsEnabled(QTabWidget *tabWidget, bool enabled)
             continue;
         }
         const QString pageName = page->objectName();
-        if (pageName == QString::fromUtf8("tab_10")) {
+        if (pageName == QString::fromUtf8("tab_10") || pageName == QString::fromUtf8("tab_4")) {
             tabWidget->setTabEnabled(i, enabled);
         }
     }
@@ -514,6 +529,99 @@ static bool readFeeModelFromStmt(sqlite3_stmt *stmt, RuntimeWindow::FeeModelData
         }
     }
 
+    return true;
+}
+
+static QString meterConfigPath()
+{
+    const QString targetPath = QString::fromUtf8("/usr/app/config/tcu_meter.ini");
+    const QString fallbackPath = QString::fromUtf8("/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/config/tcu_meter.ini");
+    if (QFileInfo(targetPath).exists()) {
+        return targetPath;
+    }
+    return fallbackPath;
+}
+
+static QString commConfigPath()
+{
+    const QString targetPath = QString::fromUtf8("/usr/app/config/tcu_comm.ini");
+    const QString fallbackPath = QString::fromUtf8("/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/config/tcu_comm.ini");
+    if (QFileInfo(targetPath).exists()) {
+        return targetPath;
+    }
+    return fallbackPath;
+}
+
+static QString pileControllerConfigPath()
+{
+    const QString targetPath = QString::fromUtf8("/usr/app/config/pile_controller.ini");
+    const QString fallbackPath = QString::fromUtf8("/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/config/pile_controller.ini");
+    if (QFileInfo(targetPath).exists()) {
+        return targetPath;
+    }
+    return fallbackPath;
+}
+
+static QString hmiConfigPath()
+{
+    const QString targetPath = QString::fromUtf8("/usr/app/config/tcu_hmi.ini");
+    const QString fallbackPath = QString::fromUtf8("/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/config/tcu_hmi.ini");
+    if (QFileInfo(targetPath).exists()) {
+        return targetPath;
+    }
+    return fallbackPath;
+}
+
+static bool replaceConfigValue(const QString &path, const QString &section, const QString &key, const QString &value)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return false;
+    }
+    QString content = QString::fromUtf8(file.readAll());
+    file.close();
+
+    QStringList lines = content.split(QRegExp(QString::fromUtf8("\r?\n")));
+    bool inMeter = false;
+    bool replaced = false;
+    int insertPos = -1;
+    int i = 0;
+    for (i = 0; i < lines.size(); ++i) {
+        const QString trimmed = lines.at(i).trimmed();
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+            if (inMeter) {
+                break;
+            }
+            inMeter = (trimmed == QString::fromUtf8("[%1]").arg(section));
+            continue;
+        }
+        if (!inMeter) {
+            continue;
+        }
+        if (insertPos < 0) {
+            insertPos = i;
+        }
+        if (trimmed.startsWith(key + "=")) {
+            lines[i] = key + "=" + value;
+            replaced = true;
+            break;
+        }
+    }
+
+    if (!replaced) {
+        if (insertPos < 0) {
+            lines << QString::fromUtf8("[%1]").arg(section);
+            lines << (key + "=" + value);
+        } else {
+            lines.insert(insertPos, key + "=" + value);
+        }
+    }
+
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        return false;
+    }
+    file.write(lines.join(QString::fromUtf8("\n")).toUtf8());
+    file.close();
     return true;
 }
 
@@ -617,8 +725,10 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_faultRecordPage(0)
     , m_faultRecordPageSize(8)
     , m_lastWatchdogFeedMs(0)
+    , m_platformOnline(false)
     , m_stack(new QStackedWidget(this))
     , m_bottomTime(new QLabel(this))
+    , m_bottomHostState(new QLabel(this))
     , m_idlePage(0)
     , m_authorizePage(0)
     , m_chargingPage(0)
@@ -628,12 +738,34 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_aboutPermissionEdit(0)
     , m_aboutPermissionHint(0)
     , m_aboutPermissionPad(0)
+    , m_configPileNoEdit(0)
+    , m_configSecretEdit(0)
+    , m_configMeterAddr1Edit(0)
+    , m_configMeterAddr2Edit(0)
+    , m_configKeyboardTarget(0)
+    , m_configHintLabel(0)
+    , m_configKeyboard(0)
+    , m_configMeter2Row(0)
+    , m_configShiftButton(0)
+    , m_configModeButton(0)
+    , m_configBackspaceButton(0)
+    , m_configClearButton(0)
+    , m_configConfirmButton(0)
+    , m_configGunSingle(0)
+    , m_configGunDual(0)
+    , m_configKeyboardUppercase(false)
+    , m_configKeyboardNumberMode(false)
+    , m_configKeyboardNumericOnly(false)
     , m_feeChart(0)
     , m_faultRecordTable(0)
     , m_faultRecordPageLabel(0)
     , m_chargeRecordTable(0)
     , m_chargeRecordPageLabel(0)
 {
+    int keyIndex = 0;
+    for (keyIndex = 0; keyIndex < 30; ++keyIndex) {
+        m_configKeyButtons[keyIndex] = 0;
+    }
     m_guns[0].gun = 0;
     m_guns[1].gun = 1;
 
@@ -644,6 +776,13 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     m_bottomTime->setStyleSheet("QLabel{color:white;background:transparent;font:20px 'MS Shell Dlg 2';font-weight:bold;}");
     m_bottomTime->show();
     m_bottomTime->raise();
+    m_bottomHostState->setParent(this);
+    m_bottomHostState->setGeometry(592, 445, 42, 32);
+    m_bottomHostState->setAlignment(Qt::AlignCenter);
+    m_bottomHostState->setPixmap(QPixmap(":/cui/Resources/host_not.png"));
+    m_bottomHostState->setScaledContents(false);
+    m_bottomHostState->show();
+    m_bottomHostState->raise();
     connect(&m_uiTimer, SIGNAL(timeout()), this, SLOT(refreshUi()));
 }
 
@@ -809,6 +948,10 @@ void RuntimeWindow::bindStaticUi()
     QPushButton *btnBackCharging = m_chargingPage->findChild<QPushButton *>("btnBack");
     QPushButton *btnBackCheckout = m_checkoutPage->findChild<QPushButton *>("btnBack");
     QPushButton *btnBackAbout = m_aboutPage->findChild<QPushButton *>("btnBack");
+    QLabel *aboutBackText = m_aboutPage->findChild<QLabel *>("label_8");
+    QLabel *aboutBackIcon = m_aboutPage->findChild<QLabel *>("c8_back");
+    QAbstractButton *aboutOldBack = m_aboutPage->findChild<QAbstractButton *>("secback");
+    QAbstractButton *aboutOldConfirm = m_aboutPage->findChild<QAbstractButton *>("secback_2");
     QLabel *idleDatetime = m_idlePage->findChild<QLabel *>("lblDatetimeb");
     QPushButton *btnMergeCharge = m_authorizePage->findChild<QPushButton *>("bbms");
     QPushButton *btnVin = m_authorizePage->findChild<QPushButton *>("vin");
@@ -840,6 +983,18 @@ void RuntimeWindow::bindStaticUi()
     }
     if (btnBackAbout) {
         connect(btnBackAbout, SIGNAL(clicked()), this, SLOT(leaveAboutPage()));
+    }
+    if (aboutBackText) {
+        aboutBackText->hide();
+    }
+    if (aboutBackIcon) {
+        aboutBackIcon->hide();
+    }
+    if (aboutOldBack) {
+        aboutOldBack->hide();
+    }
+    if (aboutOldConfirm) {
+        aboutOldConfirm->hide();
     }
     if (idleDatetime) {
         idleDatetime->hide();
@@ -961,6 +1116,7 @@ void RuntimeWindow::onMqttConnected(int rc)
     m_mqtt.subscribe(p + "/pile/+/data", 0);
     m_mqtt.subscribe(p + "/plat/+/event", 1);
     m_mqtt.subscribe(p + "/plat/+/setConfig", 1);
+    m_mqtt.subscribe(p + "/save/+/event", 1);
     m_mqtt.subscribe(p + "/mon/0/event", 1);
 }
 
@@ -988,6 +1144,13 @@ void RuntimeWindow::onMqttMessage(const std::string &topic, const std::string &p
     if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/plat/", gun, tail)) {
         if (gun <= 1 && (tail == "event" || tail == "setConfig")) {
             handlePlatEvent(gun, payload);
+        }
+        return;
+    }
+
+    if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/save/", gun, tail)) {
+        if (gun <= 1 && tail == "event") {
+            handleSaveEvent(gun, payload);
         }
         return;
     }
@@ -1100,12 +1263,24 @@ void RuntimeWindow::handlePlatEvent(uint8_t gun, const std::string &payload)
 
     cJSON *type = cJSON_GetObjectItem(root, "type");
     cJSON *cmd = cJSON_GetObjectItem(root, "cmd");
+    cJSON *event = cJSON_GetObjectItem(root, "event");
     cJSON *data = cJSON_GetObjectItem(root, "data");
 
     const bool isSetConfigType = (type && cJSON_IsString(type) && type->valuestring &&
         std::strcmp(type->valuestring, "setConfig") == 0);
     const bool isSetConfigCmd = (cmd && cJSON_IsString(cmd) && cmd->valuestring &&
         std::strcmp(cmd->valuestring, "setConfig") == 0);
+    const bool isPlatformOnline = (event && cJSON_IsString(event) && event->valuestring &&
+        std::strcmp(event->valuestring, "platform_online") == 0);
+    const bool isPlatformOffline = (event && cJSON_IsString(event) && event->valuestring &&
+        std::strcmp(event->valuestring, "platform_offline") == 0);
+    if (isPlatformOnline || isPlatformOffline) {
+        QMutexLocker locker(&m_dataMutex);
+        m_platformOnline = isPlatformOnline;
+        cJSON_Delete(root);
+        QMetaObject::invokeMethod(this, "refreshUi", Qt::QueuedConnection);
+        return;
+    }
     if ((!isSetConfigType && !isSetConfigCmd) || !cJSON_IsObject(data)) {
         cJSON_Delete(root);
         return;
@@ -1188,6 +1363,28 @@ void RuntimeWindow::handlePlatEvent(uint8_t gun, const std::string &payload)
     QMetaObject::invokeMethod(this, "refreshUi", Qt::QueuedConnection);
 }
 
+void RuntimeWindow::handleSaveEvent(uint8_t gun, const std::string &payload)
+{
+    cJSON *root = cJSON_Parse(payload.c_str());
+    if (!root) {
+        return;
+    }
+
+    cJSON *type = cJSON_GetObjectItem(root, "type");
+    cJSON *data = cJSON_GetObjectItem(root, "data");
+    if (type && cJSON_IsString(type) && type->valuestring &&
+        std::strcmp(type->valuestring, "Error") == 0 &&
+        cJSON_IsObject(data)) {
+        QMutexLocker locker(&m_dataMutex);
+        m_guns[gun].lastFaultPointKey = getString(data, "pointKey", m_guns[gun].lastFaultPointKey);
+        m_guns[gun].lastFaultMessage = getString(data, "faultMessage", m_guns[gun].lastFaultMessage);
+        m_guns[gun].lastFaultOccurTime = getString(data, "occurTime", m_guns[gun].lastFaultOccurTime);
+    }
+
+    cJSON_Delete(root);
+    QMetaObject::invokeMethod(this, "refreshUi", Qt::QueuedConnection);
+}
+
 void RuntimeWindow::rebuildQrPayload(int gun)
 {
     if (gun < 0 || gun >= static_cast<int>(m_guns.size())) {
@@ -1207,21 +1404,20 @@ void RuntimeWindow::setupAboutTabs()
         return;
     }
 
-    QWidget *aboutTab = m_aboutPage->findChild<QWidget *>("tab_4");
-    int removeIdx = aboutTab ? m_aboutTabWidget->indexOf(aboutTab) : -1;
-    if (removeIdx >= 0) {
-        m_aboutTabWidget->removeTab(removeIdx);
-    }
-
     QWidget *feeTab = m_aboutTabWidget->widget(0);
     QWidget *deviceTab = m_aboutTabWidget->widget(1);
+    QWidget *configTab = m_aboutPage->findChild<QWidget *>("tab_4");
     QWidget *permissionTab = m_aboutPage->findChild<QWidget *>("tab_6");
-    if (!feeTab || !deviceTab || !permissionTab) {
+    if (!feeTab || !deviceTab || !configTab || !permissionTab) {
         return;
     }
 
     m_aboutTabWidget->setTabText(0, QString::fromUtf8("分时信息"));
     m_aboutTabWidget->setTabText(1, QString::fromUtf8("设备信息"));
+    int configIdx = m_aboutTabWidget->indexOf(configTab);
+    if (configIdx >= 0) {
+        m_aboutTabWidget->setTabText(configIdx, QString::fromUtf8("参数配置"));
+    }
 
     QList<QWidget *> feeChildren;
     const QObjectList feeObjects = feeTab->children();
@@ -1419,6 +1615,7 @@ void RuntimeWindow::setupAboutTabs()
     setRestrictedAboutTabsEnabled(m_aboutTabWidget, m_aboutPermissionGranted);
     setupFaultRecordTab();
     setupChargeRecordTab();
+    setupConfigTab();
     setupExternalStorageTab();
 }
 
@@ -2047,9 +2244,13 @@ void RuntimeWindow::refreshUi()
         focusGun = m_focusGun;
         showAbout = m_showAbout;
         forceIdleView = m_forceIdleView;
+        const bool platformOnline = m_platformOnline;
+        m_bottomHostState->setPixmap(QPixmap(platformOnline ? ":/cui/Resources/host_yes.png"
+                                                            : ":/cui/Resources/host_not.png"));
     }
     m_bottomTime->setText(nowText);
     m_bottomTime->raise();
+    m_bottomHostState->raise();
     if (focusGun < 0 || focusGun >= static_cast<int>(guns.size())) {
         focusGun = 0;
     }
@@ -2144,6 +2345,9 @@ void RuntimeWindow::leaveAboutPage()
     if (m_aboutPermissionPad) {
         m_aboutPermissionPad->hide();
     }
+    if (m_configKeyboard) {
+        m_configKeyboard->hide();
+    }
     setRestrictedAboutTabsEnabled(m_aboutTabWidget, false);
     if (m_aboutTabWidget) {
         m_aboutTabWidget->setCurrentIndex(0);
@@ -2227,10 +2431,17 @@ void RuntimeWindow::handleAboutTabChanged(int index)
     }
 
     const QString tabName = currentTab->objectName();
-    const bool restricted = (tabName == QString::fromUtf8("tab_10"));
+    const bool restricted = (tabName == QString::fromUtf8("tab_10") || tabName == QString::fromUtf8("tab_4"));
     if (!restricted || m_aboutPermissionGranted) {
         if (tabName == QString::fromUtf8("tab_10")) {
             scanExternalStorage();
+        }
+        if (tabName == QString::fromUtf8("tab_4")) {
+            loadMeterConfigToUi();
+            loadCommConfigToUi();
+        }
+        if (tabName != QString::fromUtf8("tab_4") && m_configKeyboard) {
+            m_configKeyboard->hide();
         }
         return;
     }
@@ -2244,6 +2455,207 @@ void RuntimeWindow::handleAboutTabChanged(int index)
         m_aboutPermissionHint->setText(QString::fromUtf8("请先输入密码获取权限"));
         m_aboutPermissionHint->setStyleSheet("QLabel{color:rgb(160,60,60);background:transparent;font:14px 'MS Shell Dlg 2';font-weight:bold;}");
     }
+}
+
+void RuntimeWindow::setupConfigTab()
+{
+    if (!m_aboutPage || !m_aboutTabWidget) {
+        return;
+    }
+
+    QWidget *configTab = m_aboutPage->findChild<QWidget *>("tab_4");
+    if (!configTab) {
+        return;
+    }
+
+    QList<QWidget *> tabChildren;
+    const QObjectList tabObjects = configTab->children();
+    int i = 0;
+    for (i = 0; i < tabObjects.size(); ++i) {
+        QWidget *child = qobject_cast<QWidget *>(tabObjects.at(i));
+        if (child && child->parent() == configTab) {
+            tabChildren.append(child);
+        }
+    }
+    for (i = 0; i < tabChildren.size(); ++i) {
+        tabChildren.at(i)->hide();
+    }
+
+    QWidget *configOverlay = configTab->findChild<QWidget *>("configOverlay");
+    if (configOverlay) {
+        return;
+    }
+
+    configOverlay = new QWidget(configTab);
+    configOverlay->setObjectName("configOverlay");
+    configOverlay->setGeometry(0, 0, 755, 345);
+    configOverlay->setStyleSheet("background:transparent;");
+
+    QFrame *leftCard = static_cast<QFrame *>(makeInfoCard(configOverlay, QString::fromUtf8("参数配置"), QRect(12, 10, 300, 314)));
+    QFrame *rightCard = static_cast<QFrame *>(makeInfoCard(configOverlay, QString(), QRect(320, 10, 423, 314)));
+
+    QLabel *labelPileNo = new QLabel(QString::fromUtf8("充电桩号"), leftCard);
+    labelPileNo->setGeometry(20, 48, 96, 28);
+    labelPileNo->setStyleSheet("QLabel{color:rgb(38,45,52);background:transparent;font:15px 'MS Shell Dlg 2';font-weight:bold;}");
+
+    m_configPileNoEdit = new QLineEdit(leftCard);
+    m_configPileNoEdit->setGeometry(112, 46, 172, 34);
+    m_configPileNoEdit->setReadOnly(true);
+    m_configPileNoEdit->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_configPileNoEdit->setStyleSheet("QLineEdit{background:white;border:1px solid rgb(160,160,160);border-radius:6px;color:rgb(38,45,52);font:15px 'MS Shell Dlg 2';padding:2px 8px;}");
+
+    QPushButton *pileMask = new QPushButton(leftCard);
+    pileMask->setObjectName("btnConfigEdit_pile");
+    pileMask->setGeometry(m_configPileNoEdit->geometry());
+    pileMask->setFlat(true);
+    pileMask->setStyleSheet("QPushButton{background:transparent;border:none;}");
+    connect(pileMask, SIGNAL(clicked()), this, SLOT(onConfigEditMaskClicked()));
+
+    QLabel *labelGunCount = new QLabel(QString::fromUtf8("枪数"), leftCard);
+    labelGunCount->setGeometry(20, 94, 96, 28);
+    labelGunCount->setStyleSheet(labelPileNo->styleSheet());
+
+    m_configGunSingle = new QRadioButton(QString::fromUtf8("单枪"), leftCard);
+    m_configGunSingle->setObjectName("radioConfigSingle");
+    m_configGunSingle->setGeometry(114, 94, 72, 28);
+    m_configGunSingle->setStyleSheet("QRadioButton{color:rgb(38,45,52);font:15px 'MS Shell Dlg 2';font-weight:bold;background:transparent;}");
+    connect(m_configGunSingle, SIGNAL(clicked()), this, SLOT(onConfigGunCountChanged()));
+
+    m_configGunDual = new QRadioButton(QString::fromUtf8("双枪"), leftCard);
+    m_configGunDual->setObjectName("radioConfigDual");
+    m_configGunDual->setGeometry(198, 94, 72, 28);
+    m_configGunDual->setStyleSheet(m_configGunSingle->styleSheet());
+    connect(m_configGunDual, SIGNAL(clicked()), this, SLOT(onConfigGunCountChanged()));
+    if (m_gunCount <= 1) {
+        m_configGunSingle->setChecked(true);
+    } else {
+        m_configGunDual->setChecked(true);
+    }
+
+    QLabel *labelSecret = new QLabel(QString::fromUtf8("充电桩密钥"), leftCard);
+    labelSecret->setGeometry(20, 140, 96, 28);
+    labelSecret->setStyleSheet(labelPileNo->styleSheet());
+
+    m_configSecretEdit = new QLineEdit(leftCard);
+    m_configSecretEdit->setGeometry(112, 138, 172, 34);
+    m_configSecretEdit->setReadOnly(true);
+    m_configSecretEdit->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_configSecretEdit->setStyleSheet(m_configPileNoEdit->styleSheet());
+    m_configSecretEdit->setText(QString::fromUtf8("xMa3mXJG"));
+
+    QPushButton *secretMask = new QPushButton(leftCard);
+    secretMask->setObjectName("btnConfigEdit_secret");
+    secretMask->setGeometry(m_configSecretEdit->geometry());
+    secretMask->setFlat(true);
+    secretMask->setStyleSheet("QPushButton{background:transparent;border:none;}");
+    connect(secretMask, SIGNAL(clicked()), this, SLOT(onConfigEditMaskClicked()));
+
+    QLabel *labelAddr1 = new QLabel(QString::fromUtf8("电表地址1"), leftCard);
+    labelAddr1->setGeometry(20, 186, 96, 28);
+    labelAddr1->setStyleSheet(labelPileNo->styleSheet());
+
+    m_configMeterAddr1Edit = new QLineEdit(leftCard);
+    m_configMeterAddr1Edit->setGeometry(112, 184, 172, 34);
+    m_configMeterAddr1Edit->setReadOnly(true);
+    m_configMeterAddr1Edit->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_configMeterAddr1Edit->setStyleSheet(m_configPileNoEdit->styleSheet());
+
+    QPushButton *addr1Mask = new QPushButton(leftCard);
+    addr1Mask->setObjectName("btnConfigEdit_meter1");
+    addr1Mask->setGeometry(m_configMeterAddr1Edit->geometry());
+    addr1Mask->setFlat(true);
+    addr1Mask->setStyleSheet("QPushButton{background:transparent;border:none;}");
+    connect(addr1Mask, SIGNAL(clicked()), this, SLOT(onConfigEditMaskClicked()));
+
+    m_configMeter2Row = new QWidget(leftCard);
+    m_configMeter2Row->setObjectName("configMeter2Row");
+    m_configMeter2Row->setGeometry(0, 226, 300, 44);
+    m_configMeter2Row->setStyleSheet("background:transparent;");
+
+    QLabel *labelAddr2 = new QLabel(QString::fromUtf8("电表地址2"), m_configMeter2Row);
+    labelAddr2->setGeometry(20, 6, 96, 28);
+    labelAddr2->setStyleSheet(labelPileNo->styleSheet());
+
+    m_configMeterAddr2Edit = new QLineEdit(m_configMeter2Row);
+    m_configMeterAddr2Edit->setGeometry(112, 4, 172, 34);
+    m_configMeterAddr2Edit->setReadOnly(true);
+    m_configMeterAddr2Edit->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    m_configMeterAddr2Edit->setStyleSheet(m_configPileNoEdit->styleSheet());
+
+    QPushButton *addr2Mask = new QPushButton(m_configMeter2Row);
+    addr2Mask->setObjectName("btnConfigEdit_meter2");
+    addr2Mask->setGeometry(m_configMeterAddr2Edit->geometry());
+    addr2Mask->setFlat(true);
+    addr2Mask->setStyleSheet("QPushButton{background:transparent;border:none;}");
+    connect(addr2Mask, SIGNAL(clicked()), this, SLOT(onConfigEditMaskClicked()));
+
+    QPushButton *btnReset = new QPushButton(QString::fromUtf8("重置"), leftCard);
+    btnReset->setGeometry(18, 274, 116, 28);
+    btnReset->setStyleSheet("QPushButton{background:rgb(232,234,236);border:1px solid rgb(150,150,150);border-radius:8px;color:rgb(38,45,52);font:14px 'MS Shell Dlg 2';font-weight:bold;}");
+    connect(btnReset, SIGNAL(clicked()), this, SLOT(onConfigResetClicked()));
+
+    QPushButton *btnSubmit = new QPushButton(QString::fromUtf8("确认"), leftCard);
+    btnSubmit->setGeometry(168, 274, 116, 28);
+    btnSubmit->setStyleSheet("QPushButton{background:rgb(72,148,196);border:1px solid rgb(110,110,110);border-radius:8px;color:white;font:14px 'MS Shell Dlg 2';font-weight:bold;}");
+    connect(btnSubmit, SIGNAL(clicked()), this, SLOT(onConfigSubmitClicked()));
+
+    m_configHintLabel = new QLabel(QString(), leftCard);
+    m_configHintLabel->setGeometry(112, 230, 172, 22);
+    m_configHintLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_configHintLabel->setStyleSheet("QLabel{color:rgb(160,100,40);background:transparent;font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+    m_configHintLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    if (m_configMeter2Row) {
+        m_configMeter2Row->raise();
+    }
+
+    m_configKeyboard = new QFrame(rightCard);
+    m_configKeyboard->setObjectName("configKeyboard");
+    m_configKeyboard->setGeometry(10, 16, 403, 286);
+    m_configKeyboard->setStyleSheet("QFrame{background:rgb(236,238,239);border:1px solid rgb(160,160,160);border-radius:10px;}");
+
+    for (i = 0; i < 30; ++i) {
+        QPushButton *key = new QPushButton(m_configKeyboard);
+        key->setObjectName(QString::fromUtf8("btnConfigKey_%1").arg(i));
+        key->setGeometry(10 + (i % 10) * 39, 12 + (i / 10) * 52, 35, 42);
+        key->setStyleSheet("QPushButton{background:white;border:1px solid rgb(150,150,150);border-radius:5px;color:rgb(38,45,52);font:17px 'MS Shell Dlg 2';font-weight:bold;}"
+                           "QPushButton:pressed{background:rgb(214,217,219);}");
+        connect(key, SIGNAL(clicked()), this, SLOT(onConfigKeyboardButtonClicked()));
+        m_configKeyButtons[i] = key;
+    }
+
+    m_configShiftButton = new QPushButton(QString::fromUtf8("Shift"), m_configKeyboard);
+    m_configShiftButton->setObjectName("btnConfigShift");
+    m_configShiftButton->setGeometry(10, 220, 74, 42);
+    m_configShiftButton->setStyleSheet("QPushButton{background:rgb(232,234,236);border:1px solid rgb(150,150,150);border-radius:5px;color:rgb(38,45,52);font:15px 'MS Shell Dlg 2';font-weight:bold;}");
+    connect(m_configShiftButton, SIGNAL(clicked()), this, SLOT(onConfigKeyboardButtonClicked()));
+
+    m_configModeButton = new QPushButton(QString::fromUtf8("123"), m_configKeyboard);
+    m_configModeButton->setObjectName("btnConfigMode");
+    m_configModeButton->setGeometry(92, 220, 74, 42);
+    m_configModeButton->setStyleSheet(m_configShiftButton->styleSheet());
+    connect(m_configModeButton, SIGNAL(clicked()), this, SLOT(onConfigKeyboardButtonClicked()));
+
+    m_configClearButton = new QPushButton(QString::fromUtf8("清空"), m_configKeyboard);
+    m_configClearButton->setObjectName("btnConfigClear");
+    m_configClearButton->setGeometry(174, 220, 74, 42);
+    m_configClearButton->setStyleSheet(m_configShiftButton->styleSheet());
+    connect(m_configClearButton, SIGNAL(clicked()), this, SLOT(onConfigKeyboardButtonClicked()));
+
+    m_configBackspaceButton = new QPushButton(QString::fromUtf8("退格"), m_configKeyboard);
+    m_configBackspaceButton->setObjectName("btnConfigBackspace");
+    m_configBackspaceButton->setGeometry(256, 220, 74, 42);
+    m_configBackspaceButton->setStyleSheet(m_configShiftButton->styleSheet());
+    connect(m_configBackspaceButton, SIGNAL(clicked()), this, SLOT(onConfigKeyboardButtonClicked()));
+
+    m_configConfirmButton = new QPushButton(QString::fromUtf8("完成"), m_configKeyboard);
+    m_configConfirmButton->setObjectName("btnConfigFinish");
+    m_configConfirmButton->setGeometry(338, 220, 54, 42);
+    m_configConfirmButton->setStyleSheet("QPushButton{background:rgb(72,148,196);border:1px solid rgb(110,110,110);border-radius:5px;color:white;font:15px 'MS Shell Dlg 2';font-weight:bold;}");
+    connect(m_configConfirmButton, SIGNAL(clicked()), this, SLOT(onConfigKeyboardButtonClicked()));
+
+    onConfigGunCountChanged();
+    refreshConfigKeyboardLayout();
+    configOverlay->show();
 }
 
 void RuntimeWindow::setupExternalStorageTab()
@@ -2621,6 +3033,386 @@ void RuntimeWindow::onStorageUpgradeClicked()
                              QString::fromUtf8("升级请求已发送\n%1").arg(installPackagePath));
 }
 
+void RuntimeWindow::openConfigKeyboard(QLineEdit *target, bool numericOnly)
+{
+    if (!target || !m_configKeyboard) {
+        return;
+    }
+    m_configKeyboardTarget = target;
+    m_configKeyboardNumericOnly = numericOnly;
+    m_configKeyboardNumberMode = numericOnly;
+    if (numericOnly) {
+        m_configKeyboardUppercase = false;
+    }
+    refreshConfigKeyboardLayout();
+    m_configKeyboard->show();
+    m_configKeyboard->raise();
+}
+
+void RuntimeWindow::refreshConfigKeyboardLayout()
+{
+    static const char *upperKeys[26] = {
+        "Q","W","E","R","T","Y","U","I","O","P",
+        "A","S","D","F","G","H","J","K","L",
+        "Z","X","C","V","B","N","M"
+    };
+    static const char *lowerKeys[26] = {
+        "q","w","e","r","t","y","u","i","o","p",
+        "a","s","d","f","g","h","j","k","l",
+        "z","x","c","v","b","n","m"
+    };
+    static const char *numberKeys[10] = {
+        "1","2","3","4","5","6","7","8","9","0"
+    };
+
+    int i = 0;
+    for (i = 0; i < 30; ++i) {
+        if (!m_configKeyButtons[i]) {
+            continue;
+        }
+        QString text;
+        bool visible = false;
+        if (m_configKeyboardNumberMode) {
+            if (i < 10) {
+                text = QString::fromLatin1(numberKeys[i]);
+                visible = !text.isEmpty();
+            }
+        } else {
+            if (i < 26) {
+                text = QString::fromLatin1(m_configKeyboardUppercase ? upperKeys[i] : lowerKeys[i]);
+                visible = true;
+            }
+        }
+        m_configKeyButtons[i]->setText(text);
+        m_configKeyButtons[i]->setVisible(visible);
+        m_configKeyButtons[i]->setEnabled(visible);
+        if (m_configKeyboardNumberMode) {
+            if (visible) {
+                int x = 0;
+                int y = 0;
+                if (i < 9) {
+                    x = 56 + (i % 3) * 108;
+                    y = 16 + (i / 3) * 54;
+                } else {
+                    x = 164;
+                    y = 178;
+                }
+                m_configKeyButtons[i]->setGeometry(x, y, 92, 46);
+            }
+        } else {
+            m_configKeyButtons[i]->setGeometry(10 + (i % 10) * 39, 12 + (i / 10) * 52, 35, 42);
+        }
+    }
+
+    if (m_configShiftButton) {
+        m_configShiftButton->setVisible(!m_configKeyboardNumberMode && !m_configKeyboardNumericOnly);
+        m_configShiftButton->setText(m_configKeyboardUppercase ? QString::fromUtf8("abc") : QString::fromUtf8("ABC"));
+    }
+    if (m_configModeButton) {
+        if (m_configKeyboardNumericOnly) {
+            m_configModeButton->setVisible(false);
+        } else {
+            m_configModeButton->setVisible(true);
+            m_configModeButton->setText(m_configKeyboardNumberMode ? QString::fromUtf8("ABC") : QString::fromUtf8("123"));
+        }
+    }
+    if (m_configClearButton) {
+        m_configClearButton->setVisible(!m_configKeyboardNumberMode);
+    }
+    if (m_configBackspaceButton) {
+        if (m_configKeyboardNumberMode) {
+            m_configBackspaceButton->setText(QString::fromUtf8("删除"));
+            m_configBackspaceButton->setGeometry(56, 178, 92, 46);
+            m_configBackspaceButton->setStyleSheet("QPushButton{background:rgb(232,234,236);border:1px solid rgb(150,150,150);border-radius:5px;color:rgb(38,45,52);font:15px 'MS Shell Dlg 2';font-weight:bold;}");
+        } else {
+            m_configBackspaceButton->setText(QString::fromUtf8("退格"));
+            m_configBackspaceButton->setGeometry(256, 220, 74, 42);
+            m_configBackspaceButton->setStyleSheet(m_configShiftButton ? m_configShiftButton->styleSheet() : QString());
+        }
+    }
+    if (m_configConfirmButton) {
+        if (m_configKeyboardNumberMode) {
+            m_configConfirmButton->setGeometry(272, 178, 92, 46);
+            m_configConfirmButton->setStyleSheet("QPushButton{background:rgb(72,148,196);border:1px solid rgb(110,110,110);border-radius:5px;color:white;font:15px 'MS Shell Dlg 2';font-weight:bold;}");
+        } else {
+            m_configConfirmButton->setGeometry(338, 220, 54, 42);
+            m_configConfirmButton->setStyleSheet("QPushButton{background:rgb(72,148,196);border:1px solid rgb(110,110,110);border-radius:5px;color:white;font:15px 'MS Shell Dlg 2';font-weight:bold;}");
+        }
+    }
+}
+
+void RuntimeWindow::onConfigEditMaskClicked()
+{
+    QObject *src = sender();
+    if (!src) {
+        return;
+    }
+
+    if (src->objectName() == QString::fromUtf8("btnConfigEdit_pile")) {
+        openConfigKeyboard(m_configPileNoEdit, true);
+    } else if (src->objectName() == QString::fromUtf8("btnConfigEdit_secret")) {
+        openConfigKeyboard(m_configSecretEdit, false);
+    } else if (src->objectName() == QString::fromUtf8("btnConfigEdit_meter1")) {
+        openConfigKeyboard(m_configMeterAddr1Edit, true);
+    } else if (src->objectName() == QString::fromUtf8("btnConfigEdit_meter2")) {
+        openConfigKeyboard(m_configMeterAddr2Edit, true);
+    }
+}
+
+void RuntimeWindow::onConfigKeyboardButtonClicked()
+{
+    if (!m_configKeyboardTarget) {
+        return;
+    }
+
+    QObject *src = sender();
+    QPushButton *btn = qobject_cast<QPushButton *>(src);
+    if (!btn) {
+        return;
+    }
+
+    const QString objName = btn->objectName();
+    if (objName == QString::fromUtf8("btnConfigShift")) {
+        m_configKeyboardUppercase = !m_configKeyboardUppercase;
+        refreshConfigKeyboardLayout();
+        return;
+    }
+    if (objName == QString::fromUtf8("btnConfigMode")) {
+        m_configKeyboardNumberMode = !m_configKeyboardNumberMode;
+        refreshConfigKeyboardLayout();
+        return;
+    }
+    if (objName == QString::fromUtf8("btnConfigBackspace")) {
+        QString text = m_configKeyboardTarget->text();
+        if (!text.isEmpty()) {
+            text.chop(1);
+            m_configKeyboardTarget->setText(text);
+        }
+        return;
+    }
+    if (objName == QString::fromUtf8("btnConfigClear")) {
+        m_configKeyboardTarget->clear();
+        return;
+    }
+    if (objName == QString::fromUtf8("btnConfigFinish")) {
+        if (m_configKeyboard) {
+            m_configKeyboard->hide();
+        }
+        if (m_configHintLabel) {
+            m_configHintLabel->setText(QString());
+            m_configHintLabel->setStyleSheet("QLabel{color:rgb(160,100,40);background:transparent;font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+        }
+        return;
+    }
+
+    const QString keyText = btn->text();
+    if (keyText.isEmpty()) {
+        return;
+    }
+    m_configKeyboardTarget->setText(m_configKeyboardTarget->text() + keyText);
+}
+
+void RuntimeWindow::onConfigGunCountChanged()
+{
+    const bool dual = (m_configGunDual && m_configGunDual->isChecked());
+    if (m_configMeter2Row) {
+        m_configMeter2Row->setVisible(dual);
+    }
+    if (!dual && m_configMeterAddr2Edit) {
+        m_configMeterAddr2Edit->clear();
+    }
+    if (m_configHintLabel) {
+        m_configHintLabel->setText(QString());
+        m_configHintLabel->setStyleSheet("QLabel{color:rgb(160,100,40);background:transparent;font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+}
+
+void RuntimeWindow::loadMeterConfigToUi()
+{
+    if (!m_configGunSingle || !m_configGunDual || !m_configMeterAddr1Edit || !m_configMeterAddr2Edit) {
+        return;
+    }
+
+    ConfigManagerLite &cfg = ConfigManagerLite::getInstance();
+    int gunCount = 1;
+    QString meterAddr1;
+    QString meterAddr2;
+    if (cfg.loadConfig(meterConfigPath().toStdString())) {
+        gunCount = cfg.getInt("Meter", "gun_count", 1);
+        meterAddr1 = QString::fromStdString(cfg.getString("Meter", "gun1_meter_addr", ""));
+        meterAddr2 = QString::fromStdString(cfg.getString("Meter", "gun2_meter_addr", ""));
+    }
+
+    if (gunCount <= 1) {
+        m_configGunSingle->setChecked(true);
+    } else {
+        m_configGunDual->setChecked(true);
+    }
+    m_configMeterAddr1Edit->setText(meterAddr1);
+    m_configMeterAddr2Edit->setText(meterAddr2);
+    onConfigGunCountChanged();
+}
+
+void RuntimeWindow::loadCommConfigToUi()
+{
+    if (!m_configSecretEdit || !m_configPileNoEdit) {
+        return;
+    }
+
+    ConfigManagerLite &cfg = ConfigManagerLite::getInstance();
+    QString loginId = QString::fromUtf8("xMa3mXJG");
+    QString pileNo;
+    if (cfg.loadConfig(commConfigPath().toStdString())) {
+        pileNo = QString::fromStdString(cfg.getString("Comm", "cdz_no", ""));
+        const std::string value = cfg.getString("Comm", "login_id", "xMa3mXJG");
+        loginId = QString::fromStdString(value);
+    }
+    m_configPileNoEdit->setText(pileNo);
+    m_configSecretEdit->setText(loginId);
+}
+
+bool RuntimeWindow::saveMeterConfigFromUi()
+{
+    if (!m_configGunSingle || !m_configGunDual || !m_configMeterAddr1Edit || !m_configMeterAddr2Edit) {
+        return false;
+    }
+
+    const QString meterAddr1 = m_configMeterAddr1Edit->text().trimmed();
+    const QString meterAddr2 = m_configMeterAddr2Edit->text().trimmed();
+    const int gunCount = (m_configGunDual && m_configGunDual->isChecked()) ? 2 : 1;
+    if (meterAddr1.isEmpty()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("请填写电表地址1"));
+        return false;
+    }
+    if (gunCount > 1 && meterAddr2.isEmpty()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("双枪模式请填写电表地址2"));
+        return false;
+    }
+
+    const QString cfgPath = meterConfigPath();
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("Meter"), QString::fromUtf8("gun_count"), QString::number(gunCount))) {
+        return false;
+    }
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("Meter"), QString::fromUtf8("gun1_meter_addr"), meterAddr1)) {
+        return false;
+    }
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("Meter"), QString::fromUtf8("gun2_meter_addr"), gunCount > 1 ? meterAddr2 : QString())) {
+        return false;
+    }
+    return true;
+}
+
+bool RuntimeWindow::saveCommConfigFromUi()
+{
+    if (!m_configSecretEdit || !m_configPileNoEdit || !m_configGunSingle || !m_configGunDual) {
+        return false;
+    }
+
+    const QString pileNo = m_configPileNoEdit->text().trimmed();
+    const QString loginId = m_configSecretEdit->text().trimmed();
+    const int gunCount = (m_configGunDual && m_configGunDual->isChecked()) ? 2 : 1;
+    if (pileNo.isEmpty()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("请填写充电桩号"));
+        return false;
+    }
+    if (loginId.isEmpty()) {
+        QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("请填写充电桩密钥"));
+        return false;
+    }
+
+    const QString cfgPath = commConfigPath();
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("Comm"), QString::fromUtf8("gun_count"), QString::number(gunCount))) {
+        return false;
+    }
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("Comm"), QString::fromUtf8("cdz_no"), pileNo)) {
+        return false;
+    }
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("Comm"), QString::fromUtf8("login_id"), loginId)) {
+        return false;
+    }
+    return true;
+}
+
+bool RuntimeWindow::saveHmiConfigFromUi()
+{
+    if (!m_configGunSingle || !m_configGunDual) {
+        return false;
+    }
+
+    const int gunCount = (m_configGunDual && m_configGunDual->isChecked()) ? 2 : 1;
+    const QString cfgPath = hmiConfigPath();
+    return replaceConfigValue(cfgPath, QString::fromUtf8("Hmi"), QString::fromUtf8("gun_count"), QString::number(gunCount));
+}
+
+bool RuntimeWindow::savePileConfigFromUi()
+{
+    if (!m_configGunSingle || !m_configGunDual) {
+        return false;
+    }
+
+    const int gunCount = (m_configGunDual && m_configGunDual->isChecked()) ? 2 : 1;
+    const QString cfgPath = pileControllerConfigPath();
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("PileController"), QString::fromUtf8("gun_count"), QString::number(gunCount))) {
+        return false;
+    }
+    if (gunCount <= 1) {
+        if (!replaceConfigValue(cfgPath, QString::fromUtf8("PileController"), QString::fromUtf8("gun1_cdz_addr"), QString::fromUtf8("0xF6"))) {
+            return false;
+        }
+        if (!replaceConfigValue(cfgPath, QString::fromUtf8("PileController"), QString::fromUtf8("gun2_cdz_addr"), QString::fromUtf8("0xE2"))) {
+            return false;
+        }
+    } else {
+        if (!replaceConfigValue(cfgPath, QString::fromUtf8("PileController"), QString::fromUtf8("gun1_cdz_addr"), QString::fromUtf8("0xE0"))) {
+            return false;
+        }
+        if (!replaceConfigValue(cfgPath, QString::fromUtf8("PileController"), QString::fromUtf8("gun2_cdz_addr"), QString::fromUtf8("0xE1"))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void RuntimeWindow::onConfigSubmitClicked()
+{
+    if (m_configKeyboard) {
+        m_configKeyboard->hide();
+    }
+    const bool meterOk = saveMeterConfigFromUi();
+    const bool commOk = saveCommConfigFromUi();
+    const bool hmiOk = saveHmiConfigFromUi();
+    const bool pileOk = savePileConfigFromUi();
+    if (meterOk && commOk && hmiOk && pileOk) {
+        if (m_configHintLabel) {
+            m_configHintLabel->setText(QString::fromUtf8("配置已写入，5秒后重启"));
+            m_configHintLabel->setStyleSheet("QLabel{color:rgb(32,132,82);background:transparent;font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+        }
+        QTimer::singleShot(5000, this, SLOT(rebootSystem()));
+    } else if (m_configHintLabel) {
+        m_configHintLabel->setText(QString::fromUtf8("写入失败"));
+        m_configHintLabel->setStyleSheet("QLabel{color:rgb(160,60,60);background:transparent;font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+}
+
+void RuntimeWindow::onConfigResetClicked()
+{
+    loadMeterConfigToUi();
+    loadCommConfigToUi();
+    if (m_configKeyboard) {
+        m_configKeyboard->hide();
+    }
+    if (m_configHintLabel) {
+        m_configHintLabel->setText(QString());
+        m_configHintLabel->setStyleSheet("QLabel{color:rgb(72,84,94);background:transparent;font:13px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+}
+
+void RuntimeWindow::rebootSystem()
+{
+    // BY ZF: 参数配置确认后延时重启，使各进程按新配置完整重载。
+    QProcess::startDetached(QString::fromUtf8("reboot"));
+}
+
 bool RuntimeWindow::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_aboutPermissionEdit && event &&
@@ -2848,7 +3640,8 @@ void RuntimeWindow::applyIdleLayout()
 void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
 {
     const bool hasExtraEntry = m_config.enableMergeChargeEntry || m_config.enableVinEntry || m_config.enableCardEntry;
-    const bool inserted = (gun.state != "IDLE");
+    const bool isError = (gun.state == "ERROR");
+    const bool inserted = (gun.state != "IDLE" && !isError);
     setLabelText(m_authorizePage, "lblPole", QString::fromUtf8("%1枪").arg(gun.gun == 0 ? "A" : "B"));
     setLabelText(m_authorizePage, "label_id", QString::fromStdString(m_cdzNo.empty() ? m_cdzId : m_cdzNo));
 
@@ -2915,10 +3708,26 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
         }
     }
     if (tips) {
-        tips->hide();
+        if (isError) {
+            tips->setText(QString::fromUtf8("当前故障代码：%1").arg(currentFaultCodeText(gun)));
+            tips->setGeometry(80, 322, 640, 38);
+            tips->setAlignment(Qt::AlignCenter);
+            tips->setStyleSheet("QLabel{color:white;font-weight:bold;background:transparent;font:26px 'MS Shell Dlg 2';}");
+            tips->show();
+            tips->raise();
+        } else {
+            tips->hide();
+        }
     }
     if (tips2) {
-        if (inserted) {
+        if (isError) {
+            tips2->setText(QString::fromUtf8("故障名称：%1").arg(stopReasonText(gun)));
+            tips2->setStyleSheet("QLabel{color:white;font-weight:bold;background:transparent;font:26px 'MS Shell Dlg 2';}");
+            tips2->setGeometry(50, 364, 700, 44);
+            tips2->setAlignment(Qt::AlignCenter);
+            tips2->show();
+            tips2->raise();
+        } else if (inserted) {
             tips2->setText(QString::fromUtf8("扫码启动充电"));
             tips2->setStyleSheet("QLabel{color:white;font-weight:bold;background:transparent;}");
             if (hasExtraEntry) {
@@ -2939,12 +3748,12 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
         labelMs->hide();
     }
     if (qcq) {
-        QPixmap qcqPixmap(":/cui/Resources/qcq.png");
+        QPixmap qcqPixmap(isError ? ":/cui/Resources/error.png" : ":/cui/Resources/qcq.png");
         qcq->setPixmap(qcqPixmap);
         qcq->setScaledContents(false);
-        if (!inserted && !qcqPixmap.isNull()) {
+        if ((!inserted || isError) && !qcqPixmap.isNull()) {
             const int x = (800 - qcqPixmap.width()) / 2;
-            const int y = (480 - qcqPixmap.height()) / 2;
+            const int y = isError ? 104 : (480 - qcqPixmap.height()) / 2;
             qcq->setGeometry(x, y, qcqPixmap.width(), qcqPixmap.height());
             qcq->show();
             qcq->raise();
@@ -3085,6 +3894,9 @@ RuntimeWindow::PageId RuntimeWindow::decidePage(const std::vector<GunUiData> &gu
             return PageAuthorize;
         }
         if (state == "IDLE") {
+            return PageAuthorize;
+        }
+        if (state == "ERROR") {
             return PageAuthorize;
         }
         if (state == "STOPPED") {
