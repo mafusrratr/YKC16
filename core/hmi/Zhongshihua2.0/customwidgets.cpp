@@ -304,6 +304,10 @@ void FeeModelChartWidget::paintEvent(QPaintEvent *event)
 
     const double pxPerMinute = chartRect.width() / 1440.0;
     const int count = m_bars.size();
+    QVector<QRect> barRects;
+    QVector<double> barTotals;
+    barRects.reserve(count);
+    barTotals.reserve(count);
     for (i = 0; i < count; ++i) {
         const FeeBarData &bar = m_bars.at(i);
         QString startText = bar.startTime;
@@ -342,12 +346,30 @@ void FeeModelChartWidget::paintEvent(QPaintEvent *event)
         const int serviceHeight = qMax(1, totalHeight - chargeHeight);
         painter.setBrush(serviceColor);
         painter.drawRect(QRect(x, y, barWidth, serviceHeight));
+        barRects.append(QRect(x, y, barWidth, totalHeight));
+        barTotals.append(bar.chargeFee + bar.serviceFee);
+    }
 
-        painter.setPen(QColor(38, 45, 52));
-        painter.setFont(totalFont);
-        painter.drawText(QRect(x - 16, y - 18, barWidth + 32, 16),
+    painter.setPen(QColor(38, 45, 52));
+    painter.setFont(totalFont);
+    int groupStart = 0;
+    while (groupStart < count) {
+        int groupEnd = groupStart;
+        const double groupTotal = barTotals.at(groupStart);
+        while (groupEnd + 1 < count &&
+               qAbs(barTotals.at(groupEnd + 1) - groupTotal) < 0.0001) {
+            ++groupEnd;
+        }
+
+        const QRect firstRect = barRects.at(groupStart);
+        const QRect lastRect = barRects.at(groupEnd);
+        const int textLeft = firstRect.left();
+        const int textWidth = lastRect.right() - firstRect.left() + 1;
+        const int textTop = qMin(firstRect.top(), lastRect.top()) - 18;
+        painter.drawText(QRect(textLeft, textTop, textWidth, 16),
                          Qt::AlignCenter,
-                         QString::number(bar.chargeFee + bar.serviceFee, 'f', 2));
+                         QString::number(groupTotal, 'f', 2));
+        groupStart = groupEnd + 1;
     }
 
     painter.setPen(QColor(38, 45, 52));

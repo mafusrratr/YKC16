@@ -101,7 +101,7 @@
   - `feeModelId`（当前规则：`PLAT_`+订单号前缀）
 - 计费模型落库：
   - `FeeModel.timeSeg` 使用 `"HHMM"`（当前按小时点映射为 `"HH00"`）
-  - `FeeModel.chargeFee/serviceFee` 单位为 `0.001元`（由协议 `分` 转换为 `*10`）
+  - `FeeModel.chargeFee/serviceFee` 单位为 `10^-5元`（直接保留平台原始精度）
 
 ## 8. MQTT 示例
 ### 8.1 setConfig（统一事件约定）

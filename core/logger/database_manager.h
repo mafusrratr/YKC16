@@ -195,8 +195,8 @@ public:
      * @param timeNum 时段数（1-96）
      * @param timeSeg 时段开始时间点数组（每个4字符，如"0630"）
      * @param segFlag 时段标志数组（可选，如无则传nullptr）
-     * @param chargeFee 电费数组（单位：0.001元）
-     * @param serviceFee 服务费数组（单位：0.001元）
+     * @param chargeFee 电费数组（单位：10^-5元）
+     * @param serviceFee 服务费数组（单位：10^-5元）
      * @return true成功
      */
     bool saveFeeModelToDb(const std::string& feeModelId,

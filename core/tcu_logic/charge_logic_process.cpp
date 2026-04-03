@@ -1564,10 +1564,11 @@ bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
             feeModel.timeSeg.push_back(minuteToHHMM(gs.feeTimeSegMinutes[i]));
             // BY ZF: 启动命令下发的是按时段展开的价格数组，这里按段号(1-based)落库。
             feeModel.segFlag.push_back(static_cast<unsigned int>(i + 1));
+            // BY ZF: 统一按 10^-5 元保存单价，避免平台下发 5 位小数时丢精度。
             feeModel.chargeFee.push_back(static_cast<unsigned int>(
-                std::round(std::max(0.0, gs.feeChargePricePerKwh[i]) * 1000.0)));
+                std::round(std::max(0.0, gs.feeChargePricePerKwh[i]) * 100000.0)));
             feeModel.serviceFee.push_back(static_cast<unsigned int>(
-                std::round(std::max(0.0, gs.feeServicePricePerKwh[i]) * 1000.0)));
+                std::round(std::max(0.0, gs.feeServicePricePerKwh[i]) * 100000.0)));
         }
 
         m_logSender.saveFeeModel(feeModel);

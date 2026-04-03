@@ -152,7 +152,7 @@ static QString formatEnergy(double value)
 
 static QString formatFeeValue(double value)
 {
-    return QString::number(value, 'f', 3);
+    return QString::number(value, 'f', 4);
 }
 
 static QString formatVoltage(double value)
@@ -502,8 +502,9 @@ static bool readFeeModelFromStmt(sqlite3_stmt *stmt, RuntimeWindow::FeeModelData
         seg.segFlag = idx < flags.size() ? flags.at(idx).toStdString() : std::string();
         seg.startTime = segs.at(idx).toStdString();
         seg.endTime = (idx + 1 < segs.size()) ? segs.at(idx + 1).toStdString() : std::string("2400");
-        seg.chargeFee = chargeFees.at(idx).toDouble() / 1000.0;
-        seg.serviceFee = serviceFees.at(idx).toDouble() / 1000.0;
+        // BY ZF: 计费模型单价已统一按10^-5元存库，界面展示时换算回元。
+        seg.chargeFee = chargeFees.at(idx).toDouble() / 100000.0;
+        seg.serviceFee = serviceFees.at(idx).toDouble() / 100000.0;
         model.segments.push_back(seg);
     }
 

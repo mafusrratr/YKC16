@@ -1544,9 +1544,9 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
             }
 
             const uint32_t chargePrice =
-                    static_cast<uint32_t>(matchedFeeModel->chargeFee[static_cast<size_t>(i)] * 100U); // 0.001元 -> 1e-5元
+                    static_cast<uint32_t>(matchedFeeModel->chargeFee[static_cast<size_t>(i)]); // 已是 1e-5元
             const uint32_t servicePrice =
-                    static_cast<uint32_t>(matchedFeeModel->serviceFee[static_cast<size_t>(i)] * 100U); // 0.001元 -> 1e-5元
+                    static_cast<uint32_t>(matchedFeeModel->serviceFee[static_cast<size_t>(i)]); // 已是 1e-5元
             const uint32_t energy = scaleToU32(periodEnergy, 10000.0);
             const uint32_t chargeFeeVal = scaleToU32(periodChargeFee, 10000.0);
             const uint32_t serviceFeeVal = scaleToU32(periodServiceFee, 10000.0);
@@ -3449,11 +3449,9 @@ bool CommProcess::parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeMo
         feeModel.timeSeg.push_back(ts);
         feeModel.segFlag.push_back(static_cast<unsigned int>(feeIdx + 1));
 
-        // BY ZF: 平台费率精度到10^-5元，转换为内部0.001元（四舍五入）。
-        const unsigned int chargeMilli = static_cast<unsigned int>((chargeRateRaw[static_cast<size_t>(feeIdx)] + 50U) / 100U);
-        const unsigned int serviceMilli = static_cast<unsigned int>((serviceRateRaw[static_cast<size_t>(feeIdx)] + 50U) / 100U);
-        feeModel.chargeFee.push_back(chargeMilli);
-        feeModel.serviceFee.push_back(serviceMilli);
+        // BY ZF: 内部统一按 10^-5 元保存单价，直接保留平台原始精度。
+        feeModel.chargeFee.push_back(chargeRateRaw[static_cast<size_t>(feeIdx)]);
+        feeModel.serviceFee.push_back(serviceRateRaw[static_cast<size_t>(feeIdx)]);
     }
 
     if (feeModel.timeSeg.size() != 48U ||
@@ -3560,10 +3558,10 @@ bool CommProcess::parseRemoteStart0A8(const uint8_t* body, size_t bodyLen, uint8
         cJSON_AddItemToArray(timeSeg, cJSON_CreateString(feeModel.timeSeg[i].c_str()));
     }
     for (size_t i = 0; i < feeModel.chargeFee.size(); ++i) {
-        cJSON_AddItemToArray(chargeFee, cJSON_CreateNumber(static_cast<double>(feeModel.chargeFee[i]) / 1000.0));
+        cJSON_AddItemToArray(chargeFee, cJSON_CreateNumber(static_cast<double>(feeModel.chargeFee[i]) / 100000.0));
     }
     for (size_t i = 0; i < feeModel.serviceFee.size(); ++i) {
-        cJSON_AddItemToArray(serviceFee, cJSON_CreateNumber(static_cast<double>(feeModel.serviceFee[i]) / 1000.0));
+        cJSON_AddItemToArray(serviceFee, cJSON_CreateNumber(static_cast<double>(feeModel.serviceFee[i]) / 100000.0));
     }
     cJSON_AddItemToObject(data, "timeSeg", timeSeg);
     cJSON_AddItemToObject(data, "chargeFee", chargeFee);

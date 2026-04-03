@@ -18,7 +18,8 @@ enum ProcessType {
     PROC_PILE_CONTROLLER,    // 主控通信进程
     PROC_DISPLAY,
     PROC_COMMUNICATION,
-    PROC_LOGGER
+    PROC_LOGGER,
+    PROC_CARD
 };
 
 // 进程状态
