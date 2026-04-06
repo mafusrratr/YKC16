@@ -132,7 +132,7 @@
 ### 5.2 tcu_pile_controller / tcu_cdzctrl
 
 代码位置：
-- `/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/core/pile_controller/pile_controller_process.cpp`
+- `/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/core/pile_controller/CAN2CCU/pile_controller_process.cpp`
 
 #### 订阅
 - `tcu/pile/{gun}/cmd`
@@ -584,4 +584,3 @@ Topic：`tcu/logger/{gun}/event`
   - `save Error`
   - `logic state_change`
 - 高频实时数据（`pile data`、`meter data`、`feeData`）不建议 retain。
-

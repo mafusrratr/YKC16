@@ -222,12 +222,19 @@ void QRWidget::paintEvent(QPaintEvent *event)
     const int qrSize = cell * modules;
     const int startX = area.x() + (area.width() - qrSize) / 2;
     const int startY = area.y() + (area.height() - qrSize) / 2;
-    const QColor qrColor(0, 0, 0, 235);
+    // BY ZF: 二维码改成白色亮化叠加，适配当前底图与扫码区域视觉风格。
+    const QColor qrGlowColor(255, 255, 255, 110);
+    const QColor qrColor(255, 255, 255, 245);
 
     unsigned char *data = code->data;
     for (int row = 0; row < code->width; ++row) {
         for (int col = 0; col < code->width; ++col) {
             if (data[row * code->width + col] & 0x01) {
+                painter.fillRect(startX + (col + quietZone) * cell - 1,
+                                 startY + (row + quietZone) * cell - 1,
+                                 cell + 2,
+                                 cell + 2,
+                                 qrGlowColor);
                 painter.fillRect(startX + (col + quietZone) * cell,
                                  startY + (row + quietZone) * cell,
                                  cell,
@@ -322,6 +329,11 @@ void FeeModelChartWidget::paintEvent(QPaintEvent *event)
 
         int x = chartRect.x() + static_cast<int>(startMinute * pxPerMinute + 0.5);
         int nextX = chartRect.x() + static_cast<int>(endMinute * pxPerMinute + 0.5);
+        if (i == count - 1 && endMinute >= 1440) {
+            nextX = chartRect.right() + 1;
+        }
+        x = qMax(x, chartRect.left());
+        nextX = qMin(nextX, chartRect.right() + 1);
         int barWidth = qMax(1, nextX - x);
         const double chargeHeightRatio = bar.chargeFee / maxValue;
         const double totalHeightRatio = (bar.chargeFee + bar.serviceFee) / maxValue;
@@ -384,9 +396,11 @@ void FeeModelChartWidget::paintEvent(QPaintEvent *event)
                      QString::fromUtf8("价格(元)"));
 
     painter.setFont(axisFont);
-    const int hourWidth = chartRect.width() / 24;
     for (i = 0; i <= 24; ++i) {
-        const int tickX = (i == 24) ? chartRect.right() : (chartRect.x() + i * hourWidth);
+        const int tickMinute = i * 60;
+        const int tickX = (i == 24)
+            ? chartRect.right()
+            : (chartRect.x() + static_cast<int>(tickMinute * pxPerMinute + 0.5));
         painter.setPen(QPen(QColor(90, 90, 90), 1));
         painter.drawLine(tickX, chartRect.bottom(), tickX, chartRect.bottom() + 4);
         if (i <= 24) {

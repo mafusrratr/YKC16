@@ -345,6 +345,29 @@ static void setLabelPixmap(QWidget *page, const char *name, const QString &res)
     }
 }
 
+static void applyTopHeaderStyle(QWidget *page)
+{
+    if (!page) {
+        return;
+    }
+    QLabel *title = page->findChild<QLabel *>("label_cdz_title");
+    if (title) {
+        title->setStyleSheet("QLabel{color:white;background:transparent;font:25px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+    QLabel *deviceId = page->findChild<QLabel *>("label_id");
+    if (deviceId) {
+        deviceId->setStyleSheet("QLabel{color:white;background:transparent;font:25px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+    QLabel *gunPole = page->findChild<QLabel *>("lblPole");
+    if (gunPole) {
+        gunPole->setStyleSheet("QLabel{color:white;background:transparent;font:25px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+    QLabel *gunTitle = page->findChild<QLabel *>("lblTitle");
+    if (gunTitle) {
+        gunTitle->setStyleSheet("QLabel{color:white;background:transparent;font:25px 'MS Shell Dlg 2';font-weight:bold;}");
+    }
+}
+
 static QStringList splitSemicolon(const std::string &text)
 {
     return QString::fromStdString(text).split(";", QString::SkipEmptyParts);
@@ -726,7 +749,9 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_faultRecordPage(0)
     , m_faultRecordPageSize(8)
     , m_lastWatchdogFeedMs(0)
+    , m_lastScreenActivityMs(0)
     , m_platformOnline(false)
+    , m_screenBacklightOff(true)
     , m_stack(new QStackedWidget(this))
     , m_bottomTime(new QLabel(this))
     , m_bottomHostState(new QLabel(this))
@@ -785,6 +810,7 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     m_bottomHostState->show();
     m_bottomHostState->raise();
     connect(&m_uiTimer, SIGNAL(timeout()), this, SLOT(refreshUi()));
+    connect(&m_screenIdleTimer, SIGNAL(timeout()), this, SLOT(checkScreenIdle()));
 }
 
 RuntimeWindow::~RuntimeWindow()
@@ -792,6 +818,9 @@ RuntimeWindow::~RuntimeWindow()
     if (m_mqttReady) {
         m_mqtt.loopStop(true);
         m_mqtt.disconnect();
+    }
+    if (m_screenBacklightOff) {
+        setScreenBacklight(true);
     }
 }
 
@@ -815,6 +844,10 @@ bool RuntimeWindow::initialize()
         return false;
     }
 
+    // BY ZF: 复刻旧版 BaseDialog 的空闲熄屏思路，只做轮询计时，不拦截全局事件链。
+    m_lastScreenActivityMs = nowMs();
+    m_screenBacklightOff = false;
+    m_screenIdleTimer.start(1000);
     m_uiTimer.start(1000);
     refreshUi();
 
@@ -907,6 +940,14 @@ bool RuntimeWindow::buildPages()
     m_stack->addWidget(m_checkoutPage);
     m_stack->addWidget(m_aboutPage);
 
+    // BY ZF: 只监听顶层页面空白区域点击，用于黑屏后亮屏，不拦截业务事件。
+    m_stack->installEventFilter(this);
+    m_idlePage->installEventFilter(this);
+    m_authorizePage->installEventFilter(this);
+    m_chargingPage->installEventFilter(this);
+    m_checkoutPage->installEventFilter(this);
+    m_aboutPage->installEventFilter(this);
+
     bindStaticUi();
     return true;
 }
@@ -931,6 +972,11 @@ QWidget *RuntimeWindow::createPage(const QString &path)
 void RuntimeWindow::bindStaticUi()
 {
     // BY ZF: 页面静态图片与按钮关系在启动时一次性绑定。
+    applyTopHeaderStyle(m_idlePage);
+    applyTopHeaderStyle(m_authorizePage);
+    applyTopHeaderStyle(m_chargingPage);
+    applyTopHeaderStyle(m_checkoutPage);
+    applyTopHeaderStyle(m_aboutPage);
     setLabelPixmap(m_idlePage, "label_zq", ":/cui/Resources/qt_zq.png");
     setLabelPixmap(m_idlePage, "label_yq", ":/cui/Resources/qt_yq.png");
     setLabelPixmap(m_idlePage, "label_about", ":/cui/Resources/about.png");
@@ -1072,6 +1118,7 @@ void RuntimeWindow::bindStaticUi()
     QTabWidget *tab = m_aboutPage->findChild<QTabWidget *>("tabWidget");
     if (tab) {
         tab->setCurrentIndex(0);
+        tab->installEventFilter(this);
         connect(tab, SIGNAL(currentChanged(int)), this, SLOT(handleAboutTabChanged(int)));
     }
     m_aboutTabWidget = tab;
@@ -1132,6 +1179,7 @@ void RuntimeWindow::onMqttMessage(const std::string &topic, const std::string &p
         } else if (gun <= 1 && tail == "feeData") {
             handleFeeData(gun, payload);
         }
+        markScreenActivity();
         return;
     }
 
@@ -1153,12 +1201,14 @@ void RuntimeWindow::onMqttMessage(const std::string &topic, const std::string &p
         if (gun <= 1 && tail == "event") {
             handleSaveEvent(gun, payload);
         }
+        markScreenActivity();
         return;
     }
 
     if (topic == m_config.mqttTopicPrefix + "/mon/0/event") {
         handleMonEvent(payload);
     }
+    markScreenActivity();
 }
 
 void RuntimeWindow::handleLogicEvent(uint8_t gun, const std::string &payload)
@@ -2313,6 +2363,7 @@ void RuntimeWindow::feedWatchdog()
 
 void RuntimeWindow::showAboutPage()
 {
+    markScreenActivity();
     {
         QMutexLocker locker(&m_dataMutex);
         m_showAbout = true;
@@ -2331,6 +2382,7 @@ void RuntimeWindow::showAboutPage()
 
 void RuntimeWindow::leaveAboutPage()
 {
+    markScreenActivity();
     {
         QMutexLocker locker(&m_dataMutex);
         m_showAbout = false;
@@ -2358,6 +2410,7 @@ void RuntimeWindow::leaveAboutPage()
 
 void RuntimeWindow::submitAboutPermission()
 {
+    markScreenActivity();
     QObject *src = sender();
     QPushButton *btn = qobject_cast<QPushButton *>(src);
     if (btn && m_aboutPermissionEdit && btn->objectName().startsWith("btnPad_")) {
@@ -2403,6 +2456,7 @@ void RuntimeWindow::submitAboutPermission()
 
 void RuntimeWindow::showAboutPermissionPad()
 {
+    markScreenActivity();
     std::cerr << "[A3] showAboutPermissionPad clicked" << std::endl;
     if (m_aboutPermissionPad) {
         m_aboutPermissionPad->show();
@@ -2422,6 +2476,7 @@ void RuntimeWindow::showAboutPermissionPad()
 
 void RuntimeWindow::handleAboutTabChanged(int index)
 {
+    markScreenActivity();
     if (!m_aboutTabWidget) {
         return;
     }
@@ -2852,6 +2907,7 @@ QString RuntimeWindow::selectedStoragePath() const
 
 void RuntimeWindow::onStorageItemClicked(QListWidgetItem *item)
 {
+    markScreenActivity();
     if (!item) {
         return;
     }
@@ -2876,6 +2932,7 @@ void RuntimeWindow::onStorageItemClicked(QListWidgetItem *item)
 
 void RuntimeWindow::onStorageFileItemDoubleClicked(QListWidgetItem *item)
 {
+    markScreenActivity();
     if (!item) {
         return;
     }
@@ -2890,6 +2947,7 @@ void RuntimeWindow::onStorageFileItemDoubleClicked(QListWidgetItem *item)
 
 void RuntimeWindow::onStorageBackClicked()
 {
+    markScreenActivity();
     if (m_storageCurrentPath.isEmpty()) {
         return;
     }
@@ -2910,6 +2968,7 @@ void RuntimeWindow::onStorageBackClicked()
 
 void RuntimeWindow::onStorageRefreshClicked()
 {
+    markScreenActivity();
     if (!m_storageCurrentPath.isEmpty()) {
         loadStorageFileList(m_storageCurrentPath);
     } else {
@@ -2919,6 +2978,7 @@ void RuntimeWindow::onStorageRefreshClicked()
 
 void RuntimeWindow::onStorageExportLogClicked()
 {
+    markScreenActivity();
     QAbstractButton *btnExport = m_aboutPage ? m_aboutPage->findChild<QAbstractButton *>("btn_export_log") : 0;
     if (btnExport && !btnExport->isEnabled()) {
         return;
@@ -2991,8 +3051,9 @@ void RuntimeWindow::onStorageExportLogClicked()
 
 void RuntimeWindow::onStorageUpgradeClicked()
 {
+    markScreenActivity();
     const QString targetPath = selectedStoragePath();
-    if (targetPath.isEmpty()) {
+        if (targetPath.isEmpty()) {
         QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("请先选择一个外置存储设备"));
         return;
     }
@@ -3144,6 +3205,7 @@ void RuntimeWindow::refreshConfigKeyboardLayout()
 
 void RuntimeWindow::onConfigEditMaskClicked()
 {
+    markScreenActivity();
     QObject *src = sender();
     if (!src) {
         return;
@@ -3162,6 +3224,7 @@ void RuntimeWindow::onConfigEditMaskClicked()
 
 void RuntimeWindow::onConfigKeyboardButtonClicked()
 {
+    markScreenActivity();
     if (!m_configKeyboardTarget) {
         return;
     }
@@ -3215,6 +3278,7 @@ void RuntimeWindow::onConfigKeyboardButtonClicked()
 
 void RuntimeWindow::onConfigGunCountChanged()
 {
+    markScreenActivity();
     const bool dual = (m_configGunDual && m_configGunDual->isChecked());
     if (m_configMeter2Row) {
         m_configMeter2Row->setVisible(dual);
@@ -3376,6 +3440,7 @@ bool RuntimeWindow::savePileConfigFromUi()
 
 void RuntimeWindow::onConfigSubmitClicked()
 {
+    markScreenActivity();
     if (m_configKeyboard) {
         m_configKeyboard->hide();
     }
@@ -3397,6 +3462,7 @@ void RuntimeWindow::onConfigSubmitClicked()
 
 void RuntimeWindow::onConfigResetClicked()
 {
+    markScreenActivity();
     loadMeterConfigToUi();
     loadCommConfigToUi();
     if (m_configKeyboard) {
@@ -3414,12 +3480,67 @@ void RuntimeWindow::rebootSystem()
     QProcess::startDetached(QString::fromUtf8("reboot"));
 }
 
+void RuntimeWindow::markScreenActivity()
+{
+    // BY ZF: 复刻旧版空闲计时逻辑，界面操作或数据变化只更新时间，并在黑屏时直接点亮背光。
+    QMutexLocker locker(&m_dataMutex);
+    m_lastScreenActivityMs = nowMs();
+    if (m_screenBacklightOff) {
+        setScreenBacklight(true);
+        m_screenBacklightOff = false;
+    }
+}
+
+void RuntimeWindow::setScreenBacklight(bool on)
+{
+    // BY ZF: 继续沿用目标机已验证的 sysfs 背光控制链路。
+    const QString command = on
+        ? QString::fromUtf8("echo 80 > /sys/devices/platform/backlight/backlight/backlight/brightness")
+        : QString::fromUtf8("echo 0 > /sys/devices/platform/backlight/backlight/backlight/brightness");
+    std::cerr << "[HMI] setScreenBacklight "
+              << (on ? "ON" : "OFF")
+              << " cmd=" << command.toStdString() << std::endl;
+    QProcess::startDetached(QString::fromUtf8("sh"),
+                            QStringList() << QString::fromUtf8("-c") << command);
+}
+
+void RuntimeWindow::checkScreenIdle()
+{
+    // BY ZF: 120 秒内既无用户操作也无 MQTT 驱动的数据变化时关闭背光。
+    QMutexLocker locker(&m_dataMutex);
+    if (m_screenBacklightOff) {
+        return;
+    }
+    if (m_lastScreenActivityMs == 0) {
+        m_lastScreenActivityMs = nowMs();
+        return;
+    }
+    if (nowMs() - m_lastScreenActivityMs >= 120000ULL) {
+        setScreenBacklight(false);
+        m_screenBacklightOff = true;
+    }
+}
+
 bool RuntimeWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (event &&
+        (watched == m_stack ||
+         watched == m_idlePage ||
+         watched == m_authorizePage ||
+         watched == m_chargingPage ||
+         watched == m_checkoutPage ||
+         watched == m_aboutPage ||
+         watched == m_aboutTabWidget) &&
+        (event->type() == QEvent::MouseButtonPress ||
+         event->type() == QEvent::MouseButtonRelease)) {
+        markScreenActivity();
+    }
+
     if (watched == m_aboutPermissionEdit && event &&
         (event->type() == QEvent::MouseButtonPress ||
          event->type() == QEvent::MouseButtonRelease ||
          event->type() == QEvent::FocusIn)) {
+        markScreenActivity();
         std::cerr << "[A3] permission edit event type=" << static_cast<int>(event->type()) << std::endl;
         if (m_aboutPermissionPad) {
             m_aboutPermissionPad->show();
@@ -3438,6 +3559,7 @@ bool RuntimeWindow::eventFilter(QObject *watched, QEvent *event)
 
 void RuntimeWindow::handleCellClick(int port)
 {
+    markScreenActivity();
     {
         QMutexLocker locker(&m_dataMutex);
         m_forceIdleView = false;
@@ -3451,6 +3573,7 @@ void RuntimeWindow::handleCellClick(int port)
 
 void RuntimeWindow::returnToIdlePage()
 {
+    markScreenActivity();
     {
         QMutexLocker locker(&m_dataMutex);
         m_forceIdleView = true;
@@ -3461,6 +3584,7 @@ void RuntimeWindow::returnToIdlePage()
 
 void RuntimeWindow::showAllChargeRecords()
 {
+    markScreenActivity();
     m_recordGunFilter = -1;
     m_chargeRecordPage = 0;
     refreshChargeRecordCache(true);
@@ -3469,6 +3593,7 @@ void RuntimeWindow::showAllChargeRecords()
 
 void RuntimeWindow::showAGunChargeRecords()
 {
+    markScreenActivity();
     m_recordGunFilter = 0;
     m_chargeRecordPage = 0;
     refreshChargeRecordCache(true);
@@ -3477,6 +3602,7 @@ void RuntimeWindow::showAGunChargeRecords()
 
 void RuntimeWindow::showBGunChargeRecords()
 {
+    markScreenActivity();
     m_recordGunFilter = 1;
     m_chargeRecordPage = 0;
     refreshChargeRecordCache(true);
@@ -3485,6 +3611,7 @@ void RuntimeWindow::showBGunChargeRecords()
 
 void RuntimeWindow::showPrevChargeRecordPage()
 {
+    markScreenActivity();
     if (m_chargeRecordPage > 0) {
         --m_chargeRecordPage;
     }
@@ -3493,12 +3620,14 @@ void RuntimeWindow::showPrevChargeRecordPage()
 
 void RuntimeWindow::showNextChargeRecordPage()
 {
+    markScreenActivity();
     ++m_chargeRecordPage;
     refreshChargeRecordTable();
 }
 
 void RuntimeWindow::showAllFaultRecords()
 {
+    markScreenActivity();
     m_faultGunFilter = -1;
     m_faultRecordPage = 0;
     refreshFaultRecordCache(true);
@@ -3507,6 +3636,7 @@ void RuntimeWindow::showAllFaultRecords()
 
 void RuntimeWindow::showAFaultRecords()
 {
+    markScreenActivity();
     m_faultGunFilter = 0;
     m_faultRecordPage = 0;
     refreshFaultRecordCache(true);
@@ -3515,6 +3645,7 @@ void RuntimeWindow::showAFaultRecords()
 
 void RuntimeWindow::showBFaultRecords()
 {
+    markScreenActivity();
     m_faultGunFilter = 1;
     m_faultRecordPage = 0;
     refreshFaultRecordCache(true);
@@ -3523,6 +3654,7 @@ void RuntimeWindow::showBFaultRecords()
 
 void RuntimeWindow::showPrevFaultRecordPage()
 {
+    markScreenActivity();
     if (m_faultRecordPage > 0) {
         --m_faultRecordPage;
     }
@@ -3531,6 +3663,7 @@ void RuntimeWindow::showPrevFaultRecordPage()
 
 void RuntimeWindow::showNextFaultRecordPage()
 {
+    markScreenActivity();
     ++m_faultRecordPage;
     refreshFaultRecordTable();
 }

@@ -1,0 +1,13 @@
+# CAN2CCU 测试交叉编译 Makefile
+# BY ZF
+
+OBJ_DIR = obj
+RELEASE_DIR = release
+
+all:
+	@echo "CAN2CCU test targets have been removed."
+
+clean:
+	rm -rf $(OBJ_DIR) $(RELEASE_DIR)
+
+.PHONY: all clean

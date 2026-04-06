@@ -34,7 +34,12 @@ Contributors:
 #  include <microhttpd.h>
 #endif
 
-#ifdef __linux__
+#ifndef WIN32
+#  include <netinet/tcp.h>
+#endif
+
+#if defined(__linux__) && defined(TCP_USER_TIMEOUT)
+/* BY ZF: NUC980/uClibc 头文件可能不提供 TCP_USER_TIMEOUT，按实际宏能力启用 */
 #define WITH_TCP_USER_TIMEOUT
 #endif
 

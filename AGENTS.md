@@ -9,15 +9,17 @@
 - `libv2gshm/`：共享内存库
 - `config/`：配置文件（`config/project_a/` 为示例）
 - `docs/`：架构与重构文档
-- `core/pile_controller/test/`：pile_controller 测试程序
+- `core/pile_controller/CAN2CCU/test/`：当前 CAN2CCU 子项目测试程序
 
 ## Build, Test, and Development Commands
 - `qmake cui.pro`：生成 Makefile（Qt 4.8.6）
-- `make`：本地构建
+- `make -C core/pile_controller/CAN2CCU`：当前 CAN2CCU 子项目本地构建
+- 远端推荐构建命令：`build <目标设备类型> <构建文件>`，例如 `build imx6ul Makefile.cross`
+- 目标设备类型可为 `imx6ul`，后续也可能为 `nuc980`、`jzq` 等环境
 - 交叉编译示例：  
   `export CROSS_COMPILE=/opt/gcc-linaro-4.9-2016.02-x86_64_arm-linux-gnueabihf/bin/arm-linux-gnueabihf-`
-- pile_controller 测试（示例）：  
-  `make -C core/pile_controller/test`（或使用对应 `Makefile.cross`）
+- CAN2CCU 测试（示例）：  
+  `make -C core/pile_controller/CAN2CCU/test`（或使用对应 `Makefile.cross`）
 
 ## Coding Style & Naming Conventions
 - 语言：C/C++（Qt4 环境），配置读写使用 `QSettings`。
@@ -26,7 +28,7 @@
 - 接口：仅在“多实现”场景使用接口，且放在进程内部目录。
 
 ## Testing Guidelines
-- 当前测试为模块级可执行程序（`core/pile_controller/test/`）。
+- 当前测试为模块级可执行程序（`core/pile_controller/CAN2CCU/test/`）。
 - 命名示例：`test_*`（如 `test_protocol.cpp`、`test_start_stop_charge.cpp`）。
 - 建议先在无硬件环境下跑框架测试，再接入真实 CAN/设备联调。
 
@@ -40,4 +42,5 @@
 
 ## Agent-Specific Instructions
 - 所有回复需使用中文。
-- 编译环境需通过远端 SSH：`ssh -p 2222 root@localhost`（密码：embedded），进入后切换到对应工作目录再执行 build 命令。
+- 编译环境需通过远端 SSH：`ssh -p 2222 root@localhost`（密码：embedded），进入后切换到对应工作目录。
+- 远端构建优先使用 `build <目标设备类型> <构建文件>`，例如 `build imx6ul Makefile.cross`，不要默认直接手写 `make`。

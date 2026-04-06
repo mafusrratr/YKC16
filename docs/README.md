@@ -7,8 +7,8 @@
   充电计费单元软件概要设计方案（模块组成、接口、信息流、扩展策略）。
 
 ## 2. 模块级设计文档（源码目录内）
-- `core/pile_controller/doc/ARCHITECTURE.md`
-- `core/pile_controller/doc/MQTT_COMM_PROTOCOL.md`
+- `core/pile_controller/CAN2CCU/doc/ARCHITECTURE.md`
+- `core/pile_controller/CAN2CCU/doc/MQTT_COMM_PROTOCOL.md`
 - `core/tcu_logic/doc/ARCHITECTURE.md`
 - `core/tcu_logic/doc/STATE_MACHINE.md`
 - `core/tcu_logic/doc/MQTT_COMM_PROTOCOL.md`

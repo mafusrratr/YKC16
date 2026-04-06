@@ -358,6 +358,7 @@ private:
     void resetCryptoSession();
     void prepareLoginCryptoContext();
     bool tryUpdateSm2PubKeyFromLoginAck(const uint8_t* body, size_t bodyLen);
+    bool persistSm2PubKeyToIni(const std::string& pubKey);
 
     // BY ZF: 平台命令解析
     bool parseRemoteStart0A8(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel);

@@ -15,16 +15,10 @@ SPDX-License-Identifier: EPL-2.0 OR BSD-3-Clause
 Contributors:
    Roger Light - initial implementation and documentation.
 */
-#if defined(__linux__)
-#  define _GNU_SOURCE  /* Exposes pthread_setname_np on Linux */
-#endif
-
 #include "config.h"
 
 #if defined(WITH_THREADING)
-#if defined(__linux__)
-#  include <pthread.h>
-#elif defined(__NetBSD__)
+#if defined(__linux__) || defined(__NetBSD__)
 #  include <pthread.h>
 #elif defined(__FreeBSD__) || defined(__OpenBSD__)
 #  include <pthread_np.h>
@@ -50,13 +44,7 @@ int mosquitto_loop_start(struct mosquitto *mosq)
 
 	mosq->threaded = mosq_ts_self;
 	if(!COMPAT_pthread_create(&mosq->thread_id, NULL, mosquitto__thread_main, mosq)){
-#if defined(__linux__)
-		pthread_setname_np(mosq->thread_id, "mosquitto loop");
-#elif defined(__NetBSD__)
-		pthread_setname_np(mosq->thread_id, "%s", "mosquitto loop");
-#elif defined(__FreeBSD__) || defined(__OpenBSD__)
-		pthread_set_name_np(mosq->thread_id, "mosquitto loop");
-#endif
+		/* BY ZF: NUC980/uClibc 缺少 pthread_setname_np，实现上直接跳过线程命名 */
 		return MOSQ_ERR_SUCCESS;
 	}else{
 		return MOSQ_ERR_ERRNO;

@@ -2113,13 +2113,13 @@ void CommProcess::prepareLoginCryptoContext()
 
 bool CommProcess::tryUpdateSm2PubKeyFromLoginAck(const uint8_t* body, size_t bodyLen)
 {
-    // BY ZF: 0x02登录应答：桩编码(7) + 登录结果(1) + 公钥(130, 登录成功才有)。
-    // BY ZF: 登录成功时才携带公钥，长度固定130。
+    // BY ZF: 0x02登录应答：桩编码(7) + 登录结果(1) + 公钥(130)。
+    // BY ZF: 平台在登录失败场景也可能回最新SM2公钥，收到后要立即更新并固化。
     if (bodyLen < 138) {
         return false;
     }
     std::string key(reinterpret_cast<const char*>(body + 8), 130U);
-    if (key.empty()) {
+    if (key.empty() || key.find_first_not_of("0123456789ABCDEFabcdef") != std::string::npos) {
         return false;
     }
     if (m_config.debugTcp) {
@@ -2127,7 +2127,10 @@ bool CommProcess::tryUpdateSm2PubKeyFromLoginAck(const uint8_t* body, size_t bod
     }
     if (key != m_sm2PublicKeyActive) {
         m_sm2PublicKeyActive = key;
-        m_logSender.info("sm2_pubkey_update", "platform_sm2_public_key_updated");
+        m_config.sm2PublicKey = key;
+        const bool iniOk = persistSm2PubKeyToIni(key);
+        m_logSender.info("sm2_pubkey_update", iniOk ? "platform_sm2_public_key_updated"
+                                                    : "platform_sm2_public_key_updated_ini_save_fail");
     }
     return true;
 }
@@ -3213,14 +3216,14 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
 
             // BY ZF: body[0..6]=桩编码BCD7，body[7]=登录结果。
             const uint8_t feedbackResult = body[7];
+            (void)tryUpdateSm2PubKeyFromLoginAck(body, decBodyLen);
             if (feedbackResult != 0x00) {
                 m_loginState = LOGIN_IDLE;
                 m_nextLoginAllowedTime = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-                m_logSender.warn("platform_login_step", "login_ack_invalid");
+                m_logSender.warn("platform_login_step", "login_ack_rejected");
                 return;
             }
             m_sm4SessionKeyReady = true;
-            (void)tryUpdateSm2PubKeyFromLoginAck(body, decBodyLen);
 
             // BY ZF: 登录成功后进入计费模型请求阶段；0x0B在收到0x0A后发起。
             m_loginState = LOGIN_REQ_FEE_MODEL;
@@ -3870,6 +3873,19 @@ bool CommProcess::persistGunQrCodeToIni(uint8_t gun, const std::string& qrCode)
     key << "gun" << static_cast<int>(gun + 1) << "_qrcode";
     cfg.setString(section, key.str(), qrCode);
     // BY ZF: 二维码下发后固化到目标机配置文件。
+    return cfg.saveConfig("/usr/app/config/tcu_comm.ini");
+}
+
+bool CommProcess::persistSm2PubKeyToIni(const std::string& pubKey)
+{
+    if (pubKey.empty()) {
+        return false;
+    }
+
+    ConfigManagerLite& cfg = getConfig();
+    const std::string section = "Comm";
+    cfg.setString(section, "sm2_public_key", pubKey);
+    // BY ZF: 平台在0x02下发的新SM2公钥需要固化，避免重启后继续使用旧公钥。
     return cfg.saveConfig("/usr/app/config/tcu_comm.ini");
 }
 

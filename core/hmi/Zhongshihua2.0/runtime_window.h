@@ -40,6 +40,7 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event);
 
 private slots:
+    void checkScreenIdle();
     void refreshUi();
     void showAboutPage();
     void leaveAboutPage();
@@ -235,6 +236,8 @@ private:
     void refreshChargingPage(const GunUiData &gun);
     void refreshCheckoutPage(const GunUiData &gun);
     void refreshAboutPage();
+    void markScreenActivity();
+    void setScreenBacklight(bool on);
     PageId decidePage(const std::vector<GunUiData> &guns, int &focusGun) const;
     void feedWatchdog();
 
@@ -253,6 +256,7 @@ private:
     bool m_aboutPermissionGranted;
 
     QTimer m_uiTimer;
+    QTimer m_screenIdleTimer;
     QMutex m_dataMutex;
 
     int m_gunCount;
@@ -276,7 +280,9 @@ private:
     int m_faultRecordPage;
     int m_faultRecordPageSize;
     uint64_t m_lastWatchdogFeedMs;
+    uint64_t m_lastScreenActivityMs;
     bool m_platformOnline;
+    bool m_screenBacklightOff;
 
     QStackedWidget *m_stack;
     QLabel *m_bottomTime;

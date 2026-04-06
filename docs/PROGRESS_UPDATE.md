@@ -9,11 +9,11 @@
 - 通信异常处理：心跳超时重置参数流程、停止重发、清空长帧上下文。
 - 线程安全：协议层访问加锁。
 - 长帧超时：2 秒超时重置上下文。
-- 文档与 UML 更新完成，UML 文件迁移到 `core/pile_controller/doc/`。
+- 文档与 UML 更新完成，UML 文件迁移到 `core/pile_controller/CAN2CCU/doc/`。
 - mqtt/cjson 迁移到 `core/base/` 作为通用依赖。
 
 ### MQTT 规范
-- `core/pile_controller/doc/MQTT_COMM_PROTOCOL.md`：cmd QoS2、event QoS2，data QoS0。
+- `core/pile_controller/CAN2CCU/doc/MQTT_COMM_PROTOCOL.md`：cmd QoS2、event QoS2，data QoS0。
 - 统一 topic 规划：`tcu/pile/{gun}/cmd|event|data`。
 
 ### 目录与命名规范调整

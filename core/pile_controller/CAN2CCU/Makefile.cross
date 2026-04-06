@@ -1,0 +1,99 @@
+# 主控通信进程交叉编译 Makefile (iMX6UL)
+# BY ZF
+
+# 交叉编译器设置
+CROSS_COMPILE ?= arm-linux-gnueabihf-
+CXX = $(CROSS_COMPILE)g++
+AR = $(CROSS_COMPILE)ar
+CXXFLAGS = -Wall -O2 -std=c++11
+INCLUDES = -I../../base -I../../interfaces -I../../../libv2gshm/libcshm \
+           -I../../base/mqtt -I../../base/mqtt/include -I../../base/cjson/include
+
+# 目录设置
+OBJ_DIR = obj
+RELEASE_DIR = release
+DOC_DIR = doc
+
+# 目标文件
+TARGET = $(RELEASE_DIR)/tcu_cdzctrl
+
+# 源文件
+SOURCES = main.cpp pile_controller_process.cpp \
+          ../../base/mqtt/mqtt_client.cpp \
+          can2ccu_protocol.cpp \
+          can_pile_controller.cpp
+BASE_SOURCES = ../../base/common/config_manager_lite.cpp \
+               ../../base/common/message_queue.cpp \
+               ../../base/logger/log_sender.cpp \
+               ../../base/communication/can_communication.cpp \
+               ../../base/communication/network_communication.cpp \
+               ../../base/communication/serial_communication.cpp \
+               ../../base/process/base_process.cpp
+
+# 对象文件（放到 obj/ 目录）
+# BY ZF: 当前目录即 CAN2CCU 独立项目目录
+OBJECTS = $(OBJ_DIR)/main.o \
+          $(OBJ_DIR)/pile_controller_process.o \
+          $(OBJ_DIR)/mqtt/mqtt_client.o \
+          $(OBJ_DIR)/can2ccu_protocol.o \
+          $(OBJ_DIR)/can_pile_controller.o \
+          $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
+
+# 共享内存库路径
+SHM_LIB_PATH = ../../../libv2gshm/cshm/bin/Release
+
+# 依赖库
+LIBDIRS = -L$(SHM_LIB_PATH) -L../../../extraLib
+LIBS = -lpthread -levsshm -lmosquitto -lcjson
+
+# 默认目标
+all: directories $(TARGET)
+
+# 创建目录
+directories:
+	@mkdir -p $(OBJ_DIR) $(RELEASE_DIR) $(DOC_DIR)
+
+# 编译主程序
+$(TARGET): $(OBJECTS)
+	$(CXX) $(OBJECTS) -o $(TARGET) $(LIBDIRS) $(LIBS) -s
+	@echo "Build completed: $(TARGET)"
+
+# 当前目录源文件编译规则
+$(OBJ_DIR)/%.o: %.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# mqtt目录源文件编译规则
+$(OBJ_DIR)/mqtt/%.o: ../../base/mqtt/%.cpp
+	@mkdir -p $(OBJ_DIR)/mqtt
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# Base目录源文件编译规则
+$(OBJ_DIR)/%.o: ../../base/common/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/%.o: ../../base/logger/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/%.o: ../../base/communication/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/%.o: ../../base/process/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# 清理
+clean:
+	rm -rf $(OBJ_DIR) $(RELEASE_DIR)
+
+# 安装
+install: $(TARGET)
+	@echo "Installing to release directory..."
+	@cp $(TARGET) $(RELEASE_DIR)/
+
+# 显示编译信息
+info:
+	@echo "Cross Compiler: $(CXX)"
+	@echo "Target: $(TARGET)"
+	@echo "SHM Library Path: $(SHM_LIB_PATH)"
+	@echo "Libraries: $(LIBS)"
+
+.PHONY: all clean install directories info
