@@ -85,6 +85,13 @@ static std::string escapeSqlString(const std::string& str) {
     return escaped;
 }
 
+// BY ZF: 仅将 tcu_*.db 识别为 logger 管理的备份文件
+static bool isManagedBackupFile(const std::string& fileName) {
+    return fileName.size() > 7 &&
+           fileName.compare(0, 4, "tcu_") == 0 &&
+           fileName.compare(fileName.size() - 3, 3, ".db") == 0;
+}
+
 // BY ZF: 获取当前本地时间戳字符串（格式：YYYY-MM-DD HH:MM:SS）
 static std::string getCurrentLocalTimeString() {
     std::time_t now = std::time(nullptr);
@@ -1378,15 +1385,13 @@ bool DatabaseManager::backupDatabases(const std::string& backupDir) {
         return false;
     }
     
-    // BY ZF: 针对每个数据库执行剪切->复制->删除->重建的轮转流程
-    for (const auto& pair : m_dbPaths) {
-        if (!backupSingleDatabase(pair.first, backupDir, timestamp)) {
-            std::cerr << "Backup failed for database type: " << pair.first << std::endl;
-            return false;
-        }
+    // BY ZF: 仅备份主运行数据库 tcu.db，其它数据库不参与备份轮转
+    if (!backupSingleDatabase(DB_MAIN, backupDir, timestamp)) {
+        std::cerr << "Backup failed for main database type: " << DB_MAIN << std::endl;
+        return false;
     }
     
-    std::cout << "[Logger][Backup] Databases rotated to " << backupDir
+    std::cout << "[Logger][Backup] Main database rotated to " << backupDir
               << " (timestamp=" << timestamp << ")" << std::endl;
     return true;
 }
@@ -1405,8 +1410,8 @@ int64_t DatabaseManager::getBackupDirSize(const std::string& backupDir) {
             continue;
         }
         std::string fileName = entry->d_name;
-        // BY ZF: 只统计.db文件
-        if (fileName.size() < 4 || fileName.find(".db") == std::string::npos) {
+        // BY ZF: 仅统计 tcu.db 的备份文件
+        if (!isManagedBackupFile(fileName)) {
             continue;
         }
         
@@ -1446,8 +1451,8 @@ int DatabaseManager::cleanupOldBackups(const std::string& backupDir, int64_t max
             continue;
         }
         std::string fileName = entry->d_name;
-        // BY ZF: 只处理.db文件
-        if (fileName.size() < 4 || fileName.find(".db") == std::string::npos) {
+        // BY ZF: 仅处理 tcu.db 的备份文件
+        if (!isManagedBackupFile(fileName)) {
             continue;
         }
         

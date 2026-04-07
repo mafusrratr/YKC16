@@ -65,6 +65,7 @@ private slots:
     void onStorageRefreshClicked();
     void onStorageExportLogClicked();
     void onStorageUpgradeClicked();
+    void onAuthorizeCardClicked();
     void onConfigEditMaskClicked();
     void onConfigKeyboardButtonClicked();
     void onConfigGunCountChanged();
@@ -77,6 +78,7 @@ public:
         PageIdle = 0,
         PageAuthorize,
         PageCharging,
+        PageStopping,
         PageCheckout,
         PageAbout
     };
@@ -94,7 +96,9 @@ public:
         std::string mqttPassword;
         bool enableMergeChargeEntry;
         bool enableVinEntry;
+        bool enableQrEntry;
         bool enableCardEntry;
+        bool cardOnlineAuth;
 
         HmiConfig();
     };
@@ -115,6 +119,7 @@ public:
         double totalEnergy;
         double chargedTime;
         int soc;
+        bool cardOfflineActive;
         std::string qrPayload;
         std::string stopReason;
         std::string lastFaultPointKey;
@@ -158,6 +163,8 @@ public:
     };
 
     struct FeeModelData {
+        int feeModelNo;
+        int timeNum;
         std::string feeModelId;
         std::string timeStamp;
         std::vector<FeeSegment> segments;
@@ -234,6 +241,7 @@ private:
     void refreshIdlePage(const std::vector<GunUiData> &guns);
     void refreshAuthorizePage(const GunUiData &gun);
     void refreshChargingPage(const GunUiData &gun);
+    void refreshStoppingPage(const GunUiData &gun);
     void refreshCheckoutPage(const GunUiData &gun);
     void refreshAboutPage();
     void markScreenActivity();
@@ -281,6 +289,7 @@ private:
     int m_faultRecordPageSize;
     uint64_t m_lastWatchdogFeedMs;
     uint64_t m_lastScreenActivityMs;
+    uint64_t m_uiSeq;
     bool m_platformOnline;
     bool m_screenBacklightOff;
 
@@ -290,6 +299,7 @@ private:
     QWidget *m_idlePage;
     QWidget *m_authorizePage;
     QWidget *m_chargingPage;
+    QWidget *m_stoppingPage;
     QWidget *m_checkoutPage;
     QWidget *m_aboutPage;
     QTabWidget *m_aboutTabWidget;

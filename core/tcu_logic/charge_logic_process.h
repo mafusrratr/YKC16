@@ -120,6 +120,16 @@ private:
         std::string tradeNo;                    // 本地交易流水
         bool hasVinCode;                        // VIN 是否有效
         std::string vinCode;                    // VIN
+        uint8_t plugAndChargeFlag;              // 即插即充标志（01H 非即插即充 02H 即插即充）
+        uint8_t mergeChargeFlag;                // 合并充电标志
+        bool plugAndChargeActive;               // 当前启动流程是否为即插即充
+        bool plugAndChargeVehicleIdConfirmed;   // 是否已完成 0x17/0x18 交互
+        bool plugAndChargeAuthRequestPublished; // 是否已向 plat 发布鉴权请求
+        bool plugAndChargeAuthResultSent;       // 是否已向 pile 下发 0x19
+        bool plugAndChargeAuthAckReceived;      // 是否已收到 0x1A
+        uint8_t plugAndChargeBatteryChargeCount[3]; // 车辆识别帧中的充电次数
+        uint16_t plugAndChargeBatterySoc;       // 车辆识别帧中的 SOC 原始值
+        uint16_t plugAndChargeCurrentBatteryVoltage; // 车辆识别帧中的当前电压原始值
         double startSoc;                        // 启动 SOC（%）
         double endSoc;                          // 结束 SOC（%）
         unsigned int stopReason;                // 停止原因
@@ -149,12 +159,21 @@ private:
         bool stopCompleteSeen;                  // 是否收到 stop_complete
         bool startSuccessFlag;                  // 启动成功标志
         bool vehicleDisconnectedDuringStopping; // STOPPING 阶段是否已检测到断枪，进入 STOPPED 后可直接回到 IDLE
+        bool offlineCardChargeActive;           // 是否为离线刷卡启动并保持充电中
+        bool offlineCardStopBySwipeTriggered;   // 是否已触发刷卡停机
+        bool offlineCardSettlementPending;      // 是否待执行余额回写/解锁
+        std::string offlineCardNoHex;           // 离线刷卡卡号
+        uint32_t offlineCardStartBalance;       // 起始余额(分)
+        uint32_t offlineCardLatestBalance;      // 最近一次读卡余额(分)
+        uint32_t offlineCardFinalBalance;       // 结算回写余额(分)
+        std::string pendingCardStartAuthData;   // HMI 刷卡启动附带的鉴权/计费模型 JSON
         std::string pendingStartData;           // 缓存启动命令 data JSON
         std::string lastStartCmdData;           // 最近一次下发给 pile 的启动参数
         bool startingRetrySent;                 // STARTING 30s 重发是否已执行
         std::chrono::steady_clock::time_point startingEnterTime;  // 进入 STARTING 时间
         std::chrono::steady_clock::time_point chargingEnterTime;  // 进入 CHARGING 时间（用于 chargedTime）
         std::chrono::steady_clock::time_point lastFeeDataPublishTime; // BY ZF: 最近一次 feeData 发布时间
+        std::chrono::steady_clock::time_point plugAndChargeAuthRequestTime; // 即插即充平台鉴权请求时间
         std::chrono::steady_clock::time_point stoppingEnterTime;  // 进入 STOPPING 时间
         std::chrono::steady_clock::time_point lastMeterMsgTime;   // 最近电表消息时间
         std::chrono::steady_clock::time_point lastMeterValueTime; // 最近电量变化时间
@@ -191,6 +210,15 @@ private:
             , chargeStartTime(0)
             , chargeEndTime(0)
             , hasVinCode(false)
+            , plugAndChargeFlag(0x01)
+            , mergeChargeFlag(0x00)
+            , plugAndChargeActive(false)
+            , plugAndChargeVehicleIdConfirmed(false)
+            , plugAndChargeAuthRequestPublished(false)
+            , plugAndChargeAuthResultSent(false)
+            , plugAndChargeAuthAckReceived(false)
+            , plugAndChargeBatterySoc(0)
+            , plugAndChargeCurrentBatteryVoltage(0)
             , startSoc(0)
             , endSoc(0)
             , stopReason(0)
@@ -212,7 +240,40 @@ private:
             , stopCompleteSeen(false)
             , startSuccessFlag(false)
             , vehicleDisconnectedDuringStopping(false)
+            , offlineCardChargeActive(false)
+            , offlineCardStopBySwipeTriggered(false)
+            , offlineCardSettlementPending(false)
+            , offlineCardStartBalance(0)
+            , offlineCardLatestBalance(0)
+            , offlineCardFinalBalance(0)
             , startingRetrySent(false)
+        {
+            plugAndChargeBatteryChargeCount[0] = 0;
+            plugAndChargeBatteryChargeCount[1] = 0;
+            plugAndChargeBatteryChargeCount[2] = 0;
+        }
+    };
+
+    // BY ZF: 共享读卡器状态；读卡器可被多枪复用，但同一时刻只允许一个读卡器操作在执行。
+    enum CardReaderPhase {
+        CARD_PHASE_IDLE = 0,
+        CARD_PHASE_WAIT_START_CARD,
+        CARD_PHASE_WAIT_START_LOCK,
+        CARD_PHASE_WAIT_SETTLEMENT_WRITE,
+        CARD_PHASE_WAIT_SETTLEMENT_UNLOCK,
+        CARD_PHASE_WAIT_SETTLEMENT_VERIFY,
+        CARD_PHASE_WAIT_RF_CLOSE
+    };
+
+    struct CardReaderState {
+        bool rfOpened;
+        CardReaderPhase phase;
+        uint8_t gun;
+
+        CardReaderState()
+            : rfOpened(false)
+            , phase(CARD_PHASE_IDLE)
+            , gun(0)
         {}
     };
 
@@ -230,14 +291,17 @@ private:
     void handlePileData(uint8_t gun, const std::string& type, cJSON* data);
     void handleMeterData(uint8_t gun, cJSON* data);
     void handleMeterEvent(uint8_t gun, const std::string& event, cJSON* data);
+    void handleCardEvent(const std::string& event, cJSON* data);
 
     // BY ZF: 对外发布（下发 pile 命令、上报 logic 事件/计费）
     void publishPileCmd(uint8_t gun, const std::string& cmd, cJSON* data);
+    void publishCardCmd(const std::string& op, const char* cardNoHex, bool hasCardBalance, uint32_t cardBalance);
     void publishLogicEvent(uint8_t gun, const std::string& event, cJSON* data);
     void publishSaveErrorEvent(uint8_t gun, const FaultJudgeResult& result, unsigned int rawValue, const char* faultSource);
     void publishFeeData(uint8_t gun);
     void publishStateChange(uint8_t gun, ChargeState from, ChargeState to, const char* reason);
     void publishUpdateRecordEvent(uint8_t gun, const TradeRecord& rec);
+    void publishPlugAndChargeAuthRequest(uint8_t gun);
     // BY ZF: 结束充电后记录交易日志
     void logTradeRecordOnStopped(uint8_t gun, const char* reason);
     bool parseTradeRecordFromJson(cJSON* data, TradeRecord& rec);
@@ -250,13 +314,29 @@ private:
     int getCurrentMinuteOfDay() const;
     void applyEnergyDeltaToFee(uint8_t gun, double deltaKwh);
     void maybeTriggerTcuStopByPrecharge(uint8_t gun);
+    bool maybeHandlePlugAndChargeAuthTimeout(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     bool maybeConfirmMeterOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     bool maybeConfirmPileOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
+    void handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data);
+    void handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data, const char* resultSource);
     // BY ZF: 状态机入口与迁移
     void handleEvent(uint8_t gun, EventType evt, const char* reason);
     void transitionTo(uint8_t gun, ChargeState to, const char* reason);
     void enterStopping(uint8_t gun, const char* reason);
     void resetChargeSessionState(uint8_t gun);
+    void resetCardReaderState();
+    void resetGunOfflineCardState(uint8_t gun);
+    void startOfflineCardFlow(uint8_t gun, cJSON* data);
+    void beginOfflineCardCharge(uint8_t gun);
+    void prepareOfflineCardSettlement(uint8_t gun);
+    void beginOfflineCardSettlement(uint8_t gun);
+    void finishOfflineCardSettlement(uint8_t gun, bool closeRfCompleted);
+    void maybeStartPendingOfflineCardSettlement();
+    bool hasOfflineCardChargingSession() const;
+    bool hasPendingCardSettlement() const;
+    bool isCardReaderBusy() const;
+    std::string getCardCmdTopic() const;
+    std::string getCardEventTopic() const;
     static const char* stateToString(ChargeState s);
 
 private:
@@ -270,6 +350,7 @@ private:
     std::chrono::steady_clock::time_point m_lastReplayTime;          // 上次空闲重发时间
     std::chrono::steady_clock::time_point m_lastUnconfirmedQueryTime; // 上次向 logger 查询未确认记录时间
     std::mutex m_unconfirmedMutex;                                    // 缓冲互斥锁
+    CardReaderState m_cardReaderState;                                // 共享读卡器短操作上下文
 };
 
 #endif // CHARGE_LOGIC_PROCESS_H

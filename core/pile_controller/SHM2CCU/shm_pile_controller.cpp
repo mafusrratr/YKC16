@@ -404,26 +404,17 @@ unsigned int SHMPileController::getYcRawValueByBase(int baseIndex) const
 
 void SHMPileController::clearStartCompleteEvent()
 {
-    YX* point = getYxPoint(SHM2CCU::YX_START_COMPLETE);
-    if (point != nullptr) {
-        point->value = false;
-    }
+    clearYxPoint(SHM2CCU::YX_START_COMPLETE);
 }
 
 void SHMPileController::clearStopCompleteEvent()
 {
-    YX* point = getYxPoint(SHM2CCU::YX_STOP_COMPLETE);
-    if (point != nullptr) {
-        point->value = false;
-    }
+    clearYxPoint(SHM2CCU::YX_STOP_COMPLETE);
 }
 
 void SHMPileController::clearPowerCtrlResponseEvent()
 {
-    YX* point = getYxPoint(SHM2CCU::YX_POWER_CTRL_RESPONSE);
-    if (point != nullptr) {
-        point->value = false;
-    }
+    clearYxPoint(SHM2CCU::YX_POWER_CTRL_RESPONSE);
 }
 
 uint8_t SHMPileController::getWorkStatus() const
@@ -521,6 +512,16 @@ uint8_t SHMPileController::getChargePortWorkStatus() const
     }
     _tagChargePort* port = m_shm->getChargePort(m_gunIndex);
     return (port == nullptr) ? 0 : port->WorkStatus;
+}
+
+void SHMPileController::clearYxPoint(int baseIndex)
+{
+    YX* point = getYxPoint(baseIndex);
+    if (point == nullptr) {
+        return;
+    }
+    memset(point->desname, 0, sizeof(point->desname));
+    point->value = false;
 }
 
 void SHMPileController::zeroMemory(void* ptr, size_t size) const

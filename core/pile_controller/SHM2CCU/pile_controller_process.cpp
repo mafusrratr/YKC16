@@ -11,6 +11,21 @@
 #include <cmath>
 #include <cjson/cJSON.h>
 
+namespace {
+
+static uint16_t roundToUint16(double value)
+{
+    if (value <= 0.0) {
+        return 0;
+    }
+    if (value >= 65535.0) {
+        return 65535;
+    }
+    return static_cast<uint16_t>(value + 0.5);
+}
+
+}
+
 PileControllerProcess::PileControllerProcess()
     : BaseProcess(PROC_PILE_CONTROLLER, "SHM2CCUProcess")
     , m_cmdQueue(nullptr)
@@ -559,7 +574,7 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
                 item = cJSON_GetObjectItem(data, "percentage");
                 if (cJSON_IsNumber(item)) {
                     adjustData.adjustType = 0x02;
-                    adjustData.adjustParam = static_cast<uint16_t>(std::lround(item->valuedouble));
+                    adjustData.adjustParam = roundToUint16(item->valuedouble);
                     hasAdjust = true;
                 }
             }
@@ -567,13 +582,13 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
                 item = cJSON_GetObjectItem(data, "maxChargePowerKw");
                 if (cJSON_IsNumber(item)) {
                     adjustData.adjustType = 0x01;
-                    adjustData.adjustParam = static_cast<uint16_t>(std::lround(item->valuedouble));
+                    adjustData.adjustParam = roundToUint16(item->valuedouble);
                     hasAdjust = true;
                 }
             }
         } else if (cJSON_IsNumber(data)) {
             adjustData.adjustType = 0x01;
-            adjustData.adjustParam = static_cast<uint16_t>(std::lround(data->valuedouble));
+            adjustData.adjustParam = roundToUint16(data->valuedouble);
             hasAdjust = true;
         }
         if (hasAdjust) {

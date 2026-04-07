@@ -1,0 +1,284 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>S2StoppingClass</class>
+ <widget class="BaseDialog" name="S2StoppingClass">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>800</width>
+    <height>480</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>S2Stopping</string>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">QLabel{color:white;background:transparent;}</string>
+  </property>
+  <widget class="QLabel" name="base_bottom">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>425</y>
+     <width>800</width>
+     <height>55</height>
+    </rect>
+   </property>
+   <property name="pixmap">
+    <pixmap>:/cui/Resources/base_bottom.png</pixmap>
+   </property>
+   <property name="scaledContents">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_cdz_icon">
+   <property name="geometry">
+    <rect>
+     <x>8</x>
+     <y>2</y>
+     <width>32</width>
+     <height>32</height>
+    </rect>
+   </property>
+   <property name="pixmap">
+    <pixmap>:/cui/Resources/cdz_tb.png</pixmap>
+   </property>
+   <property name="scaledContents">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_cdz_title">
+   <property name="geometry">
+    <rect>
+     <x>44</x>
+     <y>0</y>
+     <width>180</width>
+     <height>41</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>25</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string>直流充电桩</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+   </property>
+  </widget>
+  <widget class="QLabel" name="lblTitle">
+   <property name="geometry">
+    <rect>
+     <x>230</x>
+     <y>0</y>
+     <width>180</width>
+     <height>41</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>25</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_id">
+   <property name="geometry">
+    <rect>
+     <x>590</x>
+     <y>0</y>
+     <width>211</width>
+     <height>41</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>25</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignRight|Qt::AlignVCenter</set>
+   </property>
+  </widget>
+  <widget class="QLabel" name="frameStop">
+   <property name="geometry">
+    <rect>
+     <x>115</x>
+     <y>108</y>
+     <width>570</width>
+     <height>220</height>
+    </rect>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">background:rgba(18,28,42,120);border:2px solid rgba(255,255,255,80);border-radius:18px;</string>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="lblStopHint">
+   <property name="geometry">
+    <rect>
+     <x>145</x>
+     <y>145</y>
+     <width>510</width>
+     <height>150</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>30</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string>停止中，请等待</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignCenter</set>
+   </property>
+   <property name="wordWrap">
+    <bool>true</bool>
+   </property>
+  </widget>
+  <widget class="QPushButton" name="btnAbout">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>426</y>
+     <width>130</width>
+     <height>52</height>
+    </rect>
+   </property>
+   <property name="focusPolicy">
+    <enum>Qt::NoFocus</enum>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">QPushButton{background:transparent;border:none;}</string>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_about">
+   <property name="geometry">
+    <rect>
+     <x>14</x>
+     <y>435</y>
+     <width>28</width>
+     <height>28</height>
+    </rect>
+   </property>
+   <property name="pixmap">
+    <pixmap>:/cui/Resources/about.png</pixmap>
+   </property>
+   <property name="scaledContents">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_about_text">
+   <property name="geometry">
+    <rect>
+     <x>50</x>
+     <y>431</y>
+     <width>66</width>
+     <height>36</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>18</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string>关于</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+   </property>
+  </widget>
+  <widget class="QPushButton" name="btnBack">
+   <property name="geometry">
+    <rect>
+     <x>662</x>
+     <y>430</y>
+     <width>124</width>
+     <height>36</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>18</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string>返回</string>
+   </property>
+   <property name="focusPolicy">
+    <enum>Qt::NoFocus</enum>
+   </property>
+   <property name="layoutDirection">
+    <enum>Qt::RightToLeft</enum>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">QPushButton{border:none;background:transparent;color:white;padding-right:6px;}QPushButton:pressed{padding-top:1px;}</string>
+   </property>
+   <property name="icon">
+    <iconset>
+     <normaloff>:/cui/Resources/back.png</normaloff>:/cui/Resources/back.png</iconset>
+   </property>
+   <property name="iconSize">
+    <size>
+     <width>24</width>
+     <height>24</height>
+    </size>
+   </property>
+  </widget>
+  <zorder>base_bottom</zorder>
+  <zorder>label_cdz_icon</zorder>
+  <zorder>label_cdz_title</zorder>
+  <zorder>lblTitle</zorder>
+  <zorder>label_id</zorder>
+  <zorder>frameStop</zorder>
+  <zorder>lblStopHint</zorder>
+  <zorder>btnAbout</zorder>
+  <zorder>label_about</zorder>
+  <zorder>label_about_text</zorder>
+  <zorder>btnBack</zorder>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

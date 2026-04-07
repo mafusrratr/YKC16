@@ -101,7 +101,8 @@ private:
     bool enqueueCommand(const CardBusinessCommand& cmd, std::string& err);
     bool popNextCommand(CardBusinessCommand& out);
 
-    void processOneCommand();
+    bool processOneCommand();
+    void processAutoRead();
     bool handleBusinessCommand(const CardBusinessCommand& cmd, std::string& err);
     bool handleOpenRf(std::string& err);
     bool handleCloseRf(std::string& err);
@@ -138,8 +139,10 @@ private:
     std::mutex m_cmdMutex;
     std::atomic<uint64_t> m_seq;
     bool m_deviceOnline;
+    bool m_rfOpened;
     std::chrono::steady_clock::time_point m_lastDaemonWatchdogFeed;
     std::chrono::steady_clock::time_point m_lastProcessWatchdogFeed;
+    std::chrono::steady_clock::time_point m_lastAutoReadTime;
 };
 
 #endif // TCU_CARD_PROCESS_H

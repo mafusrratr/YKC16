@@ -65,6 +65,7 @@ private:
     unsigned int getYcValue(int baseIndex) const;
     int16_t getYcSignedValue(int baseIndex) const;
     uint8_t getChargePortWorkStatus() const;
+    void clearYxPoint(int baseIndex);
     void zeroMemory(void* ptr, size_t size) const;
     void copyAsciiBytes(uint8_t* dest, size_t len, const char* src) const;
     void copyAsciiChars(char* dest, size_t len, const char* src) const;

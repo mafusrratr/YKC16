@@ -4,7 +4,6 @@
  */
 
 #include "pile_controller_process.h"
-#include "../../../libv2gshm/libcshm/v2gshm.h"
 #include <iostream>
 #include <chrono>
 #include <thread>
@@ -48,24 +47,6 @@ bool PileControllerProcess::doInitialize()
         std::cerr << "[PileController] Command queue not available (errno=ENOENT: run without daemon?), continue without command queue" << std::endl;
         delete m_cmdQueue;
         m_cmdQueue = nullptr;
-    }
-    
-    // BY ZF: 初始化共享内存（如果任何枪使用共享内存通信）
-    bool needShm = false;
-    for (const auto& gunCfg : m_config.gunConfigs) {
-        if (gunCfg.commType == "shm") {
-            needShm = true;
-            break;
-        }
-    }
-    
-    if (needShm) {
-        CShm* cshm = new CShm();
-        if (!cshm->init()) {
-            std::cerr << "[PileController] Failed to initialize shared memory" << std::endl;
-            return false;
-        }
-        m_shm = cshm;
     }
     
     // BY ZF: 创建所有枪的控制器实例
@@ -290,10 +271,8 @@ void PileControllerProcess::doCleanup()
     }
     m_controllers.clear();
     
-    if (m_shm) {
-        delete static_cast<CShm*>(m_shm);
-        m_shm = nullptr;
-    }
+    // BY ZF: CAN2CCU 进程当前不实现 shm 控制器，保留 m_shm 仅为兼容成员占位。
+    m_shm = nullptr;
     
     if (m_cmdQueue) {
         delete m_cmdQueue;
@@ -647,6 +626,56 @@ void PileControllerProcess::updateStatusFromController()
             can->clearStartCompleteValid();
         }
 
+        if (can->isVehicleIdDataValid()) {
+            TCU2CCU_StatusVehicleIdData r;
+            if (can->getVehicleIdData(&r) == 0) {
+                std::string payload = buildDataPayload(gunNo, "vehicle_id", [&r](cJSON* data) {
+                    auto addByteArray = [](cJSON* obj, const char* key, const uint8_t* bytes, size_t len) {
+                        cJSON* arr = cJSON_CreateArray();
+                        for (size_t i = 0; i < len; i++) {
+                            cJSON_AddItemToArray(arr, cJSON_CreateNumber(bytes[i]));
+                        }
+                        cJSON_AddItemToObject(obj, key, arr);
+                    };
+                    auto sanitizeAscii = [](const char* src, size_t len) {
+                        std::string out;
+                        out.reserve(len);
+                        for (size_t i = 0; i < len; i++) {
+                            unsigned char ch = static_cast<unsigned char>(src[i]);
+                            if (ch == 0) {
+                                break;
+                            }
+                            if (ch >= 0x20 && ch <= 0x7e) {
+                                out.push_back(static_cast<char>(ch));
+                            } else {
+                                out.push_back('.');
+                            }
+                        }
+                        return out;
+                    };
+                    std::string vinStr = sanitizeAscii(r.vin, 17);
+                    cJSON_AddStringToObject(data, "vin", vinStr.c_str());
+                    addByteArray(data, "batteryChargeCount", r.batteryChargeCount, 3);
+                    cJSON_AddNumberToObject(data, "soc", r.soc);
+                    cJSON_AddNumberToObject(data, "currentBatteryVoltage", r.currentBatteryVoltage);
+                });
+                publishCmdUpset(gunNo, payload);
+            }
+            can->clearVehicleIdDataValid();
+        }
+
+        if (can->isVehicleAuthAckDataValid()) {
+            TCU2CCU_VehicleAuthAckData r;
+            if (can->getVehicleAuthAckData(&r) == 0) {
+                std::string payload = buildDataPayload(gunNo, "vehicle_auth_ack", [&r](cJSON* data) {
+                    cJSON_AddNumberToObject(data, "successFlag", r.successFlag);
+                    cJSON_AddNumberToObject(data, "failReason", r.failReason);
+                });
+                publishCmdUpset(gunNo, payload);
+            }
+            can->clearVehicleAuthAckDataValid();
+        }
+
         if (can->isStopCompleteDataValid()) {
             TCU2CCU_StatusStopCompleteData r;
             if (can->getStopCompleteData(&r) == 0) {
@@ -831,6 +860,59 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
         }
         can->setStartChargeData(&startCmd);
         can->startCharge();
+    } else if (cmdStr == "vehicle_id_confirm") {
+        TCU2CCU_VehicleIdConfirmData confirmCmd;
+        memset(&confirmCmd, 0, sizeof(confirmCmd));
+        confirmCmd.successFlag = 0x01;
+        confirmCmd.failReason = 0x01;
+        if (cJSON_IsObject(data)) {
+            cJSON* v = cJSON_GetObjectItem(data, "successFlag");
+            if (cJSON_IsNumber(v)) confirmCmd.successFlag = static_cast<uint8_t>(v->valueint);
+            v = cJSON_GetObjectItem(data, "failReason");
+            if (cJSON_IsNumber(v)) confirmCmd.failReason = static_cast<uint8_t>(v->valueint);
+            v = cJSON_GetObjectItem(data, "result");
+            if (cJSON_IsNumber(v)) {
+                confirmCmd.successFlag = (v->valueint == 0) ? 0x00 : 0x01;
+                if (confirmCmd.successFlag == 0x00) {
+                    confirmCmd.failReason = 0x00;
+                }
+            }
+        }
+        can->setVehicleIdConfirmData(&confirmCmd);
+        can->vehicleIdConfirm();
+    } else if (cmdStr == "vehicle_auth") {
+        TCU2CCU_CmdVehicleAuthData authCmd;
+        memset(&authCmd, 0, sizeof(authCmd));
+        authCmd.successFlag = 0x01;
+        authCmd.failReason = 0xFF;
+        if (cJSON_IsObject(data)) {
+            cJSON* v = cJSON_GetObjectItem(data, "successFlag");
+            if (cJSON_IsNumber(v)) authCmd.successFlag = static_cast<uint8_t>(v->valueint);
+            v = cJSON_GetObjectItem(data, "failReason");
+            if (cJSON_IsNumber(v)) authCmd.failReason = static_cast<uint8_t>(v->valueint);
+            v = cJSON_GetObjectItem(data, "result");
+            if (cJSON_IsNumber(v)) {
+                authCmd.successFlag = (v->valueint == 0) ? 0x00 : 0x01;
+                if (authCmd.successFlag == 0x00) {
+                    authCmd.failReason = 0x00;
+                }
+            }
+            const char* vin = "";
+            cJSON* vinJson = cJSON_GetObjectItem(data, "vin");
+            if (cJSON_IsString(vinJson) && vinJson->valuestring) {
+                vin = vinJson->valuestring;
+            } else {
+                vinJson = cJSON_GetObjectItem(data, "vinCode");
+                if (cJSON_IsString(vinJson) && vinJson->valuestring) {
+                    vin = vinJson->valuestring;
+                }
+            }
+            if (vin && vin[0] != '\0') {
+                std::strncpy(authCmd.vin, vin, sizeof(authCmd.vin));
+            }
+        }
+        can->setVehicleAuthData(&authCmd);
+        can->vehicleAuth();
     } else if (cmdStr == "stop_charge") {
         TCU2CCU_CmdStopChargeData stopCmd;
         memset(&stopCmd, 0, sizeof(stopCmd));

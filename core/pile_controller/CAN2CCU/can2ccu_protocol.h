@@ -73,6 +73,8 @@ public:
     int encodeOutputVAControl();
     int encodeGetStatus(uint8_t gunNo);
     int encodeClearFault(uint8_t gunNo);
+    int encodeVehicleIdConfirm();
+    int encodeVehicleAuth();
     
     // ========== 解码入口与状态汇总 ==========
     int decodeFrame(uint32_t canId, const uint8_t* data, size_t dataLen);
@@ -99,6 +101,8 @@ public:
      * @return 0 成功，否则失败
      */
     int encodeStopCompleteAck(uint8_t stopReason, uint8_t confirmFlag);
+    int encodeVehicleIdConfirmFrame();
+    int encodeVehicleAuthFrame();
     
     /**
      * 编码并发送版本校验帧（表22，PGN=0x07）
@@ -149,6 +153,8 @@ public:
      * @return 0成功，其他失败
      */
     int setStartChargeData(const TCU2CCU_CmdStartChargeData* cmdData);
+    int setVehicleIdConfirmData(const TCU2CCU_VehicleIdConfirmData* cmdData);
+    int setVehicleAuthData(const TCU2CCU_CmdVehicleAuthData* cmdData);
     int setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmdData);
     int setOutputVAData(const TCU2CCU_CmdOutputVAData* cmdData);
     int setVersionCheckData(const TCU2CCU_CmdVersionCheckData* cmdData);
@@ -245,6 +251,11 @@ public:
      * @return 0成功，其他失败
      */
     int getVehicleIdData(TCU2CCU_StatusVehicleIdData* outStatusData) const;
+    bool isVehicleIdDataValid() const { return m_vehicleIdDataValid; }
+    void clearVehicleIdDataValid() { m_vehicleIdDataValid = false; }
+    int getVehicleAuthAckData(TCU2CCU_VehicleAuthAckData* outData) const;
+    bool isVehicleAuthAckDataValid() const { return m_vehicleAuthAckDataValid; }
+    void clearVehicleAuthAckDataValid() { m_vehicleAuthAckDataValid = false; }
     
     // BY ZF: 遥测数据访问（协议层解码后填充，业务层读取）
     
@@ -350,6 +361,12 @@ private:
     // BY ZF: 启动充电应答数据（接收）
     TCU2CCU_StartChargeResponseData m_startChargeResponseData;
     bool m_startChargeResponseDataValid;
+
+    // BY ZF: 车辆识别数据应答（0x18）与车辆识别鉴权帧（0x19）下发缓存
+    TCU2CCU_VehicleIdConfirmData m_vehicleIdConfirmData;
+    bool m_vehicleIdConfirmDataValid;
+    TCU2CCU_CmdVehicleAuthData m_cmdVehicleAuthData;
+    bool m_cmdVehicleAuthDataValid;
     
     // BY ZF: 停止充电命令数据（下发）
     TCU2CCU_CmdStopChargeData m_cmdStopChargeData;
@@ -401,6 +418,8 @@ private:
     // BY ZF: 车辆识别信息数据
     TCU2CCU_StatusVehicleIdData m_statusVehicleIdData;
     bool m_vehicleIdDataValid;  // 数据是否有效
+    TCU2CCU_VehicleAuthAckData m_vehicleAuthAckData;
+    bool m_vehicleAuthAckDataValid;  // 数据是否有效
     
     // ========== 遥测数据成员变量（解码后填充，业务层读取）==========
     
@@ -476,6 +495,8 @@ private:
      */
     int decodeStopChargeResponse(const uint8_t* data, size_t dataLen);
     int decodePowerAdjustResponse(const uint8_t* data, size_t dataLen);
+    int decodeVehicleIdFrame(uint32_t canId, const uint8_t* data, size_t dataLen);
+    int decodeVehicleAuthAck(const uint8_t* data, size_t dataLen);
     
     /**
      * 解码版本校验应答帧（表23，PGN=0x08，填充到成员变量）
@@ -621,8 +642,10 @@ private:
     static const uint16_t PGN_OUTPUT_VA_CTRL = 0x4C;   // 输出电压电流调节命令
     static const uint16_t PGN_START_CHARGE_ACK = 0x12; // 启动充电应答确认
     static const uint16_t PGN_STOP_CHARGE_ACK = 0x14;  // 停止充电应答确认
-    static const uint16_t PGN_VIN_CONFIRM = 0x18;      // VIN信息确认
-    static const uint16_t PGN_VIN_REQUEST = 0x19;      // VIN信息请求
+    static const uint16_t PGN_VEHICLE_ID_CONFIRM = 0x18;      // 车辆识别数据应答帧
+    static const uint16_t PGN_VEHICLE_AUTH = 0x19;            // 车辆识别鉴权帧
+    static const uint16_t PGN_VIN_CONFIRM = 0x18;             // 兼容旧命名
+    static const uint16_t PGN_VIN_REQUEST = 0x19;             // 兼容旧命名
     static const uint16_t PGN_HEARTBEAT = 0x40;        // 心跳帧
     
     // BY ZF: 接收端PGN定义
@@ -634,8 +657,10 @@ private:
     static const uint16_t PGN_POWER_ADJUST_RESP = 0x10;    // 功率调节应答
     static const uint16_t PGN_START_COMPLETE = 0x11;       // 充电启动完成状态
     static const uint16_t PGN_STOP_COMPLETE = 0x13;         // 停止充电完成状态
-    static const uint16_t PGN_VIN_INFO = 0x17;             // VIN信息
-    static const uint16_t PGN_VIN_REPLY_ACK = 0x1A;        // VIN信息回复确认
+    static const uint16_t PGN_VEHICLE_ID = 0x17;            // 车辆识别数据帧
+    static const uint16_t PGN_VEHICLE_AUTH_ACK = 0x1A;      // 车辆识别鉴权应答帧
+    static const uint16_t PGN_VIN_INFO = 0x17;              // 兼容旧命名
+    static const uint16_t PGN_VIN_REPLY_ACK = 0x1A;         // 兼容旧命名
     static const uint16_t PGN_TELEMETRY_20 = 0x20;          // 直流遥测帧20
     static const uint16_t PGN_TELEMETRY_21 = 0x21;          // 直流遥测帧21
     static const uint16_t PGN_TELESIGNAL_22 = 0x22;         // 直流遥信帧1

@@ -23,6 +23,8 @@
 - `tcu/meter/{gun}/event`
 - `tcu/plat/{gun}/cmd`
 - `tcu/plat/{gun}/event`
+- `tcu/card/0/cmd`
+- `tcu/card/0/event`
 - `tcu/save/{gun}/event`
 - `tcu/logger/{gun}/event`
 
@@ -84,6 +86,8 @@
 | `tcu/meter/{gun}/event` | meter | logic | 1 | 是 | 电表在线/离线 |
 | `tcu/plat/{gun}/cmd` | comm | logic、HMI（部分平台/HMI兼容使用） | 1 | 否 | 平台下发的业务命令抽象 |
 | `tcu/plat/{gun}/event` | comm | logic、HMI | 1 | 是 | 平台在线/离线、平台配置下发 |
+| `tcu/card/0/cmd` | logic | card | 1 | 否 | 读卡器射频开关、锁卡、写余额、解锁 |
+| `tcu/card/0/event` | card | logic | 1 | 否 | 读卡信息、锁卡结果、写卡结果、解锁结果 |
 | `tcu/save/{gun}/event` | logic | logger | 2 | 是 | 本地持久化事件，目前主要是故障记录 |
 | `tcu/logger/{gun}/event` | logger | logic | 2 | 否 | 未确认交易记录回传等 |
 
@@ -103,6 +107,7 @@
 - `tcu/meter/{gun}/data`
 - `tcu/meter/{gun}/event`
 - `tcu/logger/{gun}/event`
+- `tcu/card/0/event`
 
 #### 发布
 
@@ -123,11 +128,19 @@
 - `type=Error`
 - 用于本地故障持久化
 
+5) `tcu/card/0/cmd`
+- `op=open_rf`
+- `op=close_rf`
+- `op=card_lock`
+- `op=card_unlock`
+- `op=card_write`
+
 #### 发布策略
 - `tcu/pile/{gun}/cmd`：QoS2，retain=false
 - `tcu/logic/{gun}/event`：QoS2，retain=true
 - `tcu/logic/{gun}/feeData`：QoS1，retain=false
 - `tcu/save/{gun}/event`：QoS2，retain=true
+- `tcu/card/0/cmd`：QoS1，retain=false
 
 ### 5.2 tcu_pile_controller / tcu_cdzctrl
 
@@ -324,6 +337,35 @@
   - `cmd=stop_charge`
   - 放电场景附带 `data.v2g=1`
 
+### 5.11 tcu_card
+
+代码位置：
+- `/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/core/card/card_process.cpp`
+
+#### 订阅
+- `tcu/card/0/cmd`
+
+#### 支持命令
+- `op=open_rf`
+- `op=close_rf`
+- `op=card_lock`
+- `op=card_unlock`
+- `op=card_write`
+
+#### 发布
+- `event=rf_opened`
+- `event=rf_closed`
+- `event=card_info`
+- `event=card_locked`
+- `event=card_unlocked`
+- `event=card_written`
+- `event=op_failed`
+- `event=device_online`
+- `event=device_offline`
+
+#### 发布策略
+- `tcu/card/0/event`：QoS1，retain=false
+
 ## 6. 关键消息类型归纳
 
 ### 6.1 logic 命令
@@ -333,6 +375,7 @@ Topic：`tcu/logic/{gun}/cmd`
 常见 `cmd`：
 - `start_charge`
 - `stop_charge`
+- `request_card_start`
 
 示例：
 
@@ -352,6 +395,43 @@ Topic：`tcu/logic/{gun}/cmd`
   }
 }
 ```
+
+离线刷卡启动示例：
+
+```json
+{
+  "ts": 1775450000000,
+  "seq": 13,
+  "source": "tcu_hmi",
+  "gun": 0,
+  "cmd": "request_card_start",
+  "data": {
+    "mode": "offline",
+    "chargeMode": 2,
+    "feeModelNo": 12,
+    "feeModelId": "MODEL014",
+    "timeNum": 12,
+    "timeSeg": ["0000", "1200", "1430", "1535", "1538", "1540", "1550", "1600", "1730", "1830", "1930", "2130"],
+    "chargeFee": [0.70, 0.90, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    "serviceFee": [0.15, 0.15, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+  }
+}
+```
+
+说明：
+- HMI 按目标枪发布到 `tcu/logic/{gun}/cmd`
+- 当前 `data.mode` 支持：
+  - `offline`：离线刷卡启动，已实现
+  - `online`：预留，logic 当前会返回 `cmd_reject`
+- HMI 可在 `data` 中一并携带充电模式、计费模型等启动参数
+- HMI 不需要传 `orderNo`、`prechargeAmount`
+- `orderNo` 由 logic 本地生成，`prechargeAmount` 由实际刷卡读到的卡余额决定
+- logic 会使用 HMI 传递的计费模型；若未携带，则回退使用当前枪已同步的本地计费模型
+- logic 会用实际刷到的卡号和余额覆盖 `chargeUserNo/cardNumber/prechargeAmount`
+- 若读到的卡已处于锁卡状态（`locked=true`），logic 会返回 `event=card_auth_reject`，`reason=card_locked`
+- 示例：
+  - 0 号枪：`tcu/logic/0/cmd`
+  - 1 号枪：`tcu/logic/1/cmd`
 
 ### 6.2 pile 业务事件
 
@@ -534,6 +614,32 @@ Topic：`tcu/logger/{gun}/event`
 }
 ```
 
+### 6.8 card 事件
+
+Topic：`tcu/card/0/event`
+
+刷卡成功示例：
+
+```json
+{
+  "ts": 1775450001234,
+  "seq": 45,
+  "source": "tcu_card",
+  "event": "card_info",
+  "data": {
+    "uidHex": "A1B2C3D4",
+    "cardNoHex": "11223344556677889900AABBCCDDEEFF",
+    "cardBalance": 12345,
+    "locked": false
+  }
+}
+```
+
+说明：
+- `cardBalance` 当前按分为单位，`100` 表示 `1.00元`
+- logic 当前按 HMI 下发的 `data.mode` 处理刷卡模式，已实现 `offline`
+- `tcu/card/0/cmd` / `tcu/card/0/event` 为固定共享读卡器 topic，不再由 logic 配置项决定
+
 ## 7. 典型链路
 
 ### 7.1 启动充电链路
@@ -555,6 +661,17 @@ Topic：`tcu/logger/{gun}/event`
 - logic 生成统一 `pointKey`
 - logic 发布 `tcu/save/{gun}/event`，`type=Error`
 - logger 订阅该消息并落本地故障记录
+
+### 7.4 离线刷卡启动链路
+- HMI 发布 `tcu/logic/{gun}/cmd`，`cmd=request_card_start`
+- HMI 在 `data.mode=offline` 时请求离线刷卡启动
+- logic 使用固定共享读卡器 topic 下发 `tcu/card/0/cmd`：`op=open_rf`
+- card 模块读取到卡后发布 `tcu/card/0/event`：`event=card_info`
+- logic 判断余额大于 `100` 后下发 `op=card_lock`，锁卡成功后启动充电
+- 共享读卡器在任一离线刷卡会话存在时保持可用，允许另一把枪后续再次发起刷卡启动
+- 充电中再次检测到同卡 `card_info` 时，logic 触发停机并记录“刷卡停止”
+- 停止完成后，logic 下发 `op=card_write` 回写余额，再下发 `op=card_unlock`
+- 若无其他离线刷卡充电会话，读卡器回传解锁成功后，logic 最后下发 `op=close_rf`
 
 ## 8. 当前兼容 / 历史 / 预留 Topic
 

@@ -13,6 +13,7 @@
 #include "ui_f7checkoutok.h"
 #include "ui_numinputdlg.h"
 #include "ui_numinputfdlg.h"
+#include "ui_s2stopping.h"
 
 class A3AboutPage : public QWidget
 {
@@ -48,6 +49,15 @@ public:
     explicit E1ChargeInfoPage(QWidget *parent = 0) : BaseDialog(parent) { ui.setupUi(this); }
 private:
     Ui::E1ChargeInfoClass ui;
+};
+
+class S2StoppingPage : public BaseDialog
+{
+    Q_OBJECT
+public:
+    explicit S2StoppingPage(QWidget *parent = 0) : BaseDialog(parent) { ui.setupUi(this); }
+private:
+    Ui::S2StoppingClass ui;
 };
 
 class F7CheckoutOkPage : public BaseDialog

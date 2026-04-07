@@ -43,11 +43,15 @@ public:
     int getStatus(uint8_t gunNo, PileStatus* status) override;
 
     int setStartChargeData(const TCU2CCU_CmdStartChargeData* cmd);
+    int setVehicleIdConfirmData(const TCU2CCU_VehicleIdConfirmData* cmd);
+    int setVehicleAuthData(const TCU2CCU_CmdVehicleAuthData* cmd);
     int setStopChargeData(const TCU2CCU_CmdStopChargeData* cmd);
     int setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* cmd);
     int setOutputVAData(const TCU2CCU_CmdOutputVAData* cmd);
     int setVersionCheckData(const TCU2CCU_CmdVersionCheckData* cmd);
     int setChargeParamData(const TCU2CCU_CmdChargeParamData* cmd);
+    int vehicleIdConfirm();
+    int vehicleAuth();
     int powerAdjust();
     int outputVAControl();
 
@@ -65,6 +69,12 @@ public:
     bool isStartCompleteDataValid() const;
     int getStopCompleteData(TCU2CCU_StatusStopCompleteData* out) const;
     bool isStopCompleteDataValid() const;
+    int getVehicleIdData(TCU2CCU_StatusVehicleIdData* out) const;
+    bool isVehicleIdDataValid() const;
+    void clearVehicleIdDataValid();
+    int getVehicleAuthAckData(TCU2CCU_VehicleAuthAckData* out) const;
+    bool isVehicleAuthAckDataValid() const;
+    void clearVehicleAuthAckDataValid();
     void clearStartChargeResponseValid();
     void clearStopChargeResponseValid();
     void clearStartCompleteValid();

@@ -75,6 +75,56 @@ namespace {
         return false;
     }
 
+    uint8_t getPlugAndChargeFlag(cJSON* obj) {
+        int value = 0x01;
+        if (obj) {
+            jsonGetInt(obj, "plugAndChargeFlag", value);
+        }
+        return static_cast<uint8_t>(value & 0xFF);
+    }
+
+    uint8_t getMergeChargeFlag(cJSON* obj) {
+        int value = 0x00;
+        if (obj) {
+            if (!jsonGetInt(obj, "mergeChargeFlag", value) &&
+                !jsonGetInt(obj, "mergedChargeFlag", value)) {
+                jsonGetInt(obj, "combineChargeFlag", value);
+            }
+        }
+        return static_cast<uint8_t>(value & 0xFF);
+    }
+
+    std::string sanitizeVinString(const char* vin) {
+        std::string out;
+        if (!vin) {
+            return out;
+        }
+        out.reserve(17);
+        for (size_t i = 0; vin[i] != '\0' && i < 17; ++i) {
+            unsigned char ch = static_cast<unsigned char>(vin[i]);
+            if (ch >= 'a' && ch <= 'z') {
+                ch = static_cast<unsigned char>(ch - 'a' + 'A');
+            }
+            out.push_back(static_cast<char>(ch));
+        }
+        return out;
+    }
+
+    bool isValidVinString(const std::string& vin) {
+        if (vin.size() != 17) {
+            return false;
+        }
+        for (size_t i = 0; i < vin.size(); ++i) {
+            const char ch = vin[i];
+            const bool isDigit = (ch >= '0' && ch <= '9');
+            const bool isUpper = (ch >= 'A' && ch <= 'Z');
+            if ((!isDigit && !isUpper) || ch == 'I' || ch == 'O' || ch == 'Q') {
+                return false;
+            }
+        }
+        return true;
+    }
+
     std::string minuteToHHMM(int minuteOfDay) {
         if (minuteOfDay < 0) {
             minuteOfDay = 0;
@@ -284,11 +334,16 @@ void ChargeLogicProcess::doRun()
                 publishFeeData(static_cast<uint8_t>(i));
             }
         }
+        if (maybeHandlePlugAndChargeAuthTimeout(static_cast<uint8_t>(i), now)) {
+            continue;
+        }
         if (gs.state == STATE_STARTING) {
             if (gs.startingEnterTime.time_since_epoch().count() != 0) {
                 const auto elapsed = now - gs.startingEnterTime;
                 // BY ZF: STARTING 持续 30s 未完成，重发一次启动命令
-                if (!gs.startingRetrySent && elapsed >= std::chrono::seconds(30)) {
+                if (!gs.plugAndChargeActive &&
+                    !gs.startingRetrySent &&
+                    elapsed >= std::chrono::seconds(30)) {
                     cJSON* retryData = nullptr;
                     if (!gs.lastStartCmdData.empty()) {
                         retryData = cJSON_Parse(gs.lastStartCmdData.c_str());
@@ -399,6 +454,7 @@ bool ChargeLogicProcess::initMqtt()
             m_mqtt.subscribe(t6.str(), 2);
             m_mqtt.subscribe(t7.str(), 1);
         }
+        m_mqtt.subscribe(getCardEventTopic(), 1);
     });
 
     if (!m_mqtt.connect(m_config.mqttHost, m_config.mqttPort, m_config.mqttKeepalive)) {
@@ -474,6 +530,10 @@ void ChargeLogicProcess::onMqttMessage(const std::string& topic, const std::stri
             cJSON* data = cJSON_GetObjectItem(root, "data");
             handleMeterEvent(gun, event ? event : "", data);
         }
+    } else if (topic == getCardEventTopic()) {
+        const char* event = getString(root, "event");
+        cJSON* data = cJSON_GetObjectItem(root, "data");
+        handleCardEvent(event ? event : "", data);
     }
 
     cJSON_Delete(root);
@@ -485,11 +545,11 @@ void ChargeLogicProcess::handleLogicCmd(uint8_t gun, const std::string& cmd, cJS
         return;
     }
 
-    if (cmd == "start_charge") {
-        // BY ZF: 测试阶段默认鉴权通过，收到 start_charge 即进入启动流程
+    if (cmd == "vin_req" || cmd == "start_charge") {
+        // BY ZF: HMI 即插即充入口兼容 vin_req；保留 start_charge 兼容旧流程。
         GunState& gs = m_gunStates[gun];
         if (gs.state == STATE_PREPARE) {
-            updateAuthBasis(gun, data, "hmi");
+            updateAuthBasis(gun, data, (cmd == "vin_req") ? "hmi_vin_req" : "hmi");
             gs.pendingStart = true;
             gs.pendingStartData.clear();
             // BY ZF: 缓存“桩侧启动帧参数”，避免透传上层业务字段到 pile
@@ -502,11 +562,11 @@ void ChargeLogicProcess::handleLogicCmd(uint8_t gun, const std::string& cmd, cJS
                 }
                 cJSON_Delete(pileStartData);
             }
-            handleEvent(gun, EVT_START_CMD, "start_cmd");
-            handleEvent(gun, EVT_AUTH_OK, "hmi_start_auto_auth_ok");
+            handleEvent(gun, EVT_START_CMD, (cmd == "vin_req") ? "vin_req" : "start_cmd");
+            handleEvent(gun, EVT_AUTH_OK, (cmd == "vin_req") ? "hmi_vin_req_auto_auth_ok" : "hmi_start_auto_auth_ok");
         } else {
             cJSON* evt = cJSON_CreateObject();
-            cJSON_AddStringToObject(evt, "cmd", "start_charge");
+            cJSON_AddStringToObject(evt, "cmd", cmd.c_str());
             cJSON_AddStringToObject(evt, "state", stateToString(gs.state));
             cJSON_AddStringToObject(evt, "reason", "start_only_allowed_in_prepare");
             publishLogicEvent(gun, "cmd_reject", evt);
@@ -522,6 +582,25 @@ void ChargeLogicProcess::handleLogicCmd(uint8_t gun, const std::string& cmd, cJS
 
     if (cmd == "reset_error") {
         handleEvent(gun, EVT_RESET_ERROR, "reset_error");
+        return;
+    }
+
+    if (cmd == "request_card_start") {
+        std::string mode = "offline";
+        const char* modeStr = getString(data, "mode");
+        if (modeStr && modeStr[0] != '\0') {
+            mode = modeStr;
+        }
+        if (mode != "offline") {
+            cJSON* evt = cJSON_CreateObject();
+            cJSON_AddStringToObject(evt, "cmd", "request_card_start");
+            cJSON_AddStringToObject(evt, "reason", "card_auth_mode_not_supported");
+            cJSON_AddStringToObject(evt, "mode", mode.c_str());
+            publishLogicEvent(gun, "cmd_reject", evt);
+            cJSON_Delete(evt);
+            return;
+        }
+        startOfflineCardFlow(gun, data);
         return;
     }
 }
@@ -572,6 +651,10 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
     }
 
     if (cmd == "start_charge") {
+        if (gs.plugAndChargeActive && gs.state == STATE_STARTING && gs.plugAndChargeVehicleIdConfirmed) {
+            handlePlugAndChargeAuthResult(gun, data, "start_charge");
+            return;
+        }
         // BY ZF: platform 启动流程，测试阶段默认鉴权通过
         if (gs.state == STATE_PREPARE) {
             updateAuthBasis(gun, data, "platform");
@@ -601,6 +684,10 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
     }
 
     if (cmd == "auth_result") {
+        if (gs.plugAndChargeActive && gs.state == STATE_STARTING && gs.plugAndChargeVehicleIdConfirmed) {
+            handlePlugAndChargeAuthResult(gun, data, "auth_result");
+            return;
+        }
         int result = 0;
         if (data) {
             cJSON* v = cJSON_GetObjectItem(data, "result");
@@ -626,6 +713,11 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
         } else {
             handleEvent(gun, EVT_AUTH_FAIL, "auth_fail");
         }
+        return;
+    }
+
+    if (cmd == "plug_and_charge_auth_result") {
+        handlePlugAndChargeAuthResult(gun, data, "plug_and_charge_auth_result");
         return;
     }
 
@@ -710,6 +802,29 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
             }
         }
         handleEvent(gun, EVT_START_RESPONSE_OK, "start_response_ok");
+        return;
+    }
+
+    if (type == "vehicle_id") {
+        handlePlugAndChargeVehicleId(gun, data);
+        return;
+    }
+
+    if (type == "vehicle_auth_ack") {
+        if (data) {
+            cJSON* evt = cJSON_CreateObject();
+            cJSON* v = cJSON_GetObjectItem(data, "successFlag");
+            if (v && cJSON_IsNumber(v)) {
+                gs.plugAndChargeAuthAckReceived = true;
+                cJSON_AddNumberToObject(evt, "successFlag", v->valueint);
+            }
+            v = cJSON_GetObjectItem(data, "failReason");
+            if (v && cJSON_IsNumber(v)) {
+                cJSON_AddNumberToObject(evt, "failReason", v->valueint);
+            }
+            publishLogicEvent(gun, "plug_and_charge_auth_ack", evt);
+            cJSON_Delete(evt);
+        }
         return;
     }
 
@@ -928,6 +1043,506 @@ void ChargeLogicProcess::handlePlatEvent(uint8_t gun, const std::string& event, 
     return;
 }
 
+void ChargeLogicProcess::startOfflineCardFlow(uint8_t gun, cJSON* data)
+{
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+    GunState& gs = m_gunStates[gun];
+    if (gs.state != STATE_PREPARE) {
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "cmd", "request_card_start");
+        cJSON_AddStringToObject(evt, "state", stateToString(gs.state));
+        cJSON_AddStringToObject(evt, "reason", "card_start_only_allowed_in_prepare");
+        publishLogicEvent(gun, "cmd_reject", evt);
+        cJSON_Delete(evt);
+        return;
+    }
+    if (isCardReaderBusy()) {
+        // BY ZF: 记录刷卡启动被占用拒绝，便于排查多枪共享读卡器时序问题。
+        std::ostringstream oss;
+        oss << "gun=" << static_cast<int>(gun)
+            << ",phase=" << static_cast<int>(m_cardReaderState.phase)
+            << ",activeGun=" << static_cast<int>(m_cardReaderState.gun);
+        m_logSender.info("card_flow_busy", oss.str());
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "cmd", "request_card_start");
+        cJSON_AddStringToObject(evt, "reason", "card_reader_busy");
+        cJSON_AddNumberToObject(evt, "activeGun", static_cast<double>(m_cardReaderState.gun));
+        publishLogicEvent(gun, "cmd_reject", evt);
+        cJSON_Delete(evt);
+        return;
+    }
+
+    gs.pendingCardStartAuthData.clear();
+    if (data) {
+        char* out = cJSON_PrintUnformatted(data);
+        if (out) {
+            gs.pendingCardStartAuthData = out;
+            cJSON_free(out);
+        }
+    }
+    m_cardReaderState.gun = gun;
+    m_cardReaderState.phase = CARD_PHASE_WAIT_START_CARD;
+    {
+        std::ostringstream oss;
+        oss << "gun=" << static_cast<int>(gun)
+            << ",rfOpened=" << (m_cardReaderState.rfOpened ? 1 : 0);
+        m_logSender.info("card_flow_start", oss.str());
+    }
+    if (!m_cardReaderState.rfOpened) {
+        // BY ZF: 共享读卡器首次进入离线刷卡时打开射频，后续存在刷卡会话时保持开启。
+        m_cardReaderState.rfOpened = true;
+        publishCardCmd("open_rf", NULL, false, 0U);
+    }
+
+    cJSON* evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "mode", "offline");
+    cJSON_AddNumberToObject(evt, "rfOpened", m_cardReaderState.rfOpened ? 1 : 0);
+    publishLogicEvent(gun, "card_waiting", evt);
+    cJSON_Delete(evt);
+}
+
+void ChargeLogicProcess::beginOfflineCardCharge(uint8_t gun)
+{
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    gs.offlineCardChargeActive = true;
+    gs.offlineCardStopBySwipeTriggered = false;
+    gs.offlineCardSettlementPending = false;
+
+    cJSON* data = NULL;
+    if (!gs.pendingCardStartAuthData.empty()) {
+        data = cJSON_Parse(gs.pendingCardStartAuthData.c_str());
+    }
+    if (!data) {
+        data = cJSON_CreateObject();
+    }
+    cJSON_DeleteItemFromObject(data, "orderNo");
+    cJSON_DeleteItemFromObject(data, "prechargeAmount");
+    cJSON_ReplaceItemInObject(data, "chargeUserNo", cJSON_CreateString(gs.offlineCardNoHex.c_str()));
+    cJSON_ReplaceItemInObject(data, "cardNumber", cJSON_CreateString(gs.offlineCardNoHex.c_str()));
+    if (!cJSON_GetObjectItem(data, "chargeMode")) {
+        cJSON_AddNumberToObject(data, "chargeMode", 2);
+    }
+    cJSON_ReplaceItemInObject(data, "prechargeAmount",
+                              cJSON_CreateNumber(static_cast<double>(gs.offlineCardStartBalance) / 100.0));
+
+    // BY ZF: HMI 若未携带计费模型，则沿用当前枪已同步的本地计费模型。
+    const bool hasFeeModelPayload = cJSON_GetObjectItem(data, "timeNum") &&
+                                    cJSON_GetObjectItem(data, "timeSeg") &&
+                                    cJSON_GetObjectItem(data, "chargeFee") &&
+                                    cJSON_GetObjectItem(data, "serviceFee");
+    if (!hasFeeModelPayload && gs.feeInitialized) {
+        cJSON_ReplaceItemInObject(data, "feeModelNo", cJSON_CreateNumber(gs.feeModelNo));
+        cJSON_ReplaceItemInObject(data, "feeModelId", cJSON_CreateString(gs.feeModelId.c_str()));
+        cJSON_ReplaceItemInObject(data, "timeNum", cJSON_CreateNumber(static_cast<double>(gs.feeTimeNum)));
+        cJSON* timeSegArr = cJSON_CreateArray();
+        cJSON* chargeFeeArr = cJSON_CreateArray();
+        cJSON* serviceFeeArr = cJSON_CreateArray();
+        for (size_t i = 0; i < gs.feeTimeSegMinutes.size(); ++i) {
+            cJSON_AddItemToArray(timeSegArr, cJSON_CreateString(minuteToHHMM(gs.feeTimeSegMinutes[i]).c_str()));
+            cJSON_AddItemToArray(chargeFeeArr, cJSON_CreateNumber(gs.feeChargePricePerKwh[i]));
+            cJSON_AddItemToArray(serviceFeeArr, cJSON_CreateNumber(gs.feeServicePricePerKwh[i]));
+        }
+        cJSON_ReplaceItemInObject(data, "timeSeg", timeSegArr);
+        cJSON_ReplaceItemInObject(data, "chargeFee", chargeFeeArr);
+        cJSON_ReplaceItemInObject(data, "serviceFee", serviceFeeArr);
+    }
+
+    if (!hasFeeModelPayload && !gs.feeInitialized) {
+        std::ostringstream oss;
+        oss << "gun=" << static_cast<int>(gun)
+            << ",feeModelNo=" << gs.feeModelNo
+            << ",feeModelId=" << gs.feeModelId;
+        m_logSender.warn("card_flow_fee_model_missing", oss.str());
+    }
+
+    updateAuthBasis(gun, data, "card_offline");
+    gs.pendingStart = true;
+    gs.pendingStartData.clear();
+    cJSON* pileStartData = buildPileStartData(NULL);
+    if (pileStartData) {
+        char* out = cJSON_PrintUnformatted(pileStartData);
+        if (out) {
+            gs.pendingStartData = out;
+            cJSON_free(out);
+        }
+        cJSON_Delete(pileStartData);
+    }
+    cJSON_Delete(data);
+    gs.pendingCardStartAuthData.clear();
+
+    {
+        std::ostringstream oss;
+        oss << "gun=" << static_cast<int>(gun)
+            << ",cardNoHex=" << gs.offlineCardNoHex
+            << ",startBalance=" << gs.offlineCardStartBalance;
+        m_logSender.info("card_flow_begin_charge", oss.str());
+    }
+    resetCardReaderState();
+    handleEvent(gun, EVT_START_CMD, "card_start_cmd");
+    handleEvent(gun, EVT_AUTH_OK, "card_auth_ok");
+    maybeStartPendingOfflineCardSettlement();
+}
+
+void ChargeLogicProcess::prepareOfflineCardSettlement(uint8_t gun)
+{
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+    GunState& gs = m_gunStates[gun];
+    if (!gs.offlineCardChargeActive && !gs.offlineCardSettlementPending) {
+        return;
+    }
+
+    const long long totalFeeCent = static_cast<long long>(std::llround(std::max(0.0, gs.feeTotalElectricAmount + gs.feeTotalServiceAmount) * 100.0));
+    const long long remain = static_cast<long long>(gs.offlineCardStartBalance) - totalFeeCent;
+    gs.offlineCardFinalBalance = static_cast<uint32_t>(remain > 0 ? remain : 0);
+    gs.offlineCardChargeActive = false;
+    gs.offlineCardSettlementPending = true;
+    {
+        std::ostringstream oss;
+        oss << "gun=" << static_cast<int>(gun)
+            << ",startBalance=" << gs.offlineCardStartBalance
+            << ",totalFeeCent=" << totalFeeCent
+            << ",finalBalance=" << gs.offlineCardFinalBalance;
+        m_logSender.info("card_flow_prepare_settlement", oss.str());
+    }
+
+    maybeStartPendingOfflineCardSettlement();
+}
+
+void ChargeLogicProcess::beginOfflineCardSettlement(uint8_t gun)
+{
+    if (gun >= m_gunStates.size() || isCardReaderBusy()) {
+        return;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    if (!gs.offlineCardSettlementPending) {
+        return;
+    }
+
+    m_cardReaderState.gun = gun;
+    m_cardReaderState.phase = CARD_PHASE_WAIT_SETTLEMENT_WRITE;
+    {
+        std::ostringstream oss;
+        oss << "gun=" << static_cast<int>(gun)
+            << ",cardNoHex=" << gs.offlineCardNoHex
+            << ",finalBalance=" << gs.offlineCardFinalBalance;
+        m_logSender.info("card_flow_begin_settlement", oss.str());
+    }
+    publishCardCmd("card_write", gs.offlineCardNoHex.c_str(), true, gs.offlineCardFinalBalance);
+
+    cJSON* evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
+    cJSON_AddNumberToObject(evt, "startBalance", static_cast<double>(gs.offlineCardStartBalance));
+    cJSON_AddNumberToObject(evt, "finalBalance", static_cast<double>(gs.offlineCardFinalBalance));
+    publishLogicEvent(gun, "card_settlement_begin", evt);
+    cJSON_Delete(evt);
+}
+
+void ChargeLogicProcess::finishOfflineCardSettlement(uint8_t gun, bool closeRfCompleted)
+{
+    if (gun >= m_gunStates.size()) {
+        resetCardReaderState();
+        return;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    {
+        std::ostringstream oss;
+        oss << "gun=" << static_cast<int>(gun)
+            << ",cardNoHex=" << gs.offlineCardNoHex
+            << ",finalBalance=" << gs.offlineCardFinalBalance
+            << ",closeRfCompleted=" << (closeRfCompleted ? 1 : 0);
+        m_logSender.info("card_flow_finish_settlement", oss.str());
+    }
+    cJSON* evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
+    cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardFinalBalance));
+    publishLogicEvent(gun, "card_session_closed", evt);
+    cJSON_Delete(evt);
+
+    resetGunOfflineCardState(gun);
+    if (closeRfCompleted) {
+        m_cardReaderState.rfOpened = false;
+    }
+    resetCardReaderState();
+    maybeStartPendingOfflineCardSettlement();
+}
+
+void ChargeLogicProcess::resetCardReaderState()
+{
+    const bool rfOpened = m_cardReaderState.rfOpened;
+    m_cardReaderState = CardReaderState();
+    m_cardReaderState.rfOpened = rfOpened;
+}
+
+void ChargeLogicProcess::resetGunOfflineCardState(uint8_t gun)
+{
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    gs.offlineCardChargeActive = false;
+    gs.offlineCardStopBySwipeTriggered = false;
+    gs.offlineCardSettlementPending = false;
+    gs.offlineCardNoHex.clear();
+    gs.offlineCardStartBalance = 0;
+    gs.offlineCardLatestBalance = 0;
+    gs.offlineCardFinalBalance = 0;
+    gs.pendingCardStartAuthData.clear();
+}
+
+bool ChargeLogicProcess::hasOfflineCardChargingSession() const
+{
+    for (size_t i = 0; i < m_gunStates.size(); ++i) {
+        if (m_gunStates[i].offlineCardChargeActive) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ChargeLogicProcess::hasPendingCardSettlement() const
+{
+    for (size_t i = 0; i < m_gunStates.size(); ++i) {
+        if (m_gunStates[i].offlineCardSettlementPending) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ChargeLogicProcess::isCardReaderBusy() const
+{
+    return m_cardReaderState.phase != CARD_PHASE_IDLE;
+}
+
+void ChargeLogicProcess::maybeStartPendingOfflineCardSettlement()
+{
+    if (isCardReaderBusy()) {
+        return;
+    }
+    for (uint8_t gun = 0; gun < m_gunStates.size(); ++gun) {
+        if (m_gunStates[gun].offlineCardSettlementPending) {
+            beginOfflineCardSettlement(gun);
+            return;
+        }
+    }
+}
+
+void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
+{
+    {
+        std::ostringstream oss;
+        oss << "event=" << event
+            << ",phase=" << static_cast<int>(m_cardReaderState.phase)
+            << ",gun=" << static_cast<int>(m_cardReaderState.gun);
+        m_logSender.info("card_event_rx", oss.str());
+    }
+    if (event == "rf_opened") {
+        m_cardReaderState.rfOpened = true;
+        return;
+    }
+
+    if (event == "rf_closed") {
+        if (m_cardReaderState.phase == CARD_PHASE_WAIT_RF_CLOSE) {
+            finishOfflineCardSettlement(m_cardReaderState.gun, true);
+        } else {
+            m_cardReaderState.rfOpened = false;
+        }
+        return;
+    }
+
+    if (event == "card_info") {
+        const char* cardNoHex = getString(data, "cardNoHex");
+        int cardBalance = 0;
+        jsonGetInt(data, "cardBalance", cardBalance);
+        const bool locked = cJSON_IsTrue(cJSON_GetObjectItem(data, "locked"));
+        const std::string cardNo = (cardNoHex && cardNoHex[0] != '\0') ? std::string(cardNoHex) : std::string();
+
+        if (m_cardReaderState.phase == CARD_PHASE_WAIT_START_CARD &&
+            m_cardReaderState.gun < m_gunStates.size()) {
+            GunState& gs = m_gunStates[m_cardReaderState.gun];
+            if (!cardNo.empty()) {
+                gs.offlineCardNoHex = cardNo;
+            }
+            if (cardBalance >= 0) {
+                gs.offlineCardLatestBalance = static_cast<uint32_t>(cardBalance);
+            }
+            if (locked) {
+                {
+                    std::ostringstream oss;
+                    oss << "gun=" << static_cast<int>(m_cardReaderState.gun)
+                        << ",cardNoHex=" << gs.offlineCardNoHex
+                        << ",cardBalance=" << gs.offlineCardLatestBalance;
+                    m_logSender.warn("card_auth_locked_reject", oss.str());
+                }
+                cJSON* evt = cJSON_CreateObject();
+                cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
+                cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardLatestBalance));
+                cJSON_AddStringToObject(evt, "reason", "card_locked");
+                publishLogicEvent(m_cardReaderState.gun, "card_auth_reject", evt);
+                cJSON_Delete(evt);
+            } else if (cardBalance > 100) {
+                gs.offlineCardStartBalance = static_cast<uint32_t>(cardBalance);
+                m_cardReaderState.phase = CARD_PHASE_WAIT_START_LOCK;
+                {
+                    std::ostringstream oss;
+                    oss << "gun=" << static_cast<int>(m_cardReaderState.gun)
+                        << ",cardNoHex=" << gs.offlineCardNoHex
+                        << ",cardBalance=" << gs.offlineCardStartBalance;
+                    m_logSender.info("card_auth_pass", oss.str());
+                }
+                cJSON* evt = cJSON_CreateObject();
+                cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
+                cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardStartBalance));
+                publishLogicEvent(m_cardReaderState.gun, "card_auth_ok", evt);
+                cJSON_Delete(evt);
+                publishCardCmd("card_lock", gs.offlineCardNoHex.c_str(), false, 0U);
+            } else {
+                {
+                    std::ostringstream oss;
+                    oss << "gun=" << static_cast<int>(m_cardReaderState.gun)
+                        << ",cardNoHex=" << gs.offlineCardNoHex
+                        << ",cardBalance=" << gs.offlineCardLatestBalance;
+                    m_logSender.info("card_auth_reject", oss.str());
+                }
+                cJSON* evt = cJSON_CreateObject();
+                cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
+                cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardLatestBalance));
+                cJSON_AddStringToObject(evt, "reason", "card_balance_not_enough");
+                publishLogicEvent(m_cardReaderState.gun, "card_auth_reject", evt);
+                cJSON_Delete(evt);
+            }
+            return;
+        }
+
+        if (m_cardReaderState.phase == CARD_PHASE_WAIT_SETTLEMENT_VERIFY &&
+            m_cardReaderState.gun < m_gunStates.size()) {
+            if (!locked) {
+                bool hasOtherOfflineSession = false;
+                for (uint8_t gun = 0; gun < m_gunStates.size(); ++gun) {
+                    if (gun == m_cardReaderState.gun) {
+                        continue;
+                    }
+                    if (m_gunStates[gun].offlineCardChargeActive || m_gunStates[gun].offlineCardSettlementPending) {
+                        hasOtherOfflineSession = true;
+                        break;
+                    }
+                }
+                const bool needCloseRf = !hasOtherOfflineSession;
+                if (needCloseRf) {
+                    m_cardReaderState.phase = CARD_PHASE_WAIT_RF_CLOSE;
+                    publishCardCmd("close_rf", NULL, false, 0U);
+                } else {
+                    finishOfflineCardSettlement(m_cardReaderState.gun, false);
+                }
+            }
+            return;
+        }
+
+        for (uint8_t gun = 0; gun < m_gunStates.size(); ++gun) {
+            GunState& gs = m_gunStates[gun];
+            if (gs.state != STATE_CHARGING || !gs.offlineCardChargeActive || gs.offlineCardStopBySwipeTriggered) {
+                continue;
+            }
+            if (!cardNo.empty() && !gs.offlineCardNoHex.empty() && gs.offlineCardNoHex != cardNo) {
+                continue;
+            }
+            if (cardBalance >= 0) {
+                gs.offlineCardLatestBalance = static_cast<uint32_t>(cardBalance);
+            }
+            const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(0x0105U));
+            if (result.valid) {
+                gs.stopReason = result.reason;
+            }
+            gs.offlineCardStopBySwipeTriggered = true;
+            {
+                std::ostringstream oss;
+                oss << "gun=" << static_cast<int>(gun)
+                    << ",cardNoHex=" << gs.offlineCardNoHex
+                    << ",cardBalance=" << gs.offlineCardLatestBalance;
+                m_logSender.info("card_stop_trigger", oss.str());
+            }
+            cJSON* evt = cJSON_CreateObject();
+            cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
+            cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardLatestBalance));
+            publishLogicEvent(gun, "card_stop_request", evt);
+            cJSON_Delete(evt);
+            handleEvent(gun, EVT_STOP_CMD, "card_swipe_stop");
+            return;
+        }
+        return;
+    }
+
+    if (event == "card_locked") {
+        if (m_cardReaderState.phase == CARD_PHASE_WAIT_START_LOCK &&
+            m_cardReaderState.gun < m_gunStates.size()) {
+            beginOfflineCardCharge(m_cardReaderState.gun);
+        }
+        return;
+    }
+
+    if (event == "card_written") {
+        if (m_cardReaderState.phase == CARD_PHASE_WAIT_SETTLEMENT_WRITE &&
+            m_cardReaderState.gun < m_gunStates.size()) {
+            m_cardReaderState.phase = CARD_PHASE_WAIT_SETTLEMENT_UNLOCK;
+            publishCardCmd("card_unlock", m_gunStates[m_cardReaderState.gun].offlineCardNoHex.c_str(), false, 0U);
+        }
+        return;
+    }
+
+    if (event == "card_unlocked") {
+        if (m_cardReaderState.phase == CARD_PHASE_WAIT_SETTLEMENT_UNLOCK) {
+            m_cardReaderState.phase = CARD_PHASE_WAIT_SETTLEMENT_VERIFY;
+        }
+        return;
+    }
+
+    if (event == "op_failed") {
+        const char* op = getString(data, "op");
+        const char* reason = getString(data, "reason");
+        const uint8_t gun = (m_cardReaderState.gun < m_gunStates.size()) ? m_cardReaderState.gun : 0U;
+        {
+            std::ostringstream oss;
+            oss << "gun=" << static_cast<int>(gun)
+                << ",op=" << (op ? op : "")
+                << ",reason=" << (reason ? reason : "");
+            m_logSender.warn("card_op_failed", oss.str());
+        }
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "op", op ? op : "");
+        cJSON_AddStringToObject(evt, "reason", reason ? reason : "");
+        if (gun < m_gunStates.size()) {
+            cJSON_AddStringToObject(evt, "cardNoHex", m_gunStates[gun].offlineCardNoHex.c_str());
+        }
+        publishLogicEvent(gun, "card_op_failed", evt);
+        cJSON_Delete(evt);
+
+        if (op && std::strcmp(op, "open_rf") == 0) {
+            m_cardReaderState.rfOpened = false;
+            resetCardReaderState();
+        } else if (op && std::strcmp(op, "card_lock") == 0) {
+            m_cardReaderState.phase = CARD_PHASE_WAIT_START_CARD;
+        } else if (op && std::strcmp(op, "card_write") == 0) {
+            resetCardReaderState();
+        } else if (op && std::strcmp(op, "card_unlock") == 0) {
+            resetCardReaderState();
+        } else if (op && std::strcmp(op, "close_rf") == 0) {
+            resetCardReaderState();
+        }
+        return;
+    }
+}
+
 bool ChargeLogicProcess::maybeConfirmMeterOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now)
 {
     if (gun >= m_gunStates.size()) {
@@ -1049,6 +1664,41 @@ void ChargeLogicProcess::publishPileCmd(uint8_t gun, const std::string& cmd, cJS
     cJSON_Delete(root);
 }
 
+void ChargeLogicProcess::publishCardCmd(const std::string& op,
+                                        const char* cardNoHex,
+                                        bool hasCardBalance,
+                                        uint32_t cardBalance)
+{
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "ts", static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count()));
+    cJSON_AddNumberToObject(root, "seq", static_cast<double>(++m_seq));
+    cJSON_AddStringToObject(root, "source", "tcu_logic");
+    cJSON_AddStringToObject(root, "op", op.c_str());
+    if (cardNoHex && cardNoHex[0] != '\0') {
+        cJSON_AddStringToObject(root, "cardNoHex", cardNoHex);
+    }
+    if (hasCardBalance) {
+        cJSON_AddNumberToObject(root, "cardBalance", static_cast<double>(cardBalance));
+    }
+    char* out = cJSON_PrintUnformatted(root);
+    if (out) {
+        m_mqtt.publish(getCardCmdTopic(), out, 1, false);
+        cJSON_free(out);
+    }
+    cJSON_Delete(root);
+}
+
+std::string ChargeLogicProcess::getCardCmdTopic() const
+{
+    return m_config.mqttTopicPrefix + "/card/0/cmd";
+}
+
+std::string ChargeLogicProcess::getCardEventTopic() const
+{
+    return m_config.mqttTopicPrefix + "/card/0/event";
+}
+
 void ChargeLogicProcess::publishLogicEvent(uint8_t gun, const std::string& event, cJSON* data)
 {
     std::ostringstream topic;
@@ -1070,6 +1720,36 @@ void ChargeLogicProcess::publishLogicEvent(uint8_t gun, const std::string& event
         cJSON_free(out);
     }
     cJSON_Delete(root);
+}
+
+void ChargeLogicProcess::publishPlugAndChargeAuthRequest(uint8_t gun)
+{
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+    GunState& gs = m_gunStates[gun];
+    if (!gs.plugAndChargeActive || !gs.plugAndChargeVehicleIdConfirmed || gs.plugAndChargeAuthRequestPublished) {
+        return;
+    }
+
+    cJSON* evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "vin", gs.vinCode.c_str());
+    cJSON_AddStringToObject(evt, "vinCode", gs.vinCode.c_str());
+    cJSON_AddNumberToObject(evt, "plugAndChargeFlag", gs.plugAndChargeFlag);
+    cJSON_AddNumberToObject(evt, "mergeChargeFlag", gs.mergeChargeFlag);
+    cJSON_AddNumberToObject(evt, "chargeStartTime", static_cast<double>(gs.chargeStartTime));
+    cJSON_AddNumberToObject(evt, "soc", gs.plugAndChargeBatterySoc);
+    cJSON_AddNumberToObject(evt, "currentBatteryVoltage", gs.plugAndChargeCurrentBatteryVoltage);
+    cJSON* countArr = cJSON_CreateArray();
+    for (int i = 0; i < 3; ++i) {
+        cJSON_AddItemToArray(countArr, cJSON_CreateNumber(gs.plugAndChargeBatteryChargeCount[i]));
+    }
+    cJSON_AddItemToObject(evt, "batteryChargeCount", countArr);
+    publishLogicEvent(gun, "plug_and_charge_auth_request", evt);
+    cJSON_Delete(evt);
+
+    gs.plugAndChargeAuthRequestPublished = true;
+    gs.plugAndChargeAuthRequestTime = std::chrono::steady_clock::now();
 }
 
 void ChargeLogicProcess::publishFeeData(uint8_t gun)
@@ -1416,10 +2096,29 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     gs.tradeNo = baseTradeNo.empty()
         ? ("T" + std::to_string(gun) + "_" + std::to_string(gs.chargeStartTime))
         : baseTradeNo;
-    gs.startType = (source && std::string(source) == "platform") ? 2 : 1;
+    if (source && std::string(source) == "platform") {
+        gs.startType = 2;
+    } else if (source && std::string(source) == "card_offline") {
+        gs.startType = 4;
+    } else {
+        gs.startType = 1;
+    }
     gs.startSoc = 0;
     gs.endSoc = 0;
     gs.stopReason = 0;
+    gs.plugAndChargeFlag = getPlugAndChargeFlag(data);
+    gs.mergeChargeFlag = getMergeChargeFlag(data);
+    gs.plugAndChargeActive = (gs.plugAndChargeFlag == 0x02);
+    gs.plugAndChargeVehicleIdConfirmed = false;
+    gs.plugAndChargeAuthRequestPublished = false;
+    gs.plugAndChargeAuthResultSent = false;
+    gs.plugAndChargeAuthAckReceived = false;
+    gs.plugAndChargeBatteryChargeCount[0] = 0;
+    gs.plugAndChargeBatteryChargeCount[1] = 0;
+    gs.plugAndChargeBatteryChargeCount[2] = 0;
+    gs.plugAndChargeBatterySoc = 0;
+    gs.plugAndChargeCurrentBatteryVoltage = 0;
+    gs.plugAndChargeAuthRequestTime = std::chrono::steady_clock::time_point();
     gs.hasVinCode = false;
     gs.vinCode.clear();
     gs.chargeMode = chargeMode;
@@ -1448,6 +2147,8 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     cJSON_AddNumberToObject(evt, "chargeMode", gs.chargeMode);
     cJSON_AddNumberToObject(evt, "prechargeAmount", gs.prechargeAmount);
     cJSON_AddNumberToObject(evt, "feeModelNo", gs.feeModelNo);
+    cJSON_AddNumberToObject(evt, "plugAndChargeFlag", gs.plugAndChargeFlag);
+    cJSON_AddNumberToObject(evt, "mergeChargeFlag", gs.mergeChargeFlag);
     int v2g = 0;
     jsonGetInt(data, "v2g", v2g);
     cJSON_AddNumberToObject(evt, "v2g", (v2g != 0) ? 1 : 0);
@@ -1669,6 +2370,286 @@ void ChargeLogicProcess::maybeTriggerTcuStopByPrecharge(uint8_t gun)
     }
 }
 
+bool ChargeLogicProcess::maybeHandlePlugAndChargeAuthTimeout(
+    uint8_t gun,
+    const std::chrono::steady_clock::time_point& now)
+{
+    if (gun >= m_gunStates.size()) {
+        return false;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    if (!gs.plugAndChargeActive ||
+        gs.state != STATE_STARTING ||
+        !gs.plugAndChargeVehicleIdConfirmed ||
+        gs.plugAndChargeAuthResultSent ||
+        gs.plugAndChargeAuthRequestTime.time_since_epoch().count() == 0 ||
+        now - gs.plugAndChargeAuthRequestTime < std::chrono::seconds(30)) {
+        return false;
+    }
+
+    cJSON* pileData = cJSON_CreateObject();
+    cJSON_AddStringToObject(pileData, "vin", gs.vinCode.c_str());
+    cJSON_AddNumberToObject(pileData, "successFlag", 0x01);
+    cJSON_AddNumberToObject(pileData, "failReason", 0x03);
+    publishPileCmd(gun, "vehicle_auth", pileData);
+    cJSON_Delete(pileData);
+
+    gs.plugAndChargeAuthResultSent = true;
+
+    cJSON* evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "vin", gs.vinCode.c_str());
+    cJSON_AddNumberToObject(evt, "failReason", 0x03);
+    publishLogicEvent(gun, "plug_and_charge_auth_timeout", evt);
+    cJSON_Delete(evt);
+    return true;
+}
+
+void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
+{
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    std::string vin = sanitizeVinString(data ? getString(data, "vin") : "");
+    if (!vin.empty()) {
+        gs.vinCode = vin;
+        gs.hasVinCode = true;
+    }
+
+    if (data) {
+        cJSON* arr = cJSON_GetObjectItem(data, "batteryChargeCount");
+        if (arr && cJSON_IsArray(arr)) {
+            for (int i = 0; i < 3; ++i) {
+                cJSON* item = cJSON_GetArrayItem(arr, i);
+                if (item && cJSON_IsNumber(item)) {
+                    gs.plugAndChargeBatteryChargeCount[i] = static_cast<uint8_t>(item->valueint);
+                }
+            }
+        }
+        cJSON* v = cJSON_GetObjectItem(data, "soc");
+        if (v && cJSON_IsNumber(v)) {
+            gs.plugAndChargeBatterySoc = static_cast<uint16_t>(v->valueint & 0xFFFF);
+        }
+        v = cJSON_GetObjectItem(data, "currentBatteryVoltage");
+        if (v && cJSON_IsNumber(v)) {
+            gs.plugAndChargeCurrentBatteryVoltage = static_cast<uint16_t>(v->valueint & 0xFFFF);
+        }
+    }
+
+    const bool confirmOk = gs.plugAndChargeActive && gs.state == STATE_STARTING && isValidVinString(vin);
+    cJSON* pileData = cJSON_CreateObject();
+    cJSON_AddNumberToObject(pileData, "successFlag", confirmOk ? 0x00 : 0x01);
+    cJSON_AddNumberToObject(pileData, "failReason", confirmOk ? 0x00 : 0x01);
+    publishPileCmd(gun, "vehicle_id_confirm", pileData);
+    cJSON_Delete(pileData);
+
+    if (!confirmOk) {
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "vin", vin.c_str());
+        cJSON_AddStringToObject(evt, "reason", gs.plugAndChargeActive ? "invalid_vin" : "unexpected_vehicle_id");
+        publishLogicEvent(gun, "plug_and_charge_vehicle_id_reject", evt);
+        cJSON_Delete(evt);
+        return;
+    }
+
+    gs.plugAndChargeVehicleIdConfirmed = true;
+    publishPlugAndChargeAuthRequest(gun);
+
+    cJSON* evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "vin", vin.c_str());
+    publishLogicEvent(gun, "plug_and_charge_vehicle_id_confirmed", evt);
+    cJSON_Delete(evt);
+}
+
+void ChargeLogicProcess::handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data, const char* resultSource)
+{
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    if (!gs.plugAndChargeActive || gs.state != STATE_STARTING || !gs.plugAndChargeVehicleIdConfirmed) {
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "cmd", resultSource ? resultSource : "plug_and_charge_auth_result");
+        cJSON_AddStringToObject(evt, "reason", "plug_and_charge_auth_not_ready");
+        cJSON_AddStringToObject(evt, "state", stateToString(gs.state));
+        publishLogicEvent(gun, "cmd_reject", evt);
+        cJSON_Delete(evt);
+        return;
+    }
+    if (gs.plugAndChargeAuthResultSent) {
+        return;
+    }
+
+    bool authSuccess = false;
+    int result = 0;
+    bool hasResult = false;
+    bool hasExplicitSuccess = false;
+    int successFlag = -1;
+    unsigned int failReason = 0x02;
+    if (data) {
+        hasResult = jsonGetInt(data, "result", result);
+        hasExplicitSuccess = jsonGetInt(data, "successFlag", successFlag);
+        int failReasonInt = 0;
+        if (jsonGetInt(data, "failReason", failReasonInt) ||
+            jsonGetInt(data, "reasonCode", failReasonInt) ||
+            jsonGetInt(data, "authFailReason", failReasonInt)) {
+            failReason = static_cast<unsigned int>(failReasonInt) & 0xFFU;
+        }
+    }
+    if (hasResult) {
+        authSuccess = (result == 1);
+    } else if (hasExplicitSuccess && successFlag >= 0) {
+        authSuccess = (successFlag == 0);
+    } else if (resultSource && std::string(resultSource) == "start_charge") {
+        authSuccess = true;
+    }
+
+    std::string authVin = sanitizeVinString(data ? getString(data, "vin") : "");
+    if (authVin.empty()) {
+        authVin = sanitizeVinString(data ? getString(data, "vinCode") : "");
+    }
+    if (authVin.empty()) {
+        authVin = gs.vinCode;
+    }
+
+    if (authSuccess && !isValidVinString(authVin)) {
+        authSuccess = false;
+        failReason = 0x01;
+    }
+    if (authSuccess) {
+        failReason = 0x00;
+    } else if (failReason == 0x00) {
+        failReason = 0x02;
+    }
+
+    if (data) {
+        const char* userNo = getString(data, "chargeUserNo");
+        if (!userNo || !userNo[0]) userNo = getString(data, "userNo");
+        if (!userNo || !userNo[0]) userNo = getString(data, "userId");
+        if (userNo && userNo[0]) {
+            gs.chargeUserNo = userNo;
+        }
+
+        const char* orderNo = getString(data, "orderNo");
+        if (!orderNo || !orderNo[0]) orderNo = getString(data, "chargeOrderNo");
+        if (orderNo && orderNo[0]) {
+            gs.orderNo = orderNo;
+        }
+
+        const char* preTradeNo = getString(data, "preTradeNo");
+        if (preTradeNo && preTradeNo[0]) {
+            gs.preTradeNo = preTradeNo;
+        } else if (gs.preTradeNo.empty() && !gs.orderNo.empty()) {
+            gs.preTradeNo = gs.orderNo;
+        }
+
+        const char* tradeNo = getString(data, "tradeNo");
+        if (tradeNo && tradeNo[0]) {
+            gs.tradeNo = tradeNo;
+        } else if (gs.tradeNo.empty()) {
+            const std::string baseTradeNo = gs.preTradeNo.empty() ? gs.orderNo : gs.preTradeNo;
+            gs.tradeNo = baseTradeNo.empty()
+                ? ("T" + std::to_string(gun) + "_" + std::to_string(gs.chargeStartTime))
+                : baseTradeNo;
+        }
+
+        int chargeMode = 0;
+        if (jsonGetInt(data, "chargeMode", chargeMode)) {
+            gs.chargeMode = chargeMode;
+        }
+
+        cJSON* prechargeAmount = cJSON_GetObjectItem(data, "prechargeAmount");
+        if (!prechargeAmount) prechargeAmount = cJSON_GetObjectItem(data, "prepaidAmount");
+        if (prechargeAmount && cJSON_IsNumber(prechargeAmount)) {
+            gs.prechargeAmount = prechargeAmount->valuedouble;
+        }
+
+        int feeModelNo = 0;
+        if (jsonGetInt(data, "feeModelNo", feeModelNo)) {
+            gs.feeModelNo = feeModelNo;
+        }
+
+        const char* feeModelId = getString(data, "feeModelId");
+        if (feeModelId && feeModelId[0]) {
+            gs.feeModelId = feeModelId;
+        }
+
+        gs.mergeChargeFlag = getMergeChargeFlag(data);
+
+        if (cJSON_GetObjectItem(data, "timeNum")) {
+            parseFeeModel(gun, data);
+        }
+    }
+
+    cJSON* pileData = cJSON_CreateObject();
+    cJSON_AddStringToObject(pileData, "vin", authVin.c_str());
+    cJSON_AddNumberToObject(pileData, "successFlag", authSuccess ? 0x00 : 0x01);
+    cJSON_AddNumberToObject(pileData, "failReason", failReason);
+    cJSON_AddStringToObject(pileData, "chargeUserNo", gs.chargeUserNo.c_str());
+    cJSON_AddStringToObject(pileData, "orderNo", gs.orderNo.c_str());
+    cJSON_AddStringToObject(pileData, "preTradeNo", gs.preTradeNo.c_str());
+    cJSON_AddStringToObject(pileData, "tradeNo", gs.tradeNo.c_str());
+    cJSON_AddNumberToObject(pileData, "chargeStartTime", static_cast<double>(gs.chargeStartTime));
+    cJSON_AddNumberToObject(pileData, "chargeMode", gs.chargeMode);
+    cJSON_AddNumberToObject(pileData, "prechargeAmount", gs.prechargeAmount);
+    cJSON_AddNumberToObject(pileData, "feeModelNo", gs.feeModelNo);
+    cJSON_AddStringToObject(pileData, "feeModelId", gs.feeModelId.c_str());
+    cJSON_AddNumberToObject(pileData, "plugAndChargeFlag", gs.plugAndChargeFlag);
+    cJSON_AddNumberToObject(pileData, "mergeChargeFlag", gs.mergeChargeFlag);
+    cJSON_AddNumberToObject(pileData, "timeNum", gs.feeTimeNum);
+    cJSON* timeSegArr = cJSON_CreateArray();
+    for (size_t i = 0; i < gs.feeTimeSegMinutes.size(); ++i) {
+        cJSON_AddItemToArray(timeSegArr, cJSON_CreateString(minuteToHHMM(gs.feeTimeSegMinutes[i]).c_str()));
+    }
+    cJSON_AddItemToObject(pileData, "timeSeg", timeSegArr);
+    cJSON* chargeFeeArr = cJSON_CreateArray();
+    for (size_t i = 0; i < gs.feeChargePricePerKwh.size(); ++i) {
+        cJSON_AddItemToArray(chargeFeeArr, cJSON_CreateNumber(gs.feeChargePricePerKwh[i]));
+    }
+    cJSON_AddItemToObject(pileData, "chargeFee", chargeFeeArr);
+    cJSON* serviceFeeArr = cJSON_CreateArray();
+    for (size_t i = 0; i < gs.feeServicePricePerKwh.size(); ++i) {
+        cJSON_AddItemToArray(serviceFeeArr, cJSON_CreateNumber(gs.feeServicePricePerKwh[i]));
+    }
+    cJSON_AddItemToObject(pileData, "serviceFee", serviceFeeArr);
+    publishPileCmd(gun, "vehicle_auth", pileData);
+    cJSON_Delete(pileData);
+
+    gs.plugAndChargeAuthResultSent = true;
+
+    cJSON* evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "sourceCmd", resultSource ? resultSource : "");
+    cJSON_AddStringToObject(evt, "vin", authVin.c_str());
+    cJSON_AddNumberToObject(evt, "successFlag", authSuccess ? 0x00 : 0x01);
+    cJSON_AddNumberToObject(evt, "failReason", failReason);
+
+    if (!authSuccess) {
+        unsigned int startFailPoint = 0xF002U;
+        if (failReason == 0x01U) {
+            startFailPoint = 0x32U;
+        } else if (failReason == 0x03U) {
+            startFailPoint = 0x34U;
+        }
+        const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(startFailPoint));
+        if (result.valid) {
+            gs.stopReason = result.reason;
+            cJSON_AddNumberToObject(evt, "stopReason", static_cast<double>(gs.stopReason));
+            if (!result.message.empty()) {
+                cJSON_AddStringToObject(evt, "stopReasonText", result.message.c_str());
+            }
+        }
+    }
+    publishLogicEvent(gun, "plug_and_charge_auth_result_forwarded", evt);
+    cJSON_Delete(evt);
+
+    if (!authSuccess) {
+        transitionTo(gun, STATE_STOPPED, "plug_and_charge_auth_failed");
+    }
+}
+
 void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* reason)
 {
     // BY ZF: 集中状态机入口
@@ -1835,6 +2816,9 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
     publishStateChange(gun, prev, to, reason);
     if (to == STATE_STOPPED ) {
         logTradeRecordOnStopped(gun, reason);
+        if (gs.offlineCardChargeActive || gs.offlineCardSettlementPending) {
+            prepareOfflineCardSettlement(gun);
+        }
         if (gs.vehicleDisconnectedDuringStopping) {
             handleEvent(gun, EVT_VEHICLE_DISCONNECTED, "vehicle_disconnected_after_stopping");
         }
@@ -1844,6 +2828,7 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
         resetChargeSessionState(gun);
         // BY ZF: 进入 IDLE 时补发一条清零 feeData。
         publishFeeData(gun);
+        maybeStartPendingOfflineCardSettlement();
     }
 }
 
@@ -1860,6 +2845,7 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.pendingStart = false;
     gs.pendingStartData.clear();
     gs.lastStartCmdData.clear();
+    gs.pendingCardStartAuthData.clear();
     gs.startingRetrySent = false;
     gs.stopCompleteSeen = false;
     gs.tcuStopReqSent = false;
@@ -1869,6 +2855,7 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.startingEnterTime = std::chrono::steady_clock::time_point();
     gs.chargingEnterTime = std::chrono::steady_clock::time_point();
     gs.lastFeeDataPublishTime = std::chrono::steady_clock::time_point();
+    gs.plugAndChargeAuthRequestTime = std::chrono::steady_clock::time_point();
     gs.stoppingEnterTime = std::chrono::steady_clock::time_point();
     gs.lastMeterMsgTime = std::chrono::steady_clock::time_point();
     gs.lastMeterValueTime = std::chrono::steady_clock::time_point();
@@ -1884,6 +2871,18 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.tradeNo.clear();
     gs.hasVinCode = false;
     gs.vinCode.clear();
+    gs.plugAndChargeFlag = 0x01;
+    gs.mergeChargeFlag = 0x00;
+    gs.plugAndChargeActive = false;
+    gs.plugAndChargeVehicleIdConfirmed = false;
+    gs.plugAndChargeAuthRequestPublished = false;
+    gs.plugAndChargeAuthResultSent = false;
+    gs.plugAndChargeAuthAckReceived = false;
+    gs.plugAndChargeBatteryChargeCount[0] = 0;
+    gs.plugAndChargeBatteryChargeCount[1] = 0;
+    gs.plugAndChargeBatteryChargeCount[2] = 0;
+    gs.plugAndChargeBatterySoc = 0;
+    gs.plugAndChargeCurrentBatteryVoltage = 0;
     gs.startSoc = 0;
     gs.endSoc = 0;
     gs.stopReason = 0;

@@ -88,6 +88,7 @@ FORMS += \
     ui/c6flushcad.ui \
     ui/e1chargeinfo.ui \
     ui/f7checkoutok.ui \
+    ui/s2stopping.ui \
     ui/numinputdlg.ui \
     ui/numinputfdlg.ui
 

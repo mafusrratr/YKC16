@@ -566,6 +566,31 @@ namespace {
         return std::string();
     }
 
+    static std::string sanitizeVin17(const std::string& vinText)
+    {
+        std::string vin;
+        vin.reserve(17U);
+        for (size_t i = 0; i < vinText.size(); ++i) {
+            const unsigned char ch = static_cast<unsigned char>(vinText[i]);
+            if (std::isalnum(ch)) {
+                vin.push_back(static_cast<char>(std::toupper(ch)));
+            }
+            if (vin.size() >= 17U) {
+                break;
+            }
+        }
+        return vin;
+    }
+
+    static void appendAsciiFixed(std::vector<uint8_t>& out, const std::string& text, size_t width, uint8_t fill = 0x00)
+    {
+        const size_t n = std::min(width, text.size());
+        out.insert(out.end(), text.begin(), text.begin() + n);
+        if (n < width) {
+            out.insert(out.end(), width - n, fill);
+        }
+    }
+
     // BY ZF: 浮点缩放并四舍五入到无符号整数。
     static uint32_t scaleToU32(double v, double scale)
     {
@@ -945,6 +970,17 @@ bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& pa
                 std::vector<uint8_t> body;
                 if (buildChargeRecordBodyFromUpdateRecord(gun, data, body) && !body.empty()) {
                     sendPlatformFrame(kCmdUploadTradeRecord, body);
+                }
+            }
+            // BY ZF: 即插即充鉴权请求 -> 平台0xA5 VIN启动申请。
+            if (cJSON_IsString(evt) &&
+                std::strcmp(evt->valuestring, "plug_and_charge_auth_request") == 0 &&
+                cJSON_IsObject(data)) {
+                std::vector<uint8_t> body = buildVinStartApplyBody(gun, data);
+                if (!body.empty()) {
+                    (void)sendPlatformFrame(kCmdStartApply, body);
+                } else {
+                    m_logSender.warn("platform_vin_start_apply", "build_body_fail");
                 }
             }
             cJSON_Delete(root);
@@ -2706,6 +2742,50 @@ std::vector<uint8_t> CommProcess::buildBsmBody(uint8_t gun) const
     return body;
 }
 
+std::vector<uint8_t> CommProcess::buildVinStartApplyBody(uint8_t gun, cJSON* data)
+{
+    std::vector<uint8_t> body;
+    if (!data || gun >= m_gunRuntimeData.size()) {
+        return body;
+    }
+
+    std::string vin = jsonGetString(data, "vin");
+    if (vin.empty()) {
+        vin = jsonGetString(data, "vinCode");
+    }
+    vin = sanitizeVin17(vin);
+    if (vin.empty()) {
+        return body;
+    }
+
+    int plugAndChargeFlag = 0x02;
+    (void)jsonGetInt(data, "plugAndChargeFlag", plugAndChargeFlag);
+    int mergeChargeFlag = 0x00;
+    (void)jsonGetInt(data, "mergeChargeFlag", mergeChargeFlag);
+
+    GunRuntimeData& rd = m_gunRuntimeData[gun];
+    rd.pendingVinAuthVin = vin;
+    rd.pendingVinAuthPlugAndChargeFlag = static_cast<uint8_t>(plugAndChargeFlag & 0xFF);
+    rd.pendingVinAuthMergeChargeFlag = static_cast<uint8_t>(mergeChargeFlag & 0xFF);
+
+    if (mergeChargeFlag != 0x00) {
+        // BY ZF: TODO 并充场景应改走 0xA1，并补主辅枪标记、并充序号等字段；当前先保留点位，后续完善。
+        m_logSender.warn("platform_vin_start_apply", "merge_charge_todo_use_a1");
+    }
+
+    // BY ZF: 当前仅按单枪 VIN 启动组 0xA5；并充 0xA1 逻辑后续补齐。
+    // BY ZF: 0xA5 VIN请求启动：桩编号BCD7 + 枪号BCD1 + 启动方式0x03 + 无密码0x00。
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    const int gunNo = static_cast<int>(gun) + 1;
+    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
+    body.push_back(0x03);
+    body.push_back(0x00);
+    body.insert(body.end(), 8, 0x00);
+    body.insert(body.end(), 16, 0x00);
+    appendAsciiFixed(body, vin, 17, 0x00);
+    return body;
+}
+
 std::vector<uint8_t> CommProcess::buildRemoteStartAckBody(uint8_t gun, uint8_t result) const
 {
     std::vector<uint8_t> body;
@@ -3301,6 +3381,34 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         return;
     }
 
+    if (cmd == kCmdStartApplyAck) {
+        uint8_t gun = 0;
+        cJSON* startData = nullptr;
+        FeeModel parsedFeeModel;
+        if (parseStartApplyAck0A6(body, decBodyLen, gun, &startData, parsedFeeModel)) {
+            m_logSender.info("platform_vin_start_apply_ack_rx",
+                             std::string("gun=") + std::to_string(static_cast<int>(gun)));
+            if (!parsedFeeModel.feeModelId.empty() && gun < m_feeModelByGun.size()) {
+                m_feeModelByGun[gun] = parsedFeeModel;
+            }
+            int successFlag = 1;
+            (void)jsonGetInt(startData, "successFlag", successFlag);
+            if (successFlag == 0) {
+                cJSON_DeleteItemFromObject(startData, "successFlag");
+                cJSON_DeleteItemFromObject(startData, "failReason");
+                publishPlatCommand(gun, "start_charge", startData);
+            } else {
+                publishPlatCommand(gun, "plug_and_charge_auth_result", startData);
+            }
+        } else {
+            m_logSender.warn("platform_vin_start_apply_ack", "parse_or_validate_fail");
+        }
+        if (startData) {
+            cJSON_Delete(startData);
+        }
+        return;
+    }
+
     if (cmd == kCmdRemoteStartCmd) {
         uint8_t gun = 0;
         cJSON* startData = nullptr;
@@ -3605,6 +3713,127 @@ bool CommProcess::parseRemoteStart0A8(const uint8_t* body, size_t bodyLen, uint8
             seg.electricAmount = 0.0;
             seg.serviceAmount = 0.0;
             rd.feeSegments.push_back(seg);
+        }
+    }
+
+    *outData = data;
+    return true;
+}
+
+bool CommProcess::parseStartApplyAck0A6(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel)
+{
+    if (!body || !outData) {
+        return false;
+    }
+    // BY ZF: 0xA6 最小长度：交易流水号16 + 桩编号7 + 枪号1 + 逻辑卡号8 + 账户余额4 + 最大功率2 + 成功标志1 + 失败原因1
+    if (bodyLen < 40U) {
+        return false;
+    }
+
+    const uint8_t* tradeBcd = body;
+    const uint8_t* pileBcd = body + 16;
+    const uint8_t gunBcd = body[23];
+    const uint8_t* logicCardBcd = body + 24;
+    const uint32_t balanceRaw = static_cast<uint32_t>(body[32]) |
+                                (static_cast<uint32_t>(body[33]) << 8) |
+                                (static_cast<uint32_t>(body[34]) << 16) |
+                                (static_cast<uint32_t>(body[35]) << 24);
+    const uint16_t maxPowerKw = static_cast<uint16_t>(body[36]) |
+                                (static_cast<uint16_t>(body[37]) << 8);
+    const uint8_t successFlag = body[38];
+    const uint8_t failReason = body[39];
+
+    const std::string recvPileCode = bcdToDigitString(pileBcd, 7);
+    const std::string localPileCode = normalizePileCode14(m_config.cdzNo);
+    if (recvPileCode != localPileCode) {
+        return false;
+    }
+
+    const int gunNo = ((gunBcd >> 4) & 0x0F) * 10 + (gunBcd & 0x0F);
+    if (gunNo <= 0) {
+        return false;
+    }
+    const int gunIndex = gunNo - 1;
+    if (gunIndex < 0 || gunIndex >= static_cast<int>(m_gunRuntimeData.size())) {
+        return false;
+    }
+    gun = static_cast<uint8_t>(gunIndex);
+
+    const std::string orderNo = bcdToDigitString(tradeBcd, 16);
+    const std::string chargeUserNo = bcdToDigitString(logicCardBcd, 8);
+    const GunRuntimeData& rd = m_gunRuntimeData[gun];
+
+    if (gun < m_feeModelByGun.size()) {
+        feeModel = m_feeModelByGun[gun];
+    } else {
+        feeModel.feeModelId.clear();
+        feeModel.timeNum = 0;
+        feeModel.timeSeg.clear();
+        feeModel.segFlag.clear();
+        feeModel.chargeFee.clear();
+        feeModel.serviceFee.clear();
+    }
+
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddNumberToObject(data, "startTime", static_cast<double>(std::time(nullptr)) * 1000.0);
+    cJSON_AddStringToObject(data, "vin", rd.pendingVinAuthVin.c_str());
+    cJSON_AddStringToObject(data, "vinCode", rd.pendingVinAuthVin.c_str());
+    cJSON_AddStringToObject(data, "chargeUserNo", chargeUserNo.c_str());
+    cJSON_AddStringToObject(data, "logicCardNo", chargeUserNo.c_str());
+    cJSON_AddStringToObject(data, "orderNo", orderNo.c_str());
+    cJSON_AddStringToObject(data, "preTradeNo", orderNo.c_str());
+    cJSON_AddStringToObject(data, "tradeNo", orderNo.c_str());
+    cJSON_AddNumberToObject(data, "chargeMode", 0x60);
+    cJSON_AddNumberToObject(data, "prechargeAmount", static_cast<double>(balanceRaw) / 100.0);
+    cJSON_AddNumberToObject(data, "maxPowerKw", maxPowerKw);
+    cJSON_AddNumberToObject(data, "plugAndChargeFlag", rd.pendingVinAuthPlugAndChargeFlag);
+    cJSON_AddNumberToObject(data, "mergeChargeFlag", rd.pendingVinAuthMergeChargeFlag);
+    cJSON_AddNumberToObject(data, "successFlag", successFlag == 0x01 ? 0x00 : 0x01);
+    cJSON_AddNumberToObject(data, "failReason", successFlag == 0x01 ? 0x00 : failReason);
+    cJSON_AddNumberToObject(data, "feeModelNo", 0);
+    cJSON_AddStringToObject(data, "feeModelId", feeModel.feeModelId.c_str());
+
+    const bool feeModelReady =
+            (!feeModel.feeModelId.empty()) &&
+            (feeModel.timeNum > 0) &&
+            (feeModel.timeSeg.size() >= static_cast<size_t>(feeModel.timeNum)) &&
+            (feeModel.chargeFee.size() >= static_cast<size_t>(feeModel.timeNum)) &&
+            (feeModel.serviceFee.size() >= static_cast<size_t>(feeModel.timeNum));
+    if (feeModelReady) {
+        cJSON_AddNumberToObject(data, "timeNum", static_cast<int>(feeModel.timeNum));
+        cJSON* timeSeg = cJSON_CreateArray();
+        cJSON* chargeFee = cJSON_CreateArray();
+        cJSON* serviceFee = cJSON_CreateArray();
+        for (size_t i = 0; i < feeModel.timeSeg.size(); ++i) {
+            cJSON_AddItemToArray(timeSeg, cJSON_CreateString(feeModel.timeSeg[i].c_str()));
+        }
+        for (size_t i = 0; i < feeModel.chargeFee.size(); ++i) {
+            cJSON_AddItemToArray(chargeFee, cJSON_CreateNumber(static_cast<double>(feeModel.chargeFee[i]) / 100000.0));
+        }
+        for (size_t i = 0; i < feeModel.serviceFee.size(); ++i) {
+            cJSON_AddItemToArray(serviceFee, cJSON_CreateNumber(static_cast<double>(feeModel.serviceFee[i]) / 100000.0));
+        }
+        cJSON_AddItemToObject(data, "timeSeg", timeSeg);
+        cJSON_AddItemToObject(data, "chargeFee", chargeFee);
+        cJSON_AddItemToObject(data, "serviceFee", serviceFee);
+    }
+
+    if (gun < m_gunRuntimeData.size()) {
+        GunRuntimeData& wr = m_gunRuntimeData[gun];
+        wr.chargeUserNo = chargeUserNo;
+        wr.orderNo = orderNo;
+        wr.chargeMode = 0x60;
+        wr.prechargeAmount = static_cast<double>(balanceRaw) / 100.0;
+        wr.feeModelId = feeModel.feeModelId;
+        wr.feeTimeNum = static_cast<int>(feeModel.timeNum);
+        wr.feeSegments.clear();
+        const size_t periodCount = feeModel.timeSeg.size();
+        wr.feeSegments.reserve(periodCount);
+        for (size_t i = 0; i < periodCount; ++i) {
+            FeeSegmentData seg;
+            seg.startTs = feeModel.timeSeg[i];
+            seg.endTs = (i + 1 < periodCount) ? feeModel.timeSeg[i + 1] : "2400";
+            wr.feeSegments.push_back(seg);
         }
     }
 

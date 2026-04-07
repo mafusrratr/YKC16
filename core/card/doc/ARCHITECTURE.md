@@ -62,6 +62,9 @@
 
 当前约定：
 
+- `open_rf` 成功后，模块进入后台自动寻卡/读卡模式
+- 自动读卡不需要上层再发 `card_read`
+- 自动读卡做频率控制，最多每 `5` 秒执行一次
 - 每次业务读写成功后，模块内部都会附加发送一次 `READER_OP_BUZZER`
 - 蜂鸣器只作为本地提示，不额外通过 MQTT 上报单独事件
 - 即使蜂鸣器执行失败，也不把已经成功的读写业务改判为失败
@@ -87,9 +90,9 @@ tcu/card/0/cmd
 
 | `op` | 说明 | 主要入参 |
 | --- | --- | --- |
-| `open_rf` | 打开射频 | 无 |
+| `open_rf` | 打开射频并启动后台自动寻卡 | 无 |
 | `close_rf` | 关闭射频 | 无 |
-| `card_read` | 读取卡业务数据 | 无 |
+| `card_read` | 主动触发一次立即读卡 | 无 |
 | `card_write` | 写卡业务数据 | `cardNoHex`、`cardBalance` |
 | `card_lock` | 锁卡 | 无 |
 | `card_unlock` | 解锁 | 无 |
@@ -102,6 +105,8 @@ tcu/card/0/cmd
 - 不传 UID
 - 不传块号
 - 上层只表达业务目标，不表达底层读卡器过程
+- 正常业务场景下，读卡依赖 `open_rf` 后的后台自动寻卡
+- `card_read` 主要用于联调、诊断或主动补读
 
 #### 3.2.2 命令字段
 
@@ -339,6 +344,14 @@ tcu/card/0/event
 9. 整理成 `card_info` 事件上报
 10. 蜂鸣器响一声
 
+后台自动读卡流程与 `card_read` 使用同一套内部步骤，只是触发方式不同：
+
+1. `open_rf` 成功后启动后台轮询
+2. 轮询周期内判断是否到了下一次允许读卡时间
+3. 到时后尝试执行一次 `card_read` 内部流程
+4. 成功则上报 `card_info` 并蜂鸣器提示
+5. 无卡或读失败时只在本地 debug 中记录，不额外上报业务失败事件
+
 `card_write` 内部流程：
 
 1. `active_card`
@@ -370,6 +383,8 @@ tcu/card/0/event
 因此，外部看到的是：
 
 ```text
+cmd(open_rf)     -> event(rf_opened)
+刷卡贴卡         -> event(card_info)
 cmd(card_read)   -> event(card_info/op_failed/cmd_rejected)
 cmd(card_write)  -> event(card_written/op_failed/cmd_rejected)
 cmd(card_lock)   -> event(card_locked/op_failed/cmd_rejected) -> event(card_info)
@@ -388,8 +403,8 @@ cmd(card_unlock) -> event(card_unlocked/op_failed/cmd_rejected) -> event(card_in
 ```text
 publish cmd(open_rf)
   -> wait event(rf_opened/op_failed/cmd_rejected)
-publish cmd(card_read)
-  -> wait event(card_info/op_failed/cmd_rejected)
+swipe card
+  -> wait event(card_info)
 publish cmd(card_lock)
   -> wait event(card_locked/op_failed/cmd_rejected)
   -> wait event(card_info)
@@ -423,6 +438,14 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t tcu/card/0/cmd -m '{"op":"open_rf"}'
 ```
 
 #### 3.7.2 读卡
+
+正常业务场景推荐：
+
+1. 先发一次 `open_rf`
+2. 用户贴卡
+3. 等待自动上报 `card_info`
+
+如果需要主动触发一次立即读卡，也可以继续使用下面这条测试命令。
 
 发送：
 

@@ -323,6 +323,7 @@ namespace {
         m[0x0101] = MakeRule(true, FaultTypeDef::START_FAIL, makeReason(FaultTypeDef::START_FAIL, 0x0101), "电表通信故障");
         m[0x0104] = MakeRule(true, FaultTypeDef::START_FAIL, makeReason(FaultTypeDef::START_FAIL, 0x0104), "主控通信故障");
         m[0xF001] = MakeRule(true, FaultTypeDef::START_FAIL, makeReason(FaultTypeDef::START_FAIL, 0xF001), "启动超时");
+        m[0xF002] = MakeRule(true, FaultTypeDef::START_FAIL, makeReason(FaultTypeDef::START_FAIL, 0xF002), "平台VIN鉴权失败");
         return m;
     }
 
@@ -394,6 +395,7 @@ namespace {
         m[0xFF] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0xFF), "充电桩其他故障");
         m[0x0101] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x0101), "电表通信故障");
         m[0x0104] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x0104), "主控通信故障");
+        m[0x0105] = MakeRule(false, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x0105), "刷卡停止");
         return m;
     }
 

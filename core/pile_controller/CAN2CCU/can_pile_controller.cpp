@@ -308,6 +308,40 @@ int CANPileController::powerAdjust()
     return 0;
 }
 
+int CANPileController::vehicleIdConfirm()
+{
+    if (!m_initialized) {
+        return -1;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_protocolMutex);
+        if (m_protocol->encodeVehicleIdConfirm() != 0) {
+            std::cerr << "[CANPileController] Failed to encode and send vehicle id confirm command\n";
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int CANPileController::vehicleAuth()
+{
+    if (!m_initialized) {
+        return -1;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_protocolMutex);
+        if (m_protocol->encodeVehicleAuth() != 0) {
+            std::cerr << "[CANPileController] Failed to encode and send vehicle auth command\n";
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 int CANPileController::outputVAControl()
 {
     if (!m_initialized) {
@@ -483,6 +517,22 @@ int CANPileController::setStartChargeData(const TCU2CCU_CmdStartChargeData* cmd)
     return m_protocol->setStartChargeData(cmd);
 }
 
+int CANPileController::setVehicleIdConfirmData(const TCU2CCU_VehicleIdConfirmData* cmd)
+{
+    if (!m_initialized || !m_protocol) {
+        return -1;
+    }
+    return m_protocol->setVehicleIdConfirmData(cmd);
+}
+
+int CANPileController::setVehicleAuthData(const TCU2CCU_CmdVehicleAuthData* cmd)
+{
+    if (!m_initialized || !m_protocol) {
+        return -1;
+    }
+    return m_protocol->setVehicleAuthData(cmd);
+}
+
 int CANPileController::setStopChargeData(const TCU2CCU_CmdStopChargeData* cmd)
 {
     if (!m_initialized || !m_protocol) {
@@ -600,6 +650,46 @@ int CANPileController::getStartCompleteData(TCU2CCU_StatusStartCompleteData* out
 bool CANPileController::isStartCompleteDataValid() const
 {
     return m_protocol && m_protocol->isStartCompleteDataValid();
+}
+
+int CANPileController::getVehicleIdData(TCU2CCU_StatusVehicleIdData* out) const
+{
+    if (!m_protocol) {
+        return -1;
+    }
+    return m_protocol->getVehicleIdData(out);
+}
+
+bool CANPileController::isVehicleIdDataValid() const
+{
+    return m_protocol && m_protocol->isVehicleIdDataValid();
+}
+
+void CANPileController::clearVehicleIdDataValid()
+{
+    if (m_protocol) {
+        m_protocol->clearVehicleIdDataValid();
+    }
+}
+
+int CANPileController::getVehicleAuthAckData(TCU2CCU_VehicleAuthAckData* out) const
+{
+    if (!m_protocol) {
+        return -1;
+    }
+    return m_protocol->getVehicleAuthAckData(out);
+}
+
+bool CANPileController::isVehicleAuthAckDataValid() const
+{
+    return m_protocol && m_protocol->isVehicleAuthAckDataValid();
+}
+
+void CANPileController::clearVehicleAuthAckDataValid()
+{
+    if (m_protocol) {
+        m_protocol->clearVehicleAuthAckDataValid();
+    }
 }
 
 void CANPileController::clearStartCompleteValid()

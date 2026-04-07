@@ -47,6 +47,13 @@ bool ensureDirectoryRecursive(const std::string& path) {
     return true;
 }
 
+// BY ZF: 仅识别 tcu.db 的备份文件
+bool isManagedBackupFile(const std::string& fileName) {
+    return fileName.size() > 7 &&
+           fileName.compare(0, 4, "tcu_") == 0 &&
+           fileName.compare(fileName.size() - 3, 3, ".db") == 0;
+}
+
 std::chrono::system_clock::time_point getLatestBackupTime(const std::string& backupDir) {
     DIR* dir = opendir(backupDir.c_str());
     if (!dir) {
@@ -60,7 +67,7 @@ std::chrono::system_clock::time_point getLatestBackupTime(const std::string& bac
             continue;
         }
         std::string fileName = entry->d_name;
-        if (fileName.size() < 4 || fileName.find(".db") == std::string::npos) {
+        if (!isManagedBackupFile(fileName)) {
             continue;
         }
         
@@ -542,7 +549,7 @@ void LoggerProcess::maybePerformBackup() {
     }
     
     if (m_dbManager->backupDatabases(m_backupDir)) {
-        std::cout << "[Logger][Backup] Databases backed up successfully to "
+        std::cout << "[Logger][Backup] Main database backed up successfully to "
                   << m_backupDir << std::endl;
         m_nextBackupTime = nowSys + std::chrono::minutes(m_backupIntervalMinutes);
         

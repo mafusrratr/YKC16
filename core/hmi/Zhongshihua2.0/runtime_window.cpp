@@ -503,12 +503,14 @@ static bool readFeeModelFromStmt(sqlite3_stmt *stmt, RuntimeWindow::FeeModelData
         return false;
     }
 
-    const char *feeModelId = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 0));
-    const char *timeSeg = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2));
-    const char *segFlag = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
-    const char *chargeFee = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
-    const char *serviceFee = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
-    const char *timeStamp = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 6));
+    const int feeModelNo = sqlite3_column_int(stmt, 0);
+    const char *feeModelId = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1));
+    const int timeNum = sqlite3_column_int(stmt, 2);
+    const char *timeSeg = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3));
+    const char *segFlag = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 4));
+    const char *chargeFee = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 5));
+    const char *serviceFee = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 6));
+    const char *timeStamp = reinterpret_cast<const char *>(sqlite3_column_text(stmt, 7));
 
     const QStringList segs = splitSemicolon(timeSeg ? timeSeg : "");
     const QStringList flags = splitSemicolon(segFlag ? segFlag : "");
@@ -531,6 +533,8 @@ static bool readFeeModelFromStmt(sqlite3_stmt *stmt, RuntimeWindow::FeeModelData
         model.segments.push_back(seg);
     }
 
+    model.feeModelNo = feeModelNo;
+    model.timeNum = timeNum > 0 ? timeNum : count;
     model.feeModelId = feeModelId ? feeModelId : "";
     model.timeStamp = timeStamp ? timeStamp : "";
     model.valid = !model.segments.empty();
@@ -662,7 +666,9 @@ RuntimeWindow::HmiConfig::HmiConfig()
     , mqttTopicPrefix("tcu")
     , enableMergeChargeEntry(false)
     , enableVinEntry(false)
+    , enableQrEntry(false)
     , enableCardEntry(false)
+    , cardOnlineAuth(false)
 {
 }
 
@@ -681,6 +687,7 @@ RuntimeWindow::GunUiData::GunUiData()
     , totalEnergy(0.0)
     , chargedTime(0.0)
     , soc(-1)
+    , cardOfflineActive(false)
     , stopReason("充电完成")
     , lastStateChangeMs(0)
 {
@@ -705,7 +712,9 @@ RuntimeWindow::FeeSegment::FeeSegment()
 }
 
 RuntimeWindow::FeeModelData::FeeModelData()
-    : currentIndex(-1)
+    : feeModelNo(0)
+    , timeNum(0)
+    , currentIndex(-1)
     , valid(false)
 {
 }
@@ -750,6 +759,7 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_faultRecordPageSize(8)
     , m_lastWatchdogFeedMs(0)
     , m_lastScreenActivityMs(0)
+    , m_uiSeq(0)
     , m_platformOnline(false)
     , m_screenBacklightOff(true)
     , m_stack(new QStackedWidget(this))
@@ -758,6 +768,7 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_idlePage(0)
     , m_authorizePage(0)
     , m_chargingPage(0)
+    , m_stoppingPage(0)
     , m_checkoutPage(0)
     , m_aboutPage(0)
     , m_aboutTabWidget(0)
@@ -840,6 +851,9 @@ bool RuntimeWindow::initialize()
         return false;
     }
 
+    // BY ZF: 程序启动即预加载计费模型，离线刷卡启动不依赖先进入 A3 页面。
+    refreshFeeModelCache(true);
+
     if (!initMqtt()) {
         return false;
     }
@@ -880,7 +894,9 @@ bool RuntimeWindow::loadConfig()
     m_config.mqttPassword = cfg.getString(section, "mqtt_password", "");
     m_config.enableMergeChargeEntry = cfg.getBool(section, "enable_merge_charge_entry", false);
     m_config.enableVinEntry = cfg.getBool(section, "enable_vin_entry", false);
+    m_config.enableQrEntry = cfg.getBool(section, "enable_qr_entry", false);
     m_config.enableCardEntry = cfg.getBool(section, "enable_card_entry", false);
+    m_config.cardOnlineAuth = cfg.getBool(section, "card_online_auth", false);
 
     m_gunCount = cfg.getInt(section, "gun_count", 1);
     if (m_gunCount < 1) {
@@ -927,16 +943,18 @@ bool RuntimeWindow::buildPages()
     m_idlePage = createPage(":/ui/b1idle.ui");
     m_authorizePage = createPage(":/ui/c6flushcad.ui");
     m_chargingPage = createPage(":/ui/e1chargeinfo.ui");
+    m_stoppingPage = createPage(":/ui/s2stopping.ui");
     m_checkoutPage = createPage(":/ui/f7checkoutok.ui");
     m_aboutPage = createPage(":/ui/a3about.ui");
 
-    if (!m_idlePage || !m_authorizePage || !m_chargingPage || !m_checkoutPage || !m_aboutPage) {
+    if (!m_idlePage || !m_authorizePage || !m_chargingPage || !m_stoppingPage || !m_checkoutPage || !m_aboutPage) {
         return false;
     }
 
     m_stack->addWidget(m_idlePage);
     m_stack->addWidget(m_authorizePage);
     m_stack->addWidget(m_chargingPage);
+    m_stack->addWidget(m_stoppingPage);
     m_stack->addWidget(m_checkoutPage);
     m_stack->addWidget(m_aboutPage);
 
@@ -945,6 +963,7 @@ bool RuntimeWindow::buildPages()
     m_idlePage->installEventFilter(this);
     m_authorizePage->installEventFilter(this);
     m_chargingPage->installEventFilter(this);
+    m_stoppingPage->installEventFilter(this);
     m_checkoutPage->installEventFilter(this);
     m_aboutPage->installEventFilter(this);
 
@@ -975,6 +994,7 @@ void RuntimeWindow::bindStaticUi()
     applyTopHeaderStyle(m_idlePage);
     applyTopHeaderStyle(m_authorizePage);
     applyTopHeaderStyle(m_chargingPage);
+    applyTopHeaderStyle(m_stoppingPage);
     applyTopHeaderStyle(m_checkoutPage);
     applyTopHeaderStyle(m_aboutPage);
     setLabelPixmap(m_idlePage, "label_zq", ":/cui/Resources/qt_zq.png");
@@ -982,6 +1002,7 @@ void RuntimeWindow::bindStaticUi()
     setLabelPixmap(m_idlePage, "label_about", ":/cui/Resources/about.png");
     setLabelPixmap(m_authorizePage, "label_about", ":/cui/Resources/about.png");
     setLabelPixmap(m_chargingPage, "label_about", ":/cui/Resources/about.png");
+    setLabelPixmap(m_stoppingPage, "label_about", ":/cui/Resources/about.png");
     setLabelPixmap(m_authorizePage, "label_ewm", ":/cui/Resources/ewm.png");
     setLabelPixmap(m_authorizePage, "qcq", ":/cui/Resources/qcq.png");
     setLabelPixmap(m_checkoutPage, "f7_ok", ":/cui/Resources/f7_ok.png");
@@ -991,8 +1012,10 @@ void RuntimeWindow::bindStaticUi()
     QPushButton *btnAboutIdle = m_idlePage->findChild<QPushButton *>("btnAbout");
     QPushButton *btnAboutAuthorize = m_authorizePage->findChild<QPushButton *>("btnAbout");
     QPushButton *btnAboutCharging = m_chargingPage->findChild<QPushButton *>("btnAbout");
+    QPushButton *btnAboutStopping = m_stoppingPage->findChild<QPushButton *>("btnAbout");
     QPushButton *btnBackAuthorize = m_authorizePage->findChild<QPushButton *>("btnBack");
     QPushButton *btnBackCharging = m_chargingPage->findChild<QPushButton *>("btnBack");
+    QPushButton *btnBackStopping = m_stoppingPage->findChild<QPushButton *>("btnBack");
     QPushButton *btnBackCheckout = m_checkoutPage->findChild<QPushButton *>("btnBack");
     QPushButton *btnBackAbout = m_aboutPage->findChild<QPushButton *>("btnBack");
     QLabel *aboutBackText = m_aboutPage->findChild<QLabel *>("label_8");
@@ -1013,6 +1036,9 @@ void RuntimeWindow::bindStaticUi()
     if (btnAboutCharging) {
         connect(btnAboutCharging, SIGNAL(clicked()), this, SLOT(showAboutPage()));
     }
+    if (btnAboutStopping) {
+        connect(btnAboutStopping, SIGNAL(clicked()), this, SLOT(showAboutPage()));
+    }
     if (btnBackAuthorize) {
         btnBackAuthorize->setVisible(true);
         btnBackAuthorize->setFlat(true);
@@ -1022,6 +1048,11 @@ void RuntimeWindow::bindStaticUi()
         btnBackCharging->setVisible(true);
         btnBackCharging->setFlat(true);
         connect(btnBackCharging, SIGNAL(clicked()), this, SLOT(returnToIdlePage()));
+    }
+    if (btnBackStopping) {
+        btnBackStopping->setVisible(true);
+        btnBackStopping->setFlat(true);
+        connect(btnBackStopping, SIGNAL(clicked()), this, SLOT(returnToIdlePage()));
     }
     if (btnBackCheckout) {
         btnBackCheckout->setVisible(true);
@@ -1054,6 +1085,7 @@ void RuntimeWindow::bindStaticUi()
     }
     if (btnCard) {
         btnCard->setVisible(m_config.enableCardEntry);
+        connect(btnCard, SIGNAL(clicked()), this, SLOT(onAuthorizeCardClicked()));
     }
     QLabel *idleId = m_idlePage->findChild<QLabel *>("label_id");
     if (idleId) {
@@ -1091,6 +1123,17 @@ void RuntimeWindow::bindStaticUi()
     }
     if (chargingTitle) {
         chargingTitle->raise();
+    }
+    QPushButton *stoppingBack = m_stoppingPage->findChild<QPushButton *>("btnBack");
+    QLabel *stoppingTitle = m_stoppingPage->findChild<QLabel *>("lblTitle");
+    if (stoppingBack) {
+        stoppingBack->raise();
+    }
+    if (btnAboutStopping) {
+        btnAboutStopping->raise();
+    }
+    if (stoppingTitle) {
+        stoppingTitle->raise();
     }
     QPushButton *checkoutBack = m_checkoutPage->findChild<QPushButton *>("btnBack");
     QLabel *checkoutHint = m_checkoutPage->findChild<QLabel *>("lblHint");
@@ -1221,15 +1264,17 @@ void RuntimeWindow::handleLogicEvent(uint8_t gun, const std::string &payload)
 
     cJSON *evt = cJSON_GetObjectItem(root, "event");
     cJSON *data = cJSON_GetObjectItem(root, "data");
+    const std::string eventName = (evt && cJSON_IsString(evt) && evt->valuestring) ? evt->valuestring : "";
 
-    if (evt && cJSON_IsString(evt) && evt->valuestring &&
-        std::strcmp(evt->valuestring, "state_change") == 0 &&
-        cJSON_IsObject(data)) {
+    if (eventName == "state_change" && cJSON_IsObject(data)) {
         cJSON *to = cJSON_GetObjectItem(data, "to");
         if (to && cJSON_IsString(to) && to->valuestring) {
             QMutexLocker locker(&m_dataMutex);
             m_guns[gun].state = to->valuestring;
             m_guns[gun].lastStateChangeMs = nowMs();
+            if (m_guns[gun].state == "IDLE" || m_guns[gun].state == "STOPPED" || m_guns[gun].state == "ERROR") {
+                m_guns[gun].cardOfflineActive = false;
+            }
             if (m_guns[gun].state != "PREPARE" && m_guns[gun].state != "STARTING") {
                 m_forceIdleView = false;
                 m_manualFocusLocked = false;
@@ -1249,6 +1294,15 @@ void RuntimeWindow::handleLogicEvent(uint8_t gun, const std::string &payload)
                 m_guns[gun].stopReason = numericReason;
             }
         }
+    } else if ((eventName == "cmd_reject" || eventName == "card_auth_reject") && cJSON_IsObject(data)) {
+        const std::string cmdName = getString(data, "cmd", "");
+        if (eventName == "card_auth_reject" || cmdName == "request_card_start") {
+            QMutexLocker locker(&m_dataMutex);
+            m_guns[gun].cardOfflineActive = false;
+        }
+    } else if (eventName == "card_auth_ok") {
+        QMutexLocker locker(&m_dataMutex);
+        m_guns[gun].cardOfflineActive = true;
     }
 
     cJSON_Delete(root);
@@ -2206,10 +2260,10 @@ void RuntimeWindow::refreshFeeModelCache(bool forceReload)
     }
 
     const char *sqlByTime =
-        "SELECT feeModelId,timeNum,timeSeg,segFlag,chargeFee,serviceFee,timeStamp "
+        "SELECT id,feeModelId,timeNum,timeSeg,segFlag,chargeFee,serviceFee,timeStamp "
         "FROM tbFeeModel ORDER BY timeStamp DESC,id DESC LIMIT 1;";
     const char *sqlById =
-        "SELECT feeModelId,timeNum,timeSeg,segFlag,chargeFee,serviceFee,timeStamp "
+        "SELECT id,feeModelId,timeNum,timeSeg,segFlag,chargeFee,serviceFee,timeStamp "
         "FROM tbFeeModel ORDER BY id DESC LIMIT 1;";
     sqlite3_stmt *stmt = 0;
     if (sqlite3_prepare_v2(db, sqlByTime, -1, &stmt, 0) != SQLITE_OK) {
@@ -2335,6 +2389,9 @@ void RuntimeWindow::refreshUi()
     } else if (page == PageCharging) {
         refreshChargingPage(guns[focusGun]);
         m_stack->setCurrentWidget(m_chargingPage);
+    } else if (page == PageStopping) {
+        refreshStoppingPage(guns[focusGun]);
+        m_stack->setCurrentWidget(m_stoppingPage);
     } else if (page == PageCheckout) {
         refreshCheckoutPage(guns[focusGun]);
         m_stack->setCurrentWidget(m_checkoutPage);
@@ -3095,6 +3152,90 @@ void RuntimeWindow::onStorageUpgradeClicked()
                              QString::fromUtf8("升级请求已发送\n%1").arg(installPackagePath));
 }
 
+void RuntimeWindow::onAuthorizeCardClicked()
+{
+    markScreenActivity();
+    if (!m_mqttReady) {
+        std::cerr << "[HMI] card start skipped: mqtt not ready" << std::endl;
+        return;
+    }
+
+    int gun = 0;
+    {
+        QMutexLocker locker(&m_dataMutex);
+        gun = m_focusGun;
+        if (gun < 0 || gun >= static_cast<int>(m_guns.size())) {
+            gun = 0;
+        }
+    }
+
+    if (!m_config.cardOnlineAuth) {
+        if (!m_feeModel.valid || m_feeModel.segments.empty()) {
+            QMessageBox::warning(this,
+                                 QString::fromUtf8("提示"),
+                                 QString::fromUtf8("当前无有效计费模型，不能执行离线刷卡启动"));
+            std::cerr << "[HMI] card start skipped: no valid fee model for offline mode" << std::endl;
+            return;
+        }
+    }
+
+    const uint64_t ts = nowMs();
+    const uint64_t seq = ++m_uiSeq;
+    const QString mode = m_config.cardOnlineAuth ? QString::fromUtf8("online") : QString::fromUtf8("offline");
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "ts", static_cast<double>(ts));
+    cJSON_AddNumberToObject(root, "seq", static_cast<double>(seq));
+    cJSON_AddStringToObject(root, "source", "tcu_hmi");
+    cJSON_AddNumberToObject(root, "gun", gun);
+    cJSON_AddStringToObject(root, "cmd", "request_card_start");
+
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "mode", mode.toUtf8().constData());
+
+    if (!m_config.cardOnlineAuth) {
+        // BY ZF: 离线刷卡启动时显式携带当前计费模型，logic 若未收到则才回退本地缓存。
+        cJSON_AddNumberToObject(data, "chargeMode", 2);
+        cJSON_AddNumberToObject(data, "feeModelNo", m_feeModel.feeModelNo);
+        cJSON_AddStringToObject(data, "feeModelId", m_feeModel.feeModelId.c_str());
+        cJSON_AddNumberToObject(data, "timeNum", m_feeModel.timeNum > 0 ? m_feeModel.timeNum : static_cast<int>(m_feeModel.segments.size()));
+
+        cJSON *timeSegArr = cJSON_CreateArray();
+        cJSON *chargeFeeArr = cJSON_CreateArray();
+        cJSON *serviceFeeArr = cJSON_CreateArray();
+        int idx = 0;
+        for (idx = 0; idx < static_cast<int>(m_feeModel.segments.size()); ++idx) {
+            cJSON_AddItemToArray(timeSegArr, cJSON_CreateString(m_feeModel.segments[idx].startTime.c_str()));
+            cJSON_AddItemToArray(chargeFeeArr, cJSON_CreateNumber(m_feeModel.segments[idx].chargeFee));
+            cJSON_AddItemToArray(serviceFeeArr, cJSON_CreateNumber(m_feeModel.segments[idx].serviceFee));
+        }
+        cJSON_AddItemToObject(data, "timeSeg", timeSegArr);
+        cJSON_AddItemToObject(data, "chargeFee", chargeFeeArr);
+        cJSON_AddItemToObject(data, "serviceFee", serviceFeeArr);
+    }
+
+    cJSON_AddItemToObject(root, "data", data);
+    char *payloadRaw = cJSON_PrintUnformatted(root);
+    const QString payload = payloadRaw ? QString::fromUtf8(payloadRaw) : QString();
+    if (payloadRaw) {
+        cJSON_free(payloadRaw);
+    }
+    cJSON_Delete(root);
+    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun) + "/cmd";
+    if (!m_mqtt.publish(topic, payload.toStdString(), 1, false)) {
+        std::cerr << "[HMI] publish request_card_start failed topic=" << topic
+                  << " payload=" << payload.toStdString() << std::endl;
+        return;
+    }
+
+    {
+        QMutexLocker locker(&m_dataMutex);
+        m_guns[gun].cardOfflineActive = !m_config.cardOnlineAuth;
+    }
+
+    std::cerr << "[HMI] publish request_card_start topic=" << topic
+              << " payload=" << payload.toStdString() << std::endl;
+}
+
 void RuntimeWindow::openConfigKeyboard(QLineEdit *target, bool numericOnly)
 {
     if (!target || !m_configKeyboard) {
@@ -3406,7 +3547,13 @@ bool RuntimeWindow::saveHmiConfigFromUi()
 
     const int gunCount = (m_configGunDual && m_configGunDual->isChecked()) ? 2 : 1;
     const QString cfgPath = hmiConfigPath();
-    return replaceConfigValue(cfgPath, QString::fromUtf8("Hmi"), QString::fromUtf8("gun_count"), QString::number(gunCount));
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("Hmi"), QString::fromUtf8("gun_count"), QString::number(gunCount))) {
+        return false;
+    }
+    return replaceConfigValue(cfgPath,
+                              QString::fromUtf8("Hmi"),
+                              QString::fromUtf8("card_online_auth"),
+                              m_config.cardOnlineAuth ? QString::fromUtf8("1") : QString::fromUtf8("0"));
 }
 
 bool RuntimeWindow::savePileConfigFromUi()
@@ -3773,9 +3920,10 @@ void RuntimeWindow::applyIdleLayout()
 
 void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
 {
-    const bool hasExtraEntry = m_config.enableMergeChargeEntry || m_config.enableVinEntry || m_config.enableCardEntry;
+    const bool hasButtonEntry = m_config.enableMergeChargeEntry || m_config.enableVinEntry || m_config.enableCardEntry;
     const bool isError = (gun.state == "ERROR");
     const bool inserted = (gun.state != "IDLE" && !isError);
+    const bool showQrEntry = inserted && m_config.enableQrEntry;
     setLabelText(m_authorizePage, "lblPole", QString::fromUtf8("%1枪").arg(gun.gun == 0 ? "A" : "B"));
     setLabelText(m_authorizePage, "label_id", QString::fromStdString(m_cdzNo.empty() ? m_cdzId : m_cdzNo));
 
@@ -3793,8 +3941,8 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
         if (!gun.qrPayload.empty()) {
             qr->setQRData(QString::fromStdString(gun.qrPayload));
         }
-        if (inserted) {
-            if (hasExtraEntry) {
+        if (showQrEntry) {
+            if (hasButtonEntry) {
                 qr->setGeometry(40, 80, 280, 280);
             } else {
                 qr->setGeometry(260, 80, 280, 280);
@@ -3805,8 +3953,8 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
         }
     }
     if (ewmBg) {
-        if (inserted) {
-            if (hasExtraEntry) {
+        if (showQrEntry) {
+            if (hasButtonEntry) {
                 ewmBg->setGeometry(40, 84, 280, 312);
             } else {
                 ewmBg->setGeometry(260, 84, 280, 312);
@@ -3817,28 +3965,90 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
             ewmBg->hide();
         }
     }
+    std::vector<QPushButton *> entryButtons;
     if (btnMergeCharge) {
         if (inserted && m_config.enableMergeChargeEntry) {
-            btnMergeCharge->setGeometry(448, 132, 88, 88);
             btnMergeCharge->show();
+            entryButtons.push_back(btnMergeCharge);
         } else {
             btnMergeCharge->hide();
         }
     }
     if (btnVin) {
         if (inserted && m_config.enableVinEntry) {
-            btnVin->setGeometry(628, 132, 88, 88);
             btnVin->show();
+            entryButtons.push_back(btnVin);
         } else {
             btnVin->hide();
         }
     }
     if (btnCard) {
         if (inserted && m_config.enableCardEntry) {
-            btnCard->setGeometry(448, 242, 88, 88);
             btnCard->show();
+            entryButtons.push_back(btnCard);
         } else {
             btnCard->hide();
+        }
+    }
+
+    if (!entryButtons.empty()) {
+        // BY ZF: C6 启动按钮按 1/2/3 个自适应；二维码关闭时按整块内容区等分，避免左侧留白后布局失衡。
+        QRect layoutRect = showQrEntry ? QRect(380, 110, 360, 220) : QRect(92, 110, 616, 220);
+        int btnSize = 96;
+        int centerY = layoutRect.y() + layoutRect.height() / 2;
+
+        if (showQrEntry) {
+            int gap = 24;
+            int startX = layoutRect.x();
+            int startY = centerY - btnSize / 2;
+
+            if (entryButtons.size() == 1) {
+                btnSize = 128;
+                startX = layoutRect.x() + (layoutRect.width() - btnSize) / 2;
+                startY = centerY - btnSize / 2;
+                entryButtons[0]->setGeometry(startX, startY, btnSize, btnSize);
+            } else if (entryButtons.size() == 2) {
+                btnSize = 118;
+                gap = 34;
+                const int totalWidth = btnSize * 2 + gap;
+                startX = layoutRect.x() + (layoutRect.width() - totalWidth) / 2;
+                startY = centerY - btnSize / 2;
+                entryButtons[0]->setGeometry(startX, startY, btnSize, btnSize);
+                entryButtons[1]->setGeometry(startX + btnSize + gap, startY, btnSize, btnSize);
+            } else {
+                btnSize = 96;
+                gap = 18;
+                const int totalWidth = btnSize * 3 + gap * 2;
+                startX = layoutRect.x() + (layoutRect.width() - totalWidth) / 2;
+                startY = centerY - btnSize / 2;
+                int idx = 0;
+                for (idx = 0; idx < static_cast<int>(entryButtons.size()) && idx < 3; ++idx) {
+                    entryButtons[idx]->setGeometry(startX + idx * (btnSize + gap), startY, btnSize, btnSize);
+                }
+            }
+        } else {
+            const int slotCount = 3;
+            const int slotWidth = layoutRect.width() / slotCount;
+            std::vector<int> slotIndexes;
+            if (entryButtons.size() == 1) {
+                btnSize = 148;
+                slotIndexes.push_back(1);
+            } else if (entryButtons.size() == 2) {
+                btnSize = 138;
+                slotIndexes.push_back(0);
+                slotIndexes.push_back(2);
+            } else {
+                btnSize = 128;
+                slotIndexes.push_back(0);
+                slotIndexes.push_back(1);
+                slotIndexes.push_back(2);
+            }
+
+            int idx = 0;
+            for (idx = 0; idx < static_cast<int>(entryButtons.size()) && idx < static_cast<int>(slotIndexes.size()); ++idx) {
+                const int slotCenterX = layoutRect.x() + slotIndexes[idx] * slotWidth + slotWidth / 2;
+                entryButtons[idx]->setGeometry(slotCenterX - btnSize / 2, centerY - btnSize / 2, btnSize, btnSize);
+            }
         }
     }
     if (tips) {
@@ -3861,10 +4071,10 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
             tips2->setAlignment(Qt::AlignCenter);
             tips2->show();
             tips2->raise();
-        } else if (inserted) {
+        } else if (inserted && showQrEntry) {
             tips2->setText(QString::fromUtf8("扫码启动充电"));
             tips2->setStyleSheet("QLabel{color:white;font-weight:bold;background:transparent;}");
-            if (hasExtraEntry) {
+            if (hasButtonEntry) {
                 tips2->setGeometry(46, 348, 268, 44);
             } else {
                 tips2->setGeometry(240, 348, 320, 44);
@@ -3917,6 +4127,22 @@ void RuntimeWindow::refreshChargingPage(const GunUiData &gun)
     setLabelText(m_chargingPage, "lblRemainTime", formatRemainMinutes(gun.remainMinutes));
     setLabelText(m_chargingPage, "lblBatteryMaxTemp", QString::fromUtf8("%1 ℃").arg(QString::number(gun.batteryMaxTemp, 'f', 0)));
     setLabelText(m_chargingPage, "label_id", QString::fromStdString(m_cdzNo.empty() ? m_cdzId : m_cdzNo));
+    setLabelText(m_chargingPage,
+                 "lblStopTip",
+                 gun.cardOfflineActive
+                    ? QString::fromUtf8("再次刷卡停止充电，请等待停止完成后取卡")
+                    : QString::fromUtf8("请操作手机停止充电"));
+}
+
+void RuntimeWindow::refreshStoppingPage(const GunUiData &gun)
+{
+    setLabelText(m_stoppingPage, "lblTitle", QString::fromUtf8("%1枪").arg(gun.gun == 0 ? "A" : "B"));
+    setLabelText(m_stoppingPage, "label_id", QString::fromStdString(m_cdzNo.empty() ? m_cdzId : m_cdzNo));
+    setLabelText(m_stoppingPage,
+                 "lblStopHint",
+                 gun.cardOfflineActive
+                    ? QString::fromUtf8("停止中，请勿移开卡片，否则将导致锁卡")
+                    : QString::fromUtf8("停止中，请等待"));
 }
 
 void RuntimeWindow::refreshCheckoutPage(const GunUiData &gun)
@@ -4021,8 +4247,11 @@ RuntimeWindow::PageId RuntimeWindow::decidePage(const std::vector<GunUiData> &gu
 
     if (m_manualFocusLocked && focusGun >= 0 && focusGun < static_cast<int>(guns.size())) {
         const std::string &state = guns[focusGun].state;
-        if (state == "CHARGING" || state == "STOPPING") {
+        if (state == "CHARGING") {
             return PageCharging;
+        }
+        if (state == "STOPPING") {
+            return PageStopping;
         }
         if (state == "PREPARE" || state == "STARTING") {
             return PageAuthorize;
@@ -4049,8 +4278,11 @@ RuntimeWindow::PageId RuntimeWindow::decidePage(const std::vector<GunUiData> &gu
         PageId page = PageIdle;
         int priority = 0;
 
-        if (state == "CHARGING" || state == "STOPPING") {
+        if (state == "CHARGING") {
             page = PageCharging;
+            priority = 4;
+        } else if (state == "STOPPING") {
+            page = PageStopping;
             priority = 4;
         } else if (state == "PREPARE" || state == "STARTING") {
             page = PageAuthorize;

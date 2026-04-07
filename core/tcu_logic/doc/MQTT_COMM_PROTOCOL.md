@@ -10,10 +10,10 @@
 ### 2.1 与 pile_controller 交互
 - 下发命令（由 tcu_logic → pile_controller）
   - `tcu/pile/{gun}/cmd`
-  - 支持命令：`start_charge` / `stop_charge` / `power_ctrl`
+  - 支持命令：`start_charge` / `stop_charge` / `power_ctrl` / `vehicle_id_confirm` / `vehicle_auth`
 - 上送命令/流程事件（由 pile_controller → tcu_logic）
   - `tcu/pile/{gun}/event`
-  - 事件类型：`start_response/start_complete/stop_response/stop_complete/deviceErr_on/deviceErr_off`
+  - 事件类型：`start_response/start_complete/stop_response/stop_complete/deviceErr_on/deviceErr_off/vehicle_id/vehicle_auth_ack`
 - 数据通道（由 pile_controller → 订阅方）
   - `tcu/pile/{gun}/data`
 
@@ -43,6 +43,7 @@
 - tcu_logic 上报平台
   - `tcu/plat/{gun}/event`
   - 其中配置类消息统一使用 `type=setConfig`，并由 `tcu_comm` 以 retain 方式发布
+  - 即插即充鉴权请求例外：由 tcu_logic 发布到 `tcu/logic/{gun}/event`，事件名为 `plug_and_charge_auth_request`
 
 ### 2.5 与 logger 交互（未确认记录回放）
 - logger 上送到 tcu_logic
@@ -73,11 +74,12 @@
   "seq": 10,
   "source": "hmi",
   "gun": 0,
-  "cmd": "start_charge",
+  "cmd": "vin_req",
   "data": { ... }
 }
 ```
 建议 cmd：
+- `vin_req`
 - `start_charge`
 - `stop_charge`
 - `reset_error`
@@ -85,7 +87,9 @@
 - `power_ctrl`
 
 说明：
-- `tcu/plat/{gun}/cmd` 统一使用 `cmd` 字段表示操作类型（与 `start_charge` 入口一致）。
+- HMI 发起即插即充识别流程时，入口命令建议使用 `vin_req`
+- `start_charge` 主要用于平台补充业务参数或兼容旧流程
+- `tcu/plat/{gun}/cmd` 统一使用 `cmd` 字段表示操作类型
 
 平台鉴权类 cmd（plat/cmd）：
 - `auth_result`：通用结果（`data.result == 1` 通过，其他失败）
@@ -105,6 +109,26 @@
 说明：
 - 当 `auth_result.data.result == 1` 时，`data` 中的启动参数会覆盖 `pendingStartData`，
   作为最终下发给 `tcu/pile/{gun}/cmd` 的 `start_charge.data`。
+- 当枪处于即插即充启动阶段，且已完成 `vehicle_id` 确认后，`auth_result` 会被按即插即充鉴权结果处理，
+  等价于 `plug_and_charge_auth_result`。
+
+- `plug_and_charge_auth_result`：即插即充专用平台鉴权结果
+```json
+{
+  "cmd": "plug_and_charge_auth_result",
+  "data": {
+    "vin": "LDC913L27A1234567",
+    "successFlag": 0,
+    "failReason": 0
+  }
+}
+```
+
+说明：
+- `successFlag`：`0` 成功，`1` 失败
+- `failReason`：`0` 成功，`1` 非法 VIN，`2` 平台鉴权失败，`3` 平台鉴权超时，`255` 其他
+- `vin` 兼容字段名 `vinCode`
+- 平台返回失败时，不应伪装成 `cmd=start_charge`，而应明确发布 `cmd=plug_and_charge_auth_result`
 
 平台停止命令（plat/cmd）：
 - `stop_charge`：平台要求停止充电（与 HMI 停机语义一致）
@@ -206,10 +230,22 @@
   2) 发布对应枪 `tcu/plat/{gun}/event` 的 `type=setConfig`（retain）；
   3) 向平台回 `0x5B` 设置结果。
 
-`start_charge.data`（鉴权基础信息）建议字段：
+`vin_req.data`（HMI 发起即插即充请求）建议字段：
+- `startTime`：请求时间戳（ms，可选）
+- `plugAndChargeFlag`：即插即充标志，`0x01` 非即插即充，`0x02` 即插即充
+- `mergeChargeFlag`：合并充电标志
+- `loadControlSwitch`：负荷控制开关（可选）
+- `auxPowerVoltage`：辅助电源电压（可选）
+- `v2g`：V2G 标志（可选）
+
+`start_charge.data`（平台下发业务参数）建议字段：
 - `startTime`：启动时间戳（ms）
 - `chargeUserNo`：充电用户号
 - `orderNo`：充电订单号
+- `preTradeNo`：平台交易流水
+- `tradeNo`：本地交易流水（可选）
+- `plugAndChargeFlag`：即插即充标志，`0x01` 非即插即充，`0x02` 即插即充
+- `mergeChargeFlag`：合并充电标志
 - `chargeMode`：充电模式
 - `prechargeAmount`：预充值金额
 - `feeModelNo`：计费模型编号
@@ -218,6 +254,250 @@
 - `timeSeg[]`：时段开始时间（`HHMM`）
 - `chargeFee[]`：各时段电费（单位：元/度，浮点）
 - `serviceFee[]`：各时段服务费（单位：元/度，浮点）
+
+
+
+
+即插即充识别请求示例（HMI -> logic）：
+Topic：`tcu/logic/{gun}/cmd`
+```json
+{
+  "ts": 1736150000000,
+  "seq": 10,
+  "source": "hmi",
+  "gun": 0,
+  "cmd": "vin_req",
+  "data": {
+    "startTime": 1736150000000,
+    "plugAndChargeFlag": 2,
+    "mergeChargeFlag": 1,
+    "auxPowerVoltage": 12
+  }
+}
+```
+
+即插即充业务参数示例（平台 -> logic）：
+Topic：`tcu/plat/{gun}/cmd`
+```json
+{
+  "ts": 1736150003000,
+  "seq": 11,
+  "source": "platform",
+  "gun": 0,
+  "cmd": "start_charge",
+  "data": {
+    "vin": "LJ21BABB8L1001955",
+    "chargeUserNo": "U10001",
+    "orderNo": "P202602120001",
+    "preTradeNo": "P202602120001",
+    "tradeNo": "P202602120001",
+    "plugAndChargeFlag": 2,
+    "mergeChargeFlag": 1,
+    "chargeMode": 1,
+    "prechargeAmount": 100.0,
+    "feeModelNo": 1,
+    "feeModelId": "MODEL001",
+    "timeNum": 12,
+    "timeSeg": ["0000", "1200", "1430", "1535", "1538", "1540", "1550", "1600", "1730", "1830", "1930", "2130"],
+    "chargeFee": [70, 0.90, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    "serviceFee": [15, 0.15, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+  }
+}
+```
+
+## 4.1 即插即充新增 MQTT 消息
+当 HMI 发起 `vin_req` 且 `data.plugAndChargeFlag == 0x02` 时，logic 与 pile/plat 增加以下消息交互。
+
+### 4.1.1 pile 上送车辆识别数据
+Topic：`tcu/pile/{gun}/event`
+```json
+{
+  "ts": 1736150001000,
+  "seq": 101,
+  "source": "pile_controller",
+  "gun": 0,
+  "type": "vehicle_id",
+  "data": {
+    "vin": "LDC913L27A1234567",
+    "batteryChargeCount": [0, 0, 12],
+    "soc": 560,
+    "currentBatteryVoltage": 3850
+  }
+}
+```
+
+说明：
+- 对应 CCU -> logic 的 `0x17` 车辆识别数据帧
+- `soc`、`currentBatteryVoltage` 当前按原始协议值透传
+
+### 4.1.2 logic 下发车辆识别数据应答
+Topic：`tcu/pile/{gun}/cmd`
+```json
+{
+  "ts": 1736150001100,
+  "seq": 102,
+  "source": "tcu_logic",
+  "gun": 0,
+  "cmd": "vehicle_id_confirm",
+  "data": {
+    "successFlag": 0,
+    "failReason": 0
+  }
+}
+```
+
+说明：
+- 对应 logic -> CCU 的 `0x18` 车辆识别数据应答帧
+- 失败场景 `failReason=1` 表示非法 VIN
+
+### 4.1.3 logic 发布平台鉴权请求
+Topic：`tcu/logic/{gun}/event`
+```json
+{
+  "ts": 1736150001200,
+  "seq": 103,
+  "source": "tcu_logic",
+  "gun": 0,
+  "event": "plug_and_charge_auth_request",
+  "data": {
+    "vin": "LDC913L27A1234567",
+    "vinCode": "LDC913L27A1234567",
+    "plugAndChargeFlag": 2,
+    "mergeChargeFlag": 1,
+    "chargeStartTime": 20260212120000,
+    "soc": 560,
+    "currentBatteryVoltage": 3850,
+    "batteryChargeCount": [0, 0, 12]
+  }
+}
+```
+
+说明：
+- plat/tcu_comm 订阅 `tcu/logic/{gun}/event` 后，收到 `event=plug_and_charge_auth_request` 即可发起平台鉴权
+- 该消息在完成 `0x17/0x18` 后由 logic 主动发布
+- 该请求仅用于向外部发起鉴权，不携带订单号、用户号、交易流水等业务字段
+### 4.1.4 平台返回即插即充启动参数
+Topic：`tcu/plat/{gun}/cmd`
+```json
+{
+  "ts": 1736150003200,
+  "seq": 104,
+  "source": "platform",
+  "gun": 0,
+  "cmd": "start_charge",
+  "data": {
+    "vin": "LDC913L27A1234567",
+    "chargeUserNo": "U10001",
+    "orderNo": "P202602120001",
+    "preTradeNo": "P202602120001",
+    "tradeNo": "P202602120001",
+    "plugAndChargeFlag": 2,
+    "mergeChargeFlag": 1,
+    "chargeMode": 1,
+    "prechargeAmount": 100.0,
+    "feeModelNo": 1,
+    "feeModelId": "MODEL001",
+    "timeNum": 12,
+    "timeSeg": ["0000", "1200", "1430", "1535", "1538", "1540", "1550", "1600", "1730", "1830", "1930", "2130"],
+    "chargeFee": [70, 0.90, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    "serviceFee": [15, 0.15, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+  }
+}
+```
+
+### 4.1.5 logic 下发车辆识别鉴权帧
+Topic：`tcu/pile/{gun}/cmd`
+```json
+{
+  "ts": 1736150003300,
+  "seq": 105,
+  "source": "tcu_logic",
+  "gun": 0,
+  "cmd": "vehicle_auth",
+  "data": {
+    "vin": "LDC913L27A1234567",
+    "successFlag": 0,
+    "failReason": 0,
+    "chargeUserNo": "U10001",
+    "orderNo": "P202602120001",
+    "preTradeNo": "P202602120001",
+    "tradeNo": "P202602120001",
+    "chargeStartTime": 20260212120000,
+    "chargeMode": 1,
+    "prechargeAmount": 100.0,
+    "feeModelNo": 1,
+    "feeModelId": "MODEL001",
+    "plugAndChargeFlag": 2,
+    "mergeChargeFlag": 1,
+    "timeNum": 12,
+    "timeSeg": ["0000", "1200", "1430", "1535", "1538", "1540", "1550", "1600", "1730", "1830", "1930", "2130"],
+    "chargeFee": [70, 0.90, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+    "serviceFee": [15, 0.15, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+  }
+}
+```
+
+说明：
+- 对应 logic -> CCU 的 `0x19` 车辆识别鉴权帧
+- MQTT 层除了 `0x19` 所需的 `vin/successFlag/failReason` 外，还附带启动充电业务参数，便于 pile/联调侧复用同一条业务上下文
+- 若平台 30s 内未返回鉴权结果，logic 会自动下发失败：
+```json
+{
+  "cmd": "vehicle_auth",
+  "data": {
+    "vin": "LDC913L27A1234567",
+    "successFlag": 1,
+    "failReason": 3,
+    "plugAndChargeFlag": 2,
+    "mergeChargeFlag": 1
+  }
+}
+```
+
+### 4.1.6 pile 上送车辆识别鉴权应答
+Topic：`tcu/pile/{gun}/event`
+```json
+{
+  "ts": 1736150003400,
+  "seq": 106,
+  "source": "pile_controller",
+  "gun": 0,
+  "type": "vehicle_auth_ack",
+  "data": {
+    "successFlag": 0,
+    "failReason": 0
+  }
+}
+```
+
+说明：
+- 对应 CCU -> logic 的 `0x1A` 车辆识别鉴权应答帧
+- `failReason=1` 表示 VIN 不一致
+
+### 4.1.7 logic 侧联调事件
+Topic：`tcu/logic/{gun}/event`
+
+常用新增事件：
+- `plug_and_charge_vehicle_id_confirmed`
+- `plug_and_charge_vehicle_id_reject`
+- `plug_and_charge_auth_result_forwarded`
+- `plug_and_charge_auth_timeout`
+- `plug_and_charge_auth_ack`
+
+`plug_and_charge_auth_ack` 示例：
+```json
+{
+  "ts": 1736150003400,
+  "seq": 107,
+  "source": "tcu_logic",
+  "gun": 0,
+  "event": "plug_and_charge_auth_ack",
+  "data": {
+    "successFlag": 0,
+    "failReason": 0
+  }
+}
+```
 
 ## 5. event 规范（logic/event, plat/event）
 ```json
@@ -284,6 +564,7 @@
   "startTime": 1736150000000,
   "chargeUserNo": "U10001",
   "orderNo": "P202602120001",
+  "plugAndChargeFlag": 2,
   "chargeMode": 1,
   "prechargeAmount": 100.0,
   "feeModelNo": 1

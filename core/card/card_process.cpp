@@ -35,6 +35,7 @@ namespace {
 
     const int kCardLoopIntervalMs = 50;
     const int kCardMaxQueueDepth = 32;
+    const int kCardAutoReadIntervalSec = 5;
     const uint8_t kSector0BlockNo = 0x01;
     const uint8_t kSector4BlockNo = 0x10;
     const uint8_t kSector8BlockNo = 0x20;
@@ -86,8 +87,10 @@ CardProcess::CardProcess()
     : BaseProcess(PROC_CARD, "tcu_card")
     , m_seq(0)
     , m_deviceOnline(false)
+    , m_rfOpened(false)
     , m_lastDaemonWatchdogFeed(std::chrono::steady_clock::now() - std::chrono::seconds(5))
     , m_lastProcessWatchdogFeed(std::chrono::steady_clock::now() - std::chrono::seconds(5))
+    , m_lastAutoReadTime(std::chrono::steady_clock::now())
 {
 }
 
@@ -125,7 +128,9 @@ void CardProcess::doRun()
         m_lastProcessWatchdogFeed = now;
     }
 
-    processOneCommand();
+    if (!processOneCommand()) {
+        processAutoRead();
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(m_cfg.loopIntervalMs));
 }
 
@@ -315,17 +320,47 @@ bool CardProcess::popNextCommand(CardBusinessCommand& out)
     return true;
 }
 
-void CardProcess::processOneCommand()
+bool CardProcess::processOneCommand()
 {
     CardBusinessCommand cmd;
     if (!popNextCommand(cmd)) {
-        return;
+        return false;
     }
 
     std::string err;
     if (!handleBusinessCommand(cmd, err)) {
         publishOpFailed(cmd.op, err);
     }
+    return true;
+}
+
+void CardProcess::processAutoRead()
+{
+    if (!m_rfOpened) {
+        return;
+    }
+
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    if (now - m_lastAutoReadTime < std::chrono::seconds(kCardAutoReadIntervalSec)) {
+        return;
+    }
+    m_lastAutoReadTime = now;
+
+    debugLog("auto card_read poll begin");
+    CardBusinessInfo info;
+    std::string err;
+    if (!readCardInfo(info, err)) {
+        debugLog(std::string("auto card_read poll no result: ") + err);
+        return;
+    }
+
+    debugLog(std::string("auto card_read poll success uid=")
+             + CardReaderProtocol::hexDump(info.uid)
+             + " cardNo=" + CardReaderProtocol::hexDump(info.cardNo)
+             + " cardBalance=" + std::to_string(info.cardBalance)
+             + " locked=" + (info.locked ? "true" : "false"));
+    publishCardInfo(info);
+    triggerBuzzer();
 }
 
 bool CardProcess::handleBusinessCommand(const CardBusinessCommand& cmd, std::string& err)
@@ -360,6 +395,8 @@ bool CardProcess::handleOpenRf(std::string& err)
         debugLog(std::string("handle open_rf failed: ") + err);
         return false;
     }
+    m_rfOpened = true;
+    m_lastAutoReadTime = std::chrono::steady_clock::now() - std::chrono::seconds(kCardAutoReadIntervalSec);
     debugLog("handle open_rf success");
     publishSimpleEvent("rf_opened");
     return true;
@@ -375,6 +412,7 @@ bool CardProcess::handleCloseRf(std::string& err)
         debugLog(std::string("handle close_rf failed: ") + err);
         return false;
     }
+    m_rfOpened = false;
     debugLog("handle close_rf success");
     publishSimpleEvent("rf_closed");
     return true;
@@ -393,6 +431,7 @@ bool CardProcess::handleCardRead(std::string& err)
              + " cardNo=" + CardReaderProtocol::hexDump(info.cardNo)
              + " cardBalance=" + std::to_string(info.cardBalance)
              + " locked=" + (info.locked ? "true" : "false"));
+    m_lastAutoReadTime = std::chrono::steady_clock::now();
     publishCardInfo(info);
     triggerBuzzer();
     return true;
@@ -443,6 +482,7 @@ bool CardProcess::handleCardWrite(const CardBusinessCommand& cmd, std::string& e
     }
 
     debugLog("handle card_write success");
+    m_lastAutoReadTime = std::chrono::steady_clock::now();
     publishCardWritten(cmd);
     triggerBuzzer();
     return true;
@@ -495,6 +535,7 @@ bool CardProcess::handleCardLock(bool locked, std::string& err)
              + " cardNo=" + CardReaderProtocol::hexDump(info.cardNo)
              + " cardBalance=" + std::to_string(info.cardBalance)
              + " locked=" + (info.locked ? "true" : "false"));
+    m_lastAutoReadTime = std::chrono::steady_clock::now();
     publishCardInfo(info);
     triggerBuzzer();
     return true;

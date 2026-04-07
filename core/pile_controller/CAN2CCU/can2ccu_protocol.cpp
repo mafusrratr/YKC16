@@ -30,6 +30,8 @@ CAN2CCUProtocol::CAN2CCUProtocol()
     // BY ZF: 初始化命令数据有效性标志（按声明顺序）
     , m_cmdStartChargeDataValid(false)
     , m_startChargeResponseDataValid(false)
+    , m_vehicleIdConfirmDataValid(false)
+    , m_cmdVehicleAuthDataValid(false)
     , m_cmdStopChargeDataValid(false)
     , m_cmdPowerAdjustDataValid(false)
     , m_cmdOutputVADataValid(false)
@@ -44,6 +46,7 @@ CAN2CCUProtocol::CAN2CCUProtocol()
     , m_stopCompleteDataValid(false)
     , m_pileStateDataValid(false)
     , m_vehicleIdDataValid(false)
+    , m_vehicleAuthAckDataValid(false)
     // BY ZF: 初始化遥测数据有效性标志（YC20/YC21）
     , m_yc20DataValid(false)
     , m_yc21DataValid(false)
@@ -55,6 +58,8 @@ CAN2CCUProtocol::CAN2CCUProtocol()
     // BY ZF: 初始化所有数据成员变量
     memset(&m_cmdStartChargeData, 0, sizeof(TCU2CCU_CmdStartChargeData));
     memset(&m_startChargeResponseData, 0, sizeof(TCU2CCU_StartChargeResponseData));
+    memset(&m_vehicleIdConfirmData, 0, sizeof(TCU2CCU_VehicleIdConfirmData));
+    memset(&m_cmdVehicleAuthData, 0, sizeof(TCU2CCU_CmdVehicleAuthData));
     memset(&m_cmdStopChargeData, 0, sizeof(TCU2CCU_CmdStopChargeData));
     memset(&m_stopChargeResponseData, 0, sizeof(TCU2CCU_StopChargeResponseData));
     memset(&m_cmdPowerAdjustData, 0, sizeof(TCU2CCU_CmdPowerAdjustData));
@@ -67,6 +72,7 @@ CAN2CCUProtocol::CAN2CCUProtocol()
     memset(&m_statusStopCompleteData, 0, sizeof(TCU2CCU_StatusStopCompleteData));
     memset(&m_statusPileStateData, 0, sizeof(TCU2CCU_StatusPileStateData));
     memset(&m_statusVehicleIdData, 0, sizeof(TCU2CCU_StatusVehicleIdData));
+    memset(&m_vehicleAuthAckData, 0, sizeof(TCU2CCU_VehicleAuthAckData));
     memset(&m_yc20Data, 0, sizeof(TCU2CCU_DataYC20));
     memset(&m_yc21Data, 0, sizeof(TCU2CCU_DataYC21));
     memset(&m_yx22Data, 0, sizeof(TCU2CCU_DataYX22));
@@ -166,6 +172,8 @@ void CAN2CCUProtocol::cleanup()
     // BY ZF: 清除数据有效性标志
     m_cmdStartChargeDataValid = false;
     m_startChargeResponseDataValid = false;
+    m_vehicleIdConfirmDataValid = false;
+    m_cmdVehicleAuthDataValid = false;
     m_cmdStopChargeDataValid = false;
     m_stopChargeResponseDataValid = false;
     m_cmdPowerAdjustDataValid = false;
@@ -179,6 +187,7 @@ void CAN2CCUProtocol::cleanup()
     m_stopCompleteDataValid = false;
     m_pileStateDataValid = false;
     m_vehicleIdDataValid = false;
+    m_vehicleAuthAckDataValid = false;
     m_yc20DataValid = false;
     m_yc21DataValid = false;
     m_yx22DataValid = false;
@@ -226,6 +235,26 @@ int CAN2CCUProtocol::setStartChargeData(const TCU2CCU_CmdStartChargeData* cmdDat
     }
     m_cmdStartChargeData = *cmdData;
     m_cmdStartChargeDataValid = true;
+    return 0;
+}
+
+int CAN2CCUProtocol::setVehicleIdConfirmData(const TCU2CCU_VehicleIdConfirmData* cmdData)
+{
+    if (cmdData == nullptr) {
+        return -1;
+    }
+    m_vehicleIdConfirmData = *cmdData;
+    m_vehicleIdConfirmDataValid = true;
+    return 0;
+}
+
+int CAN2CCUProtocol::setVehicleAuthData(const TCU2CCU_CmdVehicleAuthData* cmdData)
+{
+    if (cmdData == nullptr) {
+        return -1;
+    }
+    m_cmdVehicleAuthData = *cmdData;
+    m_cmdVehicleAuthDataValid = true;
     return 0;
 }
 
@@ -361,6 +390,15 @@ int CAN2CCUProtocol::getVehicleIdData(TCU2CCU_StatusVehicleIdData* outStatusData
     return 0;
 }
 
+int CAN2CCUProtocol::getVehicleAuthAckData(TCU2CCU_VehicleAuthAckData* outData) const
+{
+    if (outData == nullptr || !m_vehicleAuthAckDataValid) {
+        return -1;
+    }
+    *outData = m_vehicleAuthAckData;
+    return 0;
+}
+
 int CAN2CCUProtocol::getYC20Data(TCU2CCU_DataYC20* outData) const
 {
     if (outData == nullptr || !m_yc20DataValid) {
@@ -477,6 +515,24 @@ int CAN2CCUProtocol::encodeOutputVAControl()
     return encodeOutputVAControlFrame();
 }
 
+int CAN2CCUProtocol::encodeVehicleIdConfirm()
+{
+    if (!m_vehicleIdConfirmDataValid) {
+        std::cerr << "[CAN2CCU] Vehicle id confirm data not set\n";
+        return -1;
+    }
+    return encodeVehicleIdConfirmFrame();
+}
+
+int CAN2CCUProtocol::encodeVehicleAuth()
+{
+    if (!m_cmdVehicleAuthDataValid) {
+        std::cerr << "[CAN2CCU] Vehicle auth data not set\n";
+        return -1;
+    }
+    return encodeVehicleAuthFrame();
+}
+
 int CAN2CCUProtocol::encodeStopChargeFrame()
 {
     // BY ZF: 按表14 充电停止帧编码并发送
@@ -494,6 +550,38 @@ int CAN2CCUProtocol::encodeStopChargeFrame()
     businessData[0] = m_cmdStopChargeData.stopReason;
     businessData[1] = m_cmdStopChargeData.tcuStopCode;
     return sendSingleFrame(0x10, PGN_STOP_CHARGE, businessData, 2);
+}
+
+int CAN2CCUProtocol::encodeVehicleIdConfirmFrame()
+{
+    if (!m_vehicleIdConfirmDataValid) {
+        return -1;
+    }
+    if (m_sendCallback == nullptr) {
+        std::cerr << "[CAN2CCU] Send callback not set\n";
+        return -1;
+    }
+    uint8_t businessData[2];
+    businessData[0] = m_vehicleIdConfirmData.successFlag;
+    businessData[1] = m_vehicleIdConfirmData.failReason;
+    return sendSingleFrame(0x06, PGN_VEHICLE_ID_CONFIRM, businessData, 2);
+}
+
+int CAN2CCUProtocol::encodeVehicleAuthFrame()
+{
+    if (!m_cmdVehicleAuthDataValid) {
+        return -1;
+    }
+    if (m_sendCallback == nullptr) {
+        std::cerr << "[CAN2CCU] Send callback not set\n";
+        return -1;
+    }
+    uint8_t businessData[19];
+    memset(businessData, 0, sizeof(businessData));
+    memcpy(&businessData[0], m_cmdVehicleAuthData.vin, sizeof(m_cmdVehicleAuthData.vin));
+    businessData[17] = m_cmdVehicleAuthData.successFlag;
+    businessData[18] = m_cmdVehicleAuthData.failReason;
+    return sendMultiFrame(0x06, PGN_VEHICLE_AUTH, businessData, sizeof(businessData));
 }
 
 int CAN2CCUProtocol::encodePowerAdjustFrame()
@@ -707,10 +795,13 @@ int CAN2CCUProtocol::decodeFrame(uint32_t canId, const uint8_t* data, size_t dat
             
         case PGN_START_COMPLETE:
             return decodeStartCompleteFrame(canId, data, dataLen);
-            
+
         case PGN_STOP_COMPLETE:
             return decodeStopCompleteFrame(canId, data, dataLen);
-            
+
+        case PGN_VEHICLE_ID:
+            return decodeVehicleIdFrame(canId, data, dataLen);
+
         case PGN_TELEMETRY_20:
             return decodeYC20Frame(canId, data, dataLen);
             
@@ -730,7 +821,10 @@ int CAN2CCUProtocol::decodeFrame(uint32_t canId, const uint8_t* data, size_t dat
 
         case PGN_POWER_ADJUST_RESP:
             return decodePowerAdjustResponse(data, dataLen);
-            
+
+        case PGN_VEHICLE_AUTH_ACK:
+            return decodeVehicleAuthAck(data, dataLen);
+
         case PGN_HEARTBEAT_RESP:
             // BY ZF: 心跳解析中更新接收时间，供 getHeartbeatCommStatus 与编码表18 字节3 使用
             m_lastCcuHeartbeatTime = time(nullptr);
@@ -830,6 +924,59 @@ int CAN2CCUProtocol::decodePowerAdjustResponse(const uint8_t* data, size_t dataL
         return -1;
     }
     m_powerAdjustResponseDataValid = true;
+    return 0;
+}
+
+int CAN2CCUProtocol::decodeVehicleIdFrame(uint32_t canId, const uint8_t* data, size_t dataLen)
+{
+    LongFrameContext* context = getLongFrameContext(PGN_VEHICLE_ID);
+    if (context == nullptr) {
+        return -1;
+    }
+
+    int result = processLongFrame(canId, data, dataLen, context);
+    if (result == 0) {
+        const uint8_t* buf = context->buffer;
+        const size_t len = static_cast<size_t>(context->dataLength);
+        const size_t kVehicleIdPayloadLen = 25;
+        if (len < kVehicleIdPayloadLen) {
+            resetLongFrameContext(PGN_VEHICLE_ID);
+            return -1;
+        }
+        if (buf[0] != 0 && buf[0] != static_cast<uint8_t>(m_gunNo + 1)) {
+            resetLongFrameContext(PGN_VEHICLE_ID);
+            return -1;
+        }
+
+        memset(&m_statusVehicleIdData, 0, sizeof(m_statusVehicleIdData));
+        memcpy(m_statusVehicleIdData.vin, &buf[1], sizeof(m_statusVehicleIdData.vin));
+        memcpy(m_statusVehicleIdData.batteryChargeCount, &buf[18], sizeof(m_statusVehicleIdData.batteryChargeCount));
+        m_statusVehicleIdData.soc = static_cast<uint16_t>(buf[21]) | (static_cast<uint16_t>(buf[22]) << 8);
+        m_statusVehicleIdData.currentBatteryVoltage =
+            static_cast<uint16_t>(buf[23]) | (static_cast<uint16_t>(buf[24]) << 8);
+        m_statusVehicleIdData.vinAuthResult = 0x00;
+        m_vehicleIdDataValid = true;
+        resetLongFrameContext(PGN_VEHICLE_ID);
+        return 0;
+    } else if (result == 1) {
+        return 1;
+    }
+
+    resetLongFrameContext(PGN_VEHICLE_ID);
+    return -1;
+}
+
+int CAN2CCUProtocol::decodeVehicleAuthAck(const uint8_t* data, size_t dataLen)
+{
+    if (data == nullptr || dataLen < 3) {
+        return -1;
+    }
+    if (data[0] != 0 && data[0] != static_cast<uint8_t>(m_gunNo + 1)) {
+        return -1;
+    }
+    m_vehicleAuthAckData.successFlag = data[1];
+    m_vehicleAuthAckData.failReason = data[2];
+    m_vehicleAuthAckDataValid = true;
     return 0;
 }
 
@@ -1624,11 +1771,15 @@ int CAN2CCUProtocol::sendMultiFrame(uint8_t priority, uint8_t pgn, const uint8_t
         
         // BY ZF: 计算数据偏移
         // 第1帧：4字节有效数据（枪号1字节 + 业务数据3字节，即fullData[0-3]）
-        // 后续帧：每帧7字节有效数据
+        // 后续帧：继续发送剩余“有效数据 + 校验和”
         size_t dataOffset = 4 + ((static_cast<size_t>(frameSeq) - 2) * 7);
-        size_t copyLen = std::min(static_cast<size_t>(7), validDataLen - dataOffset);
-        memcpy(&frame[1], &fullData[dataOffset], copyLen);  // 从frame[1]开始存放有效数据
-        
+        if (dataOffset >= totalDataLen) {
+            delete[] fullData;
+            return -1;
+        }
+        size_t copyLen = std::min(static_cast<size_t>(7), totalDataLen - dataOffset);
+        memcpy(&frame[1], &fullData[dataOffset], copyLen);  // 从frame[1]开始存放有效数据/校验和
+
         if (m_sendCallback(canId, frame, 8) != 0) {
             delete[] fullData;
             return -1;

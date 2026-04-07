@@ -50,6 +50,23 @@ struct TCU2CCU_CmdStopChargeData {
 };
 
 /**
+ * 车辆识别数据应答帧业务数据（表63，PGN=0x18，用于下发）
+ */
+struct TCU2CCU_VehicleIdConfirmData {
+    uint8_t successFlag;           // 成功标识 00H 成功 01H 失败
+    uint8_t failReason;            // 失败原因 00H 成功 01H 非法VIN
+};
+
+/**
+ * 车辆识别鉴权帧业务数据（表64，PGN=0x19，用于下发）
+ */
+struct TCU2CCU_CmdVehicleAuthData {
+    char vin[17];                  // 车辆VIN信息（ASCII，17字节）
+    uint8_t successFlag;           // 成功标识 00H 成功 01H 失败
+    uint8_t failReason;            // 失败原因 00H 成功 01H 非法VIN 02H 平台鉴权失败 03H 平台鉴权超时 FFH 其他
+};
+
+/**
  * 停止充电应答数据（表15 充电停止应答帧，用于接收）
  */
 struct TCU2CCU_StopChargeResponseData {
@@ -263,6 +280,14 @@ struct TCU2CCU_StatusVehicleIdData {
     uint16_t soc;                         // 整车动力蓄电池荷电状态（%，低字节在前）
     uint16_t currentBatteryVoltage;       // 整车动力蓄电池当前电池电压（0.1V，低字节在前）
     uint8_t vinAuthResult;                // VIN鉴权结果标志
+};
+
+/**
+ * 车辆识别鉴权应答帧业务数据（表65，PGN=0x1A，用于接收）
+ */
+struct TCU2CCU_VehicleAuthAckData {
+    uint8_t successFlag;                  // 成功标识 00H 成功 01H 失败
+    uint8_t failReason;                   // 失败原因 00H 成功 01H VIN不一致
 };
 
 // ========== 数据帧业务数据 ==========
