@@ -30,7 +30,7 @@
 
 #endif
 
-#include "shm_points.h" // BY ZF: 共享内存点位索引定义
+// BY ZF: shm_points.h 已移除，当前头文件未依赖其中定义。
 
 #ifdef WIN32
 #if defined(CSHMLIB)

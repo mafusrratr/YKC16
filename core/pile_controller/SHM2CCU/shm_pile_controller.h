@@ -27,6 +27,8 @@ public:
     void setStartChargeData(const TCU2CCU_CmdStartChargeData* data);
     void setStopChargeData(const TCU2CCU_CmdStopChargeData* data);
     void setPowerAdjustData(const TCU2CCU_CmdPowerAdjustData* data);
+    void updateFeeData(double totalAmount, double totalEnergy, double chargedTime);
+    void setPlugAndChargeState(uint8_t value);
     int powerAdjust();
 
     bool getYC20Data(TCU2CCU_DataYC20* data) const;
@@ -57,19 +59,27 @@ private:
     bool parseConfig(const char* config);
     int yxIndex(int baseIndex) const;
     int ycIndex(int baseIndex) const;
+    int ddIndex(int baseIndex) const;
     YX* getYxPoint(int baseIndex) const;
     YC* getYcPoint(int baseIndex) const;
+    DD* getDdPoint(int baseIndex) const;
     const char* getYxDesname(int baseIndex) const;
     const char* getYcDesname(int baseIndex) const;
     bool getYxValue(int baseIndex) const;
     unsigned int getYcValue(int baseIndex) const;
     int16_t getYcSignedValue(int baseIndex) const;
+    int16_t getYcOffsetCurrentValue(int baseIndex) const;
+    int16_t getYcMinus50TempValue(int baseIndex) const;
+    unsigned int getRawGunWorkStatusValue() const;
+    uint8_t getDerivedWorkStatus() const;
+    void refreshStopSocCache() const;
     uint8_t getChargePortWorkStatus() const;
     void clearYxPoint(int baseIndex);
     void zeroMemory(void* ptr, size_t size) const;
     void copyAsciiBytes(uint8_t* dest, size_t len, const char* src) const;
     void copyAsciiChars(char* dest, size_t len, const char* src) const;
     void fillBatteryProdDate(uint8_t& year, uint8_t& month, uint8_t& day) const;
+    bool isValidBatteryProdDate(uint8_t year, uint8_t month, uint8_t day) const;
 
 private:
     CShm* m_shm;
@@ -79,6 +89,7 @@ private:
     TCU2CCU_CmdStartChargeData m_startChargeData;
     TCU2CCU_CmdStopChargeData m_stopChargeData;
     TCU2CCU_CmdPowerAdjustData m_powerAdjustData;
+    mutable uint8_t m_cachedStopSoc;
 };
 
 #endif  // SHM2CCU_SHM_PILE_CONTROLLER_H

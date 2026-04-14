@@ -47,18 +47,7 @@ Topic：`tcu/pile/{gun}/cmd`
 
 示例（start_charge）：
 ```json
-{
-  "ts": 1736150000000,
-  "seq": 56,
-  "source": "tcu_logic",
-  "gun": 0,
-  "cmd": "start_charge",
-  "data": {
-    "loadControlSwitch": 2,
-    "plugAndChargeFlag": 1,
-    "auxPowerVoltage": 12
-  }
-}
+p
 ```
 
 示例（stop_charge）：

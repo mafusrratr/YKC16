@@ -123,6 +123,7 @@ private:
         uint8_t plugAndChargeFlag;              // 即插即充标志（01H 非即插即充 02H 即插即充）
         uint8_t mergeChargeFlag;                // 合并充电标志
         bool plugAndChargeActive;               // 当前启动流程是否为即插即充
+        bool plugAndChargeVehicleIdReceived;    // 是否已收到 0x17 车辆识别数据
         bool plugAndChargeVehicleIdConfirmed;   // 是否已完成 0x17/0x18 交互
         bool plugAndChargeAuthRequestPublished; // 是否已向 plat 发布鉴权请求
         bool plugAndChargeAuthResultSent;       // 是否已向 pile 下发 0x19
@@ -135,6 +136,7 @@ private:
         unsigned int stopReason;                // 停止原因
         int chargeMode;                         // 充电模式
         double prechargeAmount;                 // 预充值金额(元)
+        bool v2gMode;                          // 是否为 V2G 放电模式
         int feeModelNo;                         // 计费模型编号
         std::string feeModelId;                 // 计费模型ID
         uint8_t feeTimeNum;                     // 时段数
@@ -213,6 +215,7 @@ private:
             , plugAndChargeFlag(0x01)
             , mergeChargeFlag(0x00)
             , plugAndChargeActive(false)
+            , plugAndChargeVehicleIdReceived(false)
             , plugAndChargeVehicleIdConfirmed(false)
             , plugAndChargeAuthRequestPublished(false)
             , plugAndChargeAuthResultSent(false)
@@ -224,6 +227,7 @@ private:
             , stopReason(0)
             , chargeMode(0)
             , prechargeAmount(0.0)
+            , v2gMode(false)
             , feeModelNo(0)
             , feeTimeNum(0)
             , feeInitialized(false)
@@ -309,6 +313,12 @@ private:
     // BY ZF: 启动鉴权参数与计费模型解析
     void updateAuthBasis(uint8_t gun, cJSON* data, const char* source);
     bool parseFeeModel(uint8_t gun, cJSON* data);
+    int getMergePeerGun(uint8_t gun) const;
+    bool armPendingStart(uint8_t gun, cJSON* data, const char* source);
+    void dispatchArmedStart(uint8_t gun, const char* startReason, const char* authReason);
+    void syncMergePrechargeAmount(uint8_t gun);
+    double getEffectivePrechargeAmount(uint8_t gun) const;
+    double getEffectiveTotalAmount(uint8_t gun) const;
     // BY ZF: 计费相关工具函数
     int getSegmentIndexByMinute(const GunState& gs, int minuteOfDay) const;
     int getCurrentMinuteOfDay() const;

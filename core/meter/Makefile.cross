@@ -1,11 +1,17 @@
-# Meter process cross Makefile (iMX6UL)
+# Meter process cross Makefile
 # BY ZF
 
-CROSS_COMPILE = arm-linux-gnueabihf-
+# BY ZF: 允许外部 build 脚本按平台覆盖工具链前缀，如 nuc980/imx6ul。
+CROSS_COMPILE ?= arm-linux-gnueabihf-
 CXX = $(CROSS_COMPILE)g++
 CXXFLAGS = -Wall -O2 -std=c++11
 
 INCLUDES = -I../base -I../interfaces -I../base/mqtt -I../base/mqtt/include -I../base/cjson/include
+
+# BY ZF: 外部库路径允许按平台切换。
+EXTRA_LIB_PATH ?= ../../extraLib
+PLATFORM ?=
+PLATFORM_LIB_PATH = $(if $(PLATFORM),$(EXTRA_LIB_PATH)/$(PLATFORM),$(EXTRA_LIB_PATH))
 
 OBJ_DIR = obj
 RELEASE_DIR = release
@@ -29,7 +35,7 @@ OBJECTS = $(OBJ_DIR)/main.o \
           $(OBJ_DIR)/log_sender.o \
           $(OBJ_DIR)/base_process.o
 
-LIBDIRS = -L../../extraLib
+LIBDIRS = -L$(PLATFORM_LIB_PATH) -L$(EXTRA_LIB_PATH)
 LIBS = -lpthread -lmosquitto -lcjson
 
 all: directories $(TARGET)
@@ -71,5 +77,10 @@ $(OBJ_DIR)/base_process.o: ../base/process/base_process.cpp
 clean:
 	rm -rf $(OBJ_DIR) $(RELEASE_DIR)
 
-.PHONY: all clean directories
+info:
+	@echo "CROSS_COMPILE: $(CROSS_COMPILE)"
+	@echo "CXX: $(CXX)"
+	@echo "PLATFORM: $(PLATFORM)"
+	@echo "PLATFORM_LIB_PATH: $(PLATFORM_LIB_PATH)"
 
+.PHONY: all clean directories info

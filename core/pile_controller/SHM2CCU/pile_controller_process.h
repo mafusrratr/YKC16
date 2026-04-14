@@ -76,6 +76,8 @@ private:
     void publishData(uint8_t gunNo, const std::string& type, const std::string& payload, bool retain = true);
     void publishCmdUpset(uint8_t gunNo, const std::string& payload, bool retain = false);
     void onMqttMessage(const std::string& topic, const std::string& payload);
+    bool handleFeeDataMessage(int gun, struct cJSON* data);
+    bool handleLogicEventMessage(int gun, struct cJSON* root, struct cJSON* data);
     std::string buildDataPayload(uint8_t gunNo,
                                  const std::string& type,
                                  const std::function<void(struct cJSON*)>& fillData);

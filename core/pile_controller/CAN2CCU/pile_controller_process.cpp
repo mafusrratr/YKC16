@@ -588,7 +588,7 @@ void PileControllerProcess::updateStatusFromController()
                     cJSON_AddNumberToObject(data, "currentTotalVoltage", r.currentTotalVoltage);
                     cJSON_AddNumberToObject(data, "ratedCapacity", r.ratedCapacity);
                     cJSON_AddNumberToObject(data, "nominalEnergy", r.nominalEnergy);
-                    cJSON_AddNumberToObject(data, "soc", r.soc);
+                    cJSON_AddNumberToObject(data, "soc", r.soc/10.0);
                     cJSON_AddNumberToObject(data, "pileMaxOutputVoltage", r.pileMaxOutputVoltage);
                     cJSON_AddNumberToObject(data, "pileMinOutputVoltage", r.pileMinOutputVoltage);
                     cJSON_AddNumberToObject(data, "pileMaxOutputCurrent", r.pileMaxOutputCurrent);

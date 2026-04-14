@@ -87,7 +87,8 @@ namespace {
         int value = 0x00;
         if (obj) {
             if (!jsonGetInt(obj, "mergeChargeFlag", value) &&
-                !jsonGetInt(obj, "mergedChargeFlag", value)) {
+                !jsonGetInt(obj, "mergedChargeFlag", value) &&
+                !jsonGetInt(obj, "mergeChargedFlag", value)) {
                 jsonGetInt(obj, "combineChargeFlag", value);
             }
         }
@@ -143,8 +144,16 @@ namespace {
     }
 
     // BY ZF: feeData 数值统一保留 5 位小数，抑制浮点尾差
+    double roundNearest(double v) {
+        return (v >= 0.0) ? std::floor(v + 0.5) : std::ceil(v - 0.5);
+    }
+
+    long long roundNearestLongLong(double v) {
+        return static_cast<long long>((v >= 0.0) ? std::floor(v + 0.5) : std::ceil(v - 0.5));
+    }
+
     double roundTo5(double v) {
-        return std::round(v * 100000.0) / 100000.0;
+        return roundNearest(v * 100000.0) / 100000.0;
     }
 
     // BY ZF: Unix 秒时间戳转 YYYYMMDDHHMMSS 数字，便于交易表直接检索
@@ -231,6 +240,7 @@ namespace {
             // BY ZF: 合并充电标志兼容多个命名
             v = cJSON_GetObjectItem(src, "mergeChargeFlag");
             if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(src, "mergedChargeFlag");
+            if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(src, "mergeChargedFlag");
             if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(src, "combineChargeFlag");
             if (cJSON_IsNumber(v)) mergeChargeFlag = static_cast<uint8_t>(v->valueint);
 
@@ -549,21 +559,50 @@ void ChargeLogicProcess::handleLogicCmd(uint8_t gun, const std::string& cmd, cJS
         // BY ZF: HMI 即插即充入口兼容 vin_req；保留 start_charge 兼容旧流程。
         GunState& gs = m_gunStates[gun];
         if (gs.state == STATE_PREPARE) {
-            updateAuthBasis(gun, data, (cmd == "vin_req") ? "hmi_vin_req" : "hmi");
-            gs.pendingStart = true;
-            gs.pendingStartData.clear();
-            // BY ZF: 缓存“桩侧启动帧参数”，避免透传上层业务字段到 pile
-            cJSON* pileStartData = buildPileStartData(data);
-            if (pileStartData) {
-                char* out = cJSON_PrintUnformatted(pileStartData);
-                if (out) {
-                    gs.pendingStartData = out;
-                    cJSON_free(out);
+            const bool mergePlugAndCharge = (getPlugAndChargeFlag(data) == 0x02 && getMergeChargeFlag(data) != 0x00);
+            if (mergePlugAndCharge) {
+                const int peer = getMergePeerGun(gun);
+                if (peer < 0) {
+                    cJSON* evt = cJSON_CreateObject();
+                    cJSON_AddStringToObject(evt, "cmd", cmd.c_str());
+                    cJSON_AddStringToObject(evt, "reason", "merge_charge_peer_not_found");
+                    publishLogicEvent(gun, "cmd_reject", evt);
+                    cJSON_Delete(evt);
+                    return;
                 }
-                cJSON_Delete(pileStartData);
+                GunState& peerGs = m_gunStates[peer];
+                if (peerGs.state != STATE_PREPARE) {
+                    cJSON* evt = cJSON_CreateObject();
+                    cJSON_AddStringToObject(evt, "cmd", cmd.c_str());
+                    cJSON_AddStringToObject(evt, "reason", "merge_charge_peer_not_prepare");
+                    cJSON_AddNumberToObject(evt, "peerGun", peer);
+                    cJSON_AddStringToObject(evt, "peerState", stateToString(peerGs.state));
+                    publishLogicEvent(gun, "cmd_reject", evt);
+                    cJSON_Delete(evt);
+                    return;
+                }
+
+                const char* source = (cmd == "vin_req") ? "hmi_vin_req" : "hmi";
+                if (!armPendingStart(gun, data, source) || !armPendingStart(static_cast<uint8_t>(peer), data, source)) {
+                    cJSON* evt = cJSON_CreateObject();
+                    cJSON_AddStringToObject(evt, "cmd", cmd.c_str());
+                    cJSON_AddStringToObject(evt, "reason", "merge_charge_arm_failed");
+                    cJSON_AddNumberToObject(evt, "peerGun", peer);
+                    publishLogicEvent(gun, "cmd_reject", evt);
+                    cJSON_Delete(evt);
+                    return;
+                }
+
+                const char* startReason = (cmd == "vin_req") ? "merge_vin_req" : "merge_start_cmd";
+                const char* authReason = (cmd == "vin_req") ? "merge_vin_req_auto_auth_ok" : "merge_hmi_start_auto_auth_ok";
+                dispatchArmedStart(gun, startReason, authReason);
+                dispatchArmedStart(static_cast<uint8_t>(peer), startReason, authReason);
+            } else {
+                armPendingStart(gun, data, (cmd == "vin_req") ? "hmi_vin_req" : "hmi");
+                dispatchArmedStart(gun,
+                                   (cmd == "vin_req") ? "vin_req" : "start_cmd",
+                                   (cmd == "vin_req") ? "hmi_vin_req_auto_auth_ok" : "hmi_start_auto_auth_ok");
             }
-            handleEvent(gun, EVT_START_CMD, (cmd == "vin_req") ? "vin_req" : "start_cmd");
-            handleEvent(gun, EVT_AUTH_OK, (cmd == "vin_req") ? "hmi_vin_req_auto_auth_ok" : "hmi_start_auto_auth_ok");
         } else {
             cJSON* evt = cJSON_CreateObject();
             cJSON_AddStringToObject(evt, "cmd", cmd.c_str());
@@ -746,8 +785,7 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
             }
             cJSON* soc = cJSON_GetObjectItem(data, "soc");
             if (soc && cJSON_IsNumber(soc)) {
-                // BY ZF: start_complete.soc 协议量纲为 0.1%，这里统一换算成 %
-                m_gunStates[gun].startSoc = soc->valuedouble / 10.0;
+                m_gunStates[gun].startSoc = soc->valuedouble / 1.0;
             }
             const char* vin = getString(data, "vin");
             if (vin && vin[0]) {
@@ -934,18 +972,31 @@ void ChargeLogicProcess::handleMeterData(uint8_t gun, cJSON* data)
     gs.lastMeterMsgTime = now;
 
     double totalEnergyKwh = 0.0;
-    bool hasEnergy = false;
+    double reverseEnergyKwh = 0.0;
+    bool hasForwardEnergy = false;
+    bool hasReverseEnergy = false;
     if (getNumber(data, "energy", totalEnergyKwh) ||
         getNumber(data, "totalEnergy", totalEnergyKwh) ||
         getNumber(data, "total_kwh", totalEnergyKwh)) {
-        hasEnergy = true;
+        hasForwardEnergy = true;
+    }
+    if (getNumber(data, "ReverseEnergy", reverseEnergyKwh) ||
+        getNumber(data, "reverseEnergy", reverseEnergyKwh) ||
+        getNumber(data, "reverse_kwh", reverseEnergyKwh)) {
+        hasReverseEnergy = true;
+    }
+
+    const bool useReverseEnergy = gs.v2gMode && hasReverseEnergy;
+    const bool hasEnergy = useReverseEnergy || hasForwardEnergy;
+    const double meterEnergyKwh = useReverseEnergy ? reverseEnergyKwh : totalEnergyKwh;
+    if (hasEnergy) {
         if (!gs.hasMeterValue) {
-            gs.lastMeterValue = totalEnergyKwh;
+            gs.lastMeterValue = meterEnergyKwh;
             gs.lastMeterValueTime = now;
             gs.hasMeterValue = true;
             gs.meterStableCount = 0;
-        } else if (totalEnergyKwh != gs.lastMeterValue) {
-            gs.lastMeterValue = totalEnergyKwh;
+        } else if (meterEnergyKwh != gs.lastMeterValue) {
+            gs.lastMeterValue = meterEnergyKwh;
             gs.lastMeterValueTime = now;
             gs.meterStableCount = 0;
         } else {
@@ -978,15 +1029,15 @@ void ChargeLogicProcess::handleMeterData(uint8_t gun, cJSON* data)
     // BY ZF: 充电中/停止中按电量增量计算计费
     if (hasEnergy && (gs.state == STATE_CHARGING || gs.state == STATE_STOPPING) && gs.feeInitialized) {
         if (!gs.feeHasEnergyBase) {
-            gs.feeEnergyBaseKwh = totalEnergyKwh;
-            gs.feeLastEnergyKwh = totalEnergyKwh;
+            gs.feeEnergyBaseKwh = meterEnergyKwh;
+            gs.feeLastEnergyKwh = meterEnergyKwh;
             gs.feeHasEnergyBase = true;
         } else {
-            double deltaKwh = totalEnergyKwh - gs.feeLastEnergyKwh;
+            double deltaKwh = meterEnergyKwh - gs.feeLastEnergyKwh;
             if (deltaKwh > 0.0) {
                 applyEnergyDeltaToFee(gun, deltaKwh);
             }
-            gs.feeLastEnergyKwh = totalEnergyKwh;
+            gs.feeLastEnergyKwh = meterEnergyKwh;
         }
 
         // BY ZF: 计费数据变化即送（对比最近一次已发布快照）。
@@ -1199,7 +1250,7 @@ void ChargeLogicProcess::prepareOfflineCardSettlement(uint8_t gun)
         return;
     }
 
-    const long long totalFeeCent = static_cast<long long>(std::llround(std::max(0.0, gs.feeTotalElectricAmount + gs.feeTotalServiceAmount) * 100.0));
+    const long long totalFeeCent = roundNearestLongLong(std::max(0.0, gs.feeTotalElectricAmount + gs.feeTotalServiceAmount) * 100.0);
     const long long remain = static_cast<long long>(gs.offlineCardStartBalance) - totalFeeCent;
     gs.offlineCardFinalBalance = static_cast<uint32_t>(remain > 0 ? remain : 0);
     gs.offlineCardChargeActive = false;
@@ -2039,6 +2090,128 @@ void ChargeLogicProcess::replayBufferedUnconfirmedRecords()
     }
 }
 
+int ChargeLogicProcess::getMergePeerGun(uint8_t gun) const
+{
+    if (m_gunStates.size() < 2) {
+        return -1;
+    }
+    const uint8_t peer = (gun % 2 == 0) ? static_cast<uint8_t>(gun + 1) : static_cast<uint8_t>(gun - 1);
+    if (peer >= m_gunStates.size()) {
+        return -1;
+    }
+    return static_cast<int>(peer);
+}
+
+bool ChargeLogicProcess::armPendingStart(uint8_t gun, cJSON* data, const char* source)
+{
+    if (gun >= m_gunStates.size()) {
+        return false;
+    }
+
+    updateAuthBasis(gun, data, source);
+    GunState& gs = m_gunStates[gun];
+    gs.pendingStart = true;
+    gs.pendingStartData.clear();
+
+    cJSON* pileStartData = buildPileStartData(data);
+    if (pileStartData) {
+        char* out = cJSON_PrintUnformatted(pileStartData);
+        if (out) {
+            gs.pendingStartData = out;
+            cJSON_free(out);
+        }
+        cJSON_Delete(pileStartData);
+    }
+    return true;
+}
+
+void ChargeLogicProcess::dispatchArmedStart(uint8_t gun, const char* startReason, const char* authReason)
+{
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+    handleEvent(gun, EVT_START_CMD, startReason);
+    handleEvent(gun, EVT_AUTH_OK, authReason);
+}
+
+void ChargeLogicProcess::syncMergePrechargeAmount(uint8_t gun)
+{
+    if (gun >= m_gunStates.size()) {
+        return;
+    }
+    GunState& gs = m_gunStates[gun];
+    if (gs.mergeChargeFlag == 0x00) {
+        return;
+    }
+
+    const int peer = getMergePeerGun(gun);
+    if (peer < 0) {
+        return;
+    }
+    GunState& peerGs = m_gunStates[peer];
+    if (!peerGs.hasAuthBasis || peerGs.mergeChargeFlag == 0x00) {
+        return;
+    }
+    if (gs.prechargeAmount <= 0.0 || peerGs.prechargeAmount <= 0.0) {
+        return;
+    }
+
+    // BY ZF: 合并充总预充值金额应保持一致；若平台分枪下发不一致，统一取最小值。
+    const double effective = std::min(gs.prechargeAmount, peerGs.prechargeAmount);
+    gs.prechargeAmount = effective;
+    peerGs.prechargeAmount = effective;
+}
+
+double ChargeLogicProcess::getEffectivePrechargeAmount(uint8_t gun) const
+{
+    if (gun >= m_gunStates.size()) {
+        return 0.0;
+    }
+    const GunState& gs = m_gunStates[gun];
+    double effective = gs.prechargeAmount;
+    if (gs.mergeChargeFlag == 0x00) {
+        return effective;
+    }
+
+    const int peer = getMergePeerGun(gun);
+    if (peer < 0) {
+        return effective;
+    }
+    const GunState& peerGs = m_gunStates[peer];
+    if (!peerGs.hasAuthBasis || peerGs.mergeChargeFlag == 0x00 || peerGs.prechargeAmount <= 0.0) {
+        return effective;
+    }
+    if (effective <= 0.0) {
+        return peerGs.prechargeAmount;
+    }
+    return std::min(effective, peerGs.prechargeAmount);
+}
+
+double ChargeLogicProcess::getEffectiveTotalAmount(uint8_t gun) const
+{
+    if (gun >= m_gunStates.size()) {
+        return 0.0;
+    }
+    const GunState& gs = m_gunStates[gun];
+    double total = gs.hasTotalAmount ? gs.lastTotalAmount : 0.0;
+    if (gs.mergeChargeFlag == 0x00) {
+        return total;
+    }
+
+    const int peer = getMergePeerGun(gun);
+    if (peer < 0) {
+        return total;
+    }
+    const GunState& peerGs = m_gunStates[peer];
+    if (peerGs.mergeChargeFlag == 0x00) {
+        return total;
+    }
+    if (peerGs.hasTotalAmount) {
+        total += peerGs.lastTotalAmount;
+    }
+    return total;
+}
+
 void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* source)
 {
     if (gun >= m_gunStates.size()) {
@@ -2055,6 +2228,7 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     int chargeMode = 0;
     double prechargeAmount = 0.0;
     int feeModelNo = 0;
+    int v2g = 0;
 
     if (data) {
         const char* u = getString(data, "chargeUserNo");
@@ -2083,6 +2257,8 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
         if (f && cJSON_IsNumber(f)) {
             feeModelNo = f->valueint;
         }
+
+        jsonGetInt(data, "v2g", v2g);
     }
 
     gs.startTimeMs = startTs;
@@ -2109,6 +2285,7 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     gs.plugAndChargeFlag = getPlugAndChargeFlag(data);
     gs.mergeChargeFlag = getMergeChargeFlag(data);
     gs.plugAndChargeActive = (gs.plugAndChargeFlag == 0x02);
+    gs.plugAndChargeVehicleIdReceived = false;
     gs.plugAndChargeVehicleIdConfirmed = false;
     gs.plugAndChargeAuthRequestPublished = false;
     gs.plugAndChargeAuthResultSent = false;
@@ -2123,6 +2300,7 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     gs.vinCode.clear();
     gs.chargeMode = chargeMode;
     gs.prechargeAmount = prechargeAmount;
+    gs.v2gMode = (v2g != 0);
     gs.feeModelNo = feeModelNo;
     gs.hasAuthBasis = true;
     gs.tcuStopReqSent = false;
@@ -2138,6 +2316,7 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
 
     // BY ZF: 从启动命令解析计费模型（HHMM时段 + 分段电费/服务费）。
     parseFeeModel(gun, data);
+    syncMergePrechargeAmount(gun);
 
     cJSON* evt = cJSON_CreateObject();
     cJSON_AddStringToObject(evt, "source", source ? source : "");
@@ -2149,8 +2328,6 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     cJSON_AddNumberToObject(evt, "feeModelNo", gs.feeModelNo);
     cJSON_AddNumberToObject(evt, "plugAndChargeFlag", gs.plugAndChargeFlag);
     cJSON_AddNumberToObject(evt, "mergeChargeFlag", gs.mergeChargeFlag);
-    int v2g = 0;
-    jsonGetInt(data, "v2g", v2g);
     cJSON_AddNumberToObject(evt, "v2g", (v2g != 0) ? 1 : 0);
     publishLogicEvent(gun, "auth_basis", evt);
     cJSON_Delete(evt);
@@ -2267,9 +2444,9 @@ bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
             feeModel.segFlag.push_back(static_cast<unsigned int>(i + 1));
             // BY ZF: 统一按 10^-5 元保存单价，避免平台下发 5 位小数时丢精度。
             feeModel.chargeFee.push_back(static_cast<unsigned int>(
-                std::round(std::max(0.0, gs.feeChargePricePerKwh[i]) * 100000.0)));
+                roundNearest(std::max(0.0, gs.feeChargePricePerKwh[i]) * 100000.0)));
             feeModel.serviceFee.push_back(static_cast<unsigned int>(
-                std::round(std::max(0.0, gs.feeServicePricePerKwh[i]) * 100000.0)));
+                roundNearest(std::max(0.0, gs.feeServicePricePerKwh[i]) * 100000.0)));
         }
 
         m_logSender.saveFeeModel(feeModel);
@@ -2345,28 +2522,59 @@ void ChargeLogicProcess::maybeTriggerTcuStopByPrecharge(uint8_t gun)
         return;
     }
     GunState& gs = m_gunStates[gun];
+    const bool mergeCharge = (gs.mergeChargeFlag != 0x00);
+    const int peer = mergeCharge ? getMergePeerGun(gun) : -1;
+    if (mergeCharge && peer >= 0) {
+        // BY ZF: 合并充余额停机只由主枪统一判定，避免双枪重复触发。
+        const uint8_t primaryGun = (gun < static_cast<uint8_t>(peer)) ? gun : static_cast<uint8_t>(peer);
+        if (gun != primaryGun) {
+            return;
+        }
+    }
     if (gs.state != STATE_CHARGING || gs.tcuStopReqSent) {
         return;
     }
-    if (!gs.hasAuthBasis || gs.prechargeAmount <= 0.0 || !gs.hasTotalAmount) {
+    const double effectivePrechargeAmount = getEffectivePrechargeAmount(gun);
+    const double effectiveTotalAmount = getEffectiveTotalAmount(gun);
+    if (!gs.hasAuthBasis || effectivePrechargeAmount <= 0.0) {
         return;
     }
 
-    const double threshold = gs.prechargeAmount - m_config.prechargeStopMargin;
-    if (gs.lastTotalAmount >= threshold) {
-        cJSON* evt = cJSON_CreateObject();
-        cJSON_AddStringToObject(evt, "reason", "precharge_near_limit");
-        cJSON_AddNumberToObject(evt, "totalAmount", gs.lastTotalAmount);
-        cJSON_AddNumberToObject(evt, "prechargeAmount", gs.prechargeAmount);
-        cJSON_AddNumberToObject(evt, "margin", m_config.prechargeStopMargin);
-        cJSON_AddStringToObject(evt, "chargeUserNo", gs.chargeUserNo.c_str());
-        cJSON_AddStringToObject(evt, "orderNo", gs.orderNo.c_str());
-        cJSON_AddNumberToObject(evt, "feeModelNo", gs.feeModelNo);
-        publishLogicEvent(gun, "tcu_stop_request", evt);
-        cJSON_Delete(evt);
+    if (!gs.hasTotalAmount && !(mergeCharge && peer >= 0 && m_gunStates[peer].hasTotalAmount)) {
+        return;
+    }
 
-        gs.tcuStopReqSent = true;
-        handleEvent(gun, EVT_STOP_CMD, "tcu_precharge_near_limit");
+    const double threshold = effectivePrechargeAmount - m_config.prechargeStopMargin;
+    if (effectiveTotalAmount >= threshold) {
+        const size_t targetCount = (mergeCharge && peer >= 0) ? 2U : 1U;
+        for (size_t idx = 0; idx < targetCount; ++idx) {
+            const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
+            GunState& targetGs = m_gunStates[targetGun];
+            if (targetGs.tcuStopReqSent) {
+                continue;
+            }
+
+            cJSON* evt = cJSON_CreateObject();
+            cJSON_AddStringToObject(evt, "reason", "precharge_near_limit");
+            cJSON_AddNumberToObject(evt, "totalAmount", effectiveTotalAmount);
+            cJSON_AddNumberToObject(evt, "selfAmount", targetGs.hasTotalAmount ? targetGs.lastTotalAmount : 0.0);
+            if (mergeCharge && peer >= 0) {
+                const uint8_t peerGun = (targetGun == gun) ? static_cast<uint8_t>(peer) : gun;
+                const GunState& peerGs = m_gunStates[peerGun];
+                cJSON_AddNumberToObject(evt, "peerGun", peerGun);
+                cJSON_AddNumberToObject(evt, "peerAmount", peerGs.hasTotalAmount ? peerGs.lastTotalAmount : 0.0);
+            }
+            cJSON_AddNumberToObject(evt, "prechargeAmount", effectivePrechargeAmount);
+            cJSON_AddNumberToObject(evt, "margin", m_config.prechargeStopMargin);
+            cJSON_AddStringToObject(evt, "chargeUserNo", targetGs.chargeUserNo.c_str());
+            cJSON_AddStringToObject(evt, "orderNo", targetGs.orderNo.c_str());
+            cJSON_AddNumberToObject(evt, "feeModelNo", targetGs.feeModelNo);
+            publishLogicEvent(targetGun, "tcu_stop_request", evt);
+            cJSON_Delete(evt);
+
+            targetGs.tcuStopReqSent = true;
+            handleEvent(targetGun, EVT_STOP_CMD, "tcu_precharge_near_limit");
+        }
     }
 }
 
@@ -2379,6 +2587,15 @@ bool ChargeLogicProcess::maybeHandlePlugAndChargeAuthTimeout(
     }
 
     GunState& gs = m_gunStates[gun];
+    const bool mergePlugAndCharge = (gs.plugAndChargeActive && gs.mergeChargeFlag != 0x00);
+    const int peer = mergePlugAndCharge ? getMergePeerGun(gun) : -1;
+    if (mergePlugAndCharge && peer >= 0) {
+        // BY ZF: 合并充电只由主枪执行一次平台鉴权超时收口，避免双枪重复下发 0x19 失败。
+        const uint8_t primaryGun = (gun < static_cast<uint8_t>(peer)) ? gun : static_cast<uint8_t>(peer);
+        if (gun != primaryGun) {
+            return false;
+        }
+    }
     if (!gs.plugAndChargeActive ||
         gs.state != STATE_STARTING ||
         !gs.plugAndChargeVehicleIdConfirmed ||
@@ -2388,20 +2605,43 @@ bool ChargeLogicProcess::maybeHandlePlugAndChargeAuthTimeout(
         return false;
     }
 
-    cJSON* pileData = cJSON_CreateObject();
-    cJSON_AddStringToObject(pileData, "vin", gs.vinCode.c_str());
-    cJSON_AddNumberToObject(pileData, "successFlag", 0x01);
-    cJSON_AddNumberToObject(pileData, "failReason", 0x03);
-    publishPileCmd(gun, "vehicle_auth", pileData);
-    cJSON_Delete(pileData);
+    const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0x34U));
+    const size_t targetCount = (mergePlugAndCharge && peer >= 0) ? 2U : 1U;
+    for (size_t idx = 0; idx < targetCount; ++idx) {
+        const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
+        GunState& targetGs = m_gunStates[targetGun];
 
-    gs.plugAndChargeAuthResultSent = true;
+        cJSON* pileData = cJSON_CreateObject();
+        cJSON_AddStringToObject(pileData, "vin", targetGs.vinCode.c_str());
+        cJSON_AddNumberToObject(pileData, "successFlag", 0x01);
+        cJSON_AddNumberToObject(pileData, "failReason", 0x03);
+        publishPileCmd(targetGun, "vehicle_auth", pileData);
+        cJSON_Delete(pileData);
 
-    cJSON* evt = cJSON_CreateObject();
-    cJSON_AddStringToObject(evt, "vin", gs.vinCode.c_str());
-    cJSON_AddNumberToObject(evt, "failReason", 0x03);
-    publishLogicEvent(gun, "plug_and_charge_auth_timeout", evt);
-    cJSON_Delete(evt);
+        targetGs.plugAndChargeAuthResultSent = true;
+        if (result.valid) {
+            targetGs.stopReason = result.reason;
+        }
+
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "vin", targetGs.vinCode.c_str());
+        cJSON_AddNumberToObject(evt, "failReason", 0x03);
+        if (mergePlugAndCharge && peer >= 0) {
+            cJSON_AddNumberToObject(evt, "peerGun", (targetGun == gun) ? peer : gun);
+        }
+        if (result.valid) {
+            cJSON_AddNumberToObject(evt, "stopReason", static_cast<double>(targetGs.stopReason));
+            if (!result.message.empty()) {
+                cJSON_AddStringToObject(evt, "stopReasonText", result.message.c_str());
+            }
+        }
+        publishLogicEvent(targetGun, "plug_and_charge_auth_timeout", evt);
+        cJSON_Delete(evt);
+
+        if (targetGs.state == STATE_STARTING) {
+            transitionTo(targetGun, STATE_STOPPED, "plug_and_charge_auth_timeout");
+        }
+    }
     return true;
 }
 
@@ -2410,13 +2650,14 @@ void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
     if (gun >= m_gunStates.size()) {
         return;
     }
-
+    //TODO:流程仍需优化，有点太复杂了
     GunState& gs = m_gunStates[gun];
     std::string vin = sanitizeVinString(data ? getString(data, "vin") : "");
     if (!vin.empty()) {
         gs.vinCode = vin;
         gs.hasVinCode = true;
     }
+    gs.plugAndChargeVehicleIdReceived = true;
 
     if (data) {
         cJSON* arr = cJSON_GetObjectItem(data, "batteryChargeCount");
@@ -2438,29 +2679,147 @@ void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
         }
     }
 
-    const bool confirmOk = gs.plugAndChargeActive && gs.state == STATE_STARTING && isValidVinString(vin);
-    cJSON* pileData = cJSON_CreateObject();
-    cJSON_AddNumberToObject(pileData, "successFlag", confirmOk ? 0x00 : 0x01);
-    cJSON_AddNumberToObject(pileData, "failReason", confirmOk ? 0x00 : 0x01);
-    publishPileCmd(gun, "vehicle_id_confirm", pileData);
-    cJSON_Delete(pileData);
+    const bool singleGunConfirmOk = gs.plugAndChargeActive && gs.state == STATE_STARTING && isValidVinString(vin);
+    const bool mergePlugAndCharge = (gs.plugAndChargeActive && gs.mergeChargeFlag != 0x00);
+    const int peer = mergePlugAndCharge ? getMergePeerGun(gun) : -1;
 
-    if (!confirmOk) {
+    if (!mergePlugAndCharge || peer < 0) {
+        cJSON* pileData = cJSON_CreateObject();
+        cJSON_AddNumberToObject(pileData, "successFlag", singleGunConfirmOk ? 0x00 : 0x01);
+        cJSON_AddNumberToObject(pileData, "failReason", singleGunConfirmOk ? 0x00 : 0x01);
+        publishPileCmd(gun, "vehicle_id_confirm", pileData);
+        cJSON_Delete(pileData);
+
+        if (!singleGunConfirmOk) {
+            cJSON* evt = cJSON_CreateObject();
+            cJSON_AddStringToObject(evt, "vin", vin.c_str());
+            cJSON_AddStringToObject(evt, "reason", gs.plugAndChargeActive ? "invalid_vin" : "unexpected_vehicle_id");
+            publishLogicEvent(gun, "plug_and_charge_vehicle_id_reject", evt);
+            cJSON_Delete(evt);
+            return;
+        }
+
+        gs.plugAndChargeVehicleIdConfirmed = true;
+        publishPlugAndChargeAuthRequest(gun);
+
         cJSON* evt = cJSON_CreateObject();
         cJSON_AddStringToObject(evt, "vin", vin.c_str());
-        cJSON_AddStringToObject(evt, "reason", gs.plugAndChargeActive ? "invalid_vin" : "unexpected_vehicle_id");
-        publishLogicEvent(gun, "plug_and_charge_vehicle_id_reject", evt);
+        publishLogicEvent(gun, "plug_and_charge_vehicle_id_confirmed", evt);
         cJSON_Delete(evt);
         return;
     }
 
-    gs.plugAndChargeVehicleIdConfirmed = true;
-    publishPlugAndChargeAuthRequest(gun);
+    GunState& peerGs = m_gunStates[peer];
+    if (!singleGunConfirmOk) {
+        const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0x32U));
+        for (size_t idx = 0; idx < 2; ++idx) {
+            const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
+            GunState& targetGs = m_gunStates[targetGun];
+            if (targetGs.plugAndChargeVehicleIdReceived) {
+                cJSON* pileData = cJSON_CreateObject();
+                cJSON_AddNumberToObject(pileData, "successFlag", 0x01);
+                cJSON_AddNumberToObject(pileData, "failReason", 0x01);
+                publishPileCmd(targetGun, "vehicle_id_confirm", pileData);
+                cJSON_Delete(pileData);
+            }
+            if (result.valid) {
+                targetGs.stopReason = result.reason;
+            }
+            cJSON* evt = cJSON_CreateObject();
+            cJSON_AddStringToObject(evt, "vin", targetGs.vinCode.c_str());
+            cJSON_AddStringToObject(evt, "reason", "invalid_vin");
+            cJSON_AddNumberToObject(evt, "peerGun", (targetGun == gun) ? peer : gun);
+            publishLogicEvent(targetGun, "plug_and_charge_vehicle_id_reject", evt);
+            cJSON_Delete(evt);
+            if (targetGs.state == STATE_STARTING) {
+                transitionTo(targetGun, STATE_STOPPED, "merge_invalid_vin");
+            }
+        }
+        return;
+    }
 
-    cJSON* evt = cJSON_CreateObject();
-    cJSON_AddStringToObject(evt, "vin", vin.c_str());
-    publishLogicEvent(gun, "plug_and_charge_vehicle_id_confirmed", evt);
-    cJSON_Delete(evt);
+    if (!peerGs.plugAndChargeVehicleIdReceived) {
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "vin", vin.c_str());
+        cJSON_AddNumberToObject(evt, "peerGun", peer);
+        cJSON_AddStringToObject(evt, "reason", "waiting_peer_vehicle_id");
+        publishLogicEvent(gun, "plug_and_charge_vehicle_id_wait_peer", evt);
+        cJSON_Delete(evt);
+        return;
+    }
+
+    const bool peerVinValid = isValidVinString(peerGs.vinCode);
+    const bool sameVin = (peerVinValid && vin == peerGs.vinCode);
+    if (!sameVin) {
+        const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0x36U));
+        for (size_t idx = 0; idx < 2; ++idx) {
+            const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
+            GunState& targetGs = m_gunStates[targetGun];
+            // BY ZF: 双枪 VIN 不一致属于合并充即插即充鉴权失败，不按非法 VIN 回 0x18 失败。
+            cJSON* confirmData = cJSON_CreateObject();
+            cJSON_AddNumberToObject(confirmData, "successFlag", 0x00);
+            cJSON_AddNumberToObject(confirmData, "failReason", 0x00);
+            publishPileCmd(targetGun, "vehicle_id_confirm", confirmData);
+            cJSON_Delete(confirmData);
+            targetGs.plugAndChargeVehicleIdConfirmed = true;
+
+            cJSON* authData = cJSON_CreateObject();
+            cJSON_AddStringToObject(authData, "vin", targetGs.vinCode.c_str());
+            cJSON_AddNumberToObject(authData, "successFlag", 0x01);
+            cJSON_AddNumberToObject(authData, "failReason", 0x02);
+            publishPileCmd(targetGun, "vehicle_auth", authData);
+            cJSON_Delete(authData);
+            targetGs.plugAndChargeAuthResultSent = true;
+
+            if (result.valid) {
+                targetGs.stopReason = result.reason;
+            }
+            cJSON* evt = cJSON_CreateObject();
+            cJSON_AddStringToObject(evt, "vin", targetGs.vinCode.c_str());
+            cJSON_AddNumberToObject(evt, "peerGun", (targetGun == gun) ? peer : gun);
+            cJSON_AddStringToObject(evt, "peerVin", m_gunStates[(targetGun == gun) ? peer : gun].vinCode.c_str());
+            cJSON_AddStringToObject(evt, "reason", "merge_vehicle_id_mismatch");
+            cJSON_AddNumberToObject(evt, "failReason", 0x02);
+            if (result.valid) {
+                cJSON_AddNumberToObject(evt, "stopReason", static_cast<double>(targetGs.stopReason));
+                if (!result.message.empty()) {
+                    cJSON_AddStringToObject(evt, "stopReasonText", result.message.c_str());
+                }
+            }
+            publishLogicEvent(targetGun, "plug_and_charge_vehicle_id_reject", evt);
+            cJSON_Delete(evt);
+            if (targetGs.state == STATE_STARTING) {
+                transitionTo(targetGun, STATE_STOPPED, "merge_vehicle_id_mismatch");
+            }
+        }
+        return;
+    }
+
+    for (size_t idx = 0; idx < 2; ++idx) {
+        const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
+        GunState& targetGs = m_gunStates[targetGun];
+        cJSON* pileData = cJSON_CreateObject();
+        cJSON_AddNumberToObject(pileData, "successFlag", 0x00);
+        cJSON_AddNumberToObject(pileData, "failReason", 0x00);
+        publishPileCmd(targetGun, "vehicle_id_confirm", pileData);
+        cJSON_Delete(pileData);
+        targetGs.plugAndChargeVehicleIdConfirmed = true;
+    }
+
+    const uint8_t primaryGun = (gun < static_cast<uint8_t>(peer)) ? gun : static_cast<uint8_t>(peer);
+    publishPlugAndChargeAuthRequest(primaryGun);
+    const std::chrono::steady_clock::time_point authReqTime = m_gunStates[primaryGun].plugAndChargeAuthRequestTime;
+    m_gunStates[peer].plugAndChargeAuthRequestPublished = true;
+    m_gunStates[peer].plugAndChargeAuthRequestTime = authReqTime;
+
+    for (size_t idx = 0; idx < 2; ++idx) {
+        const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "vin", m_gunStates[targetGun].vinCode.c_str());
+        cJSON_AddNumberToObject(evt, "peerGun", (targetGun == gun) ? peer : gun);
+        publishLogicEvent(targetGun, "plug_and_charge_vehicle_id_confirmed", evt);
+        cJSON_Delete(evt);
+    }
 }
 
 void ChargeLogicProcess::handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data, const char* resultSource)
@@ -2470,6 +2829,9 @@ void ChargeLogicProcess::handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data,
     }
 
     GunState& gs = m_gunStates[gun];
+    const bool mergePlugAndCharge = (gs.plugAndChargeActive && gs.mergeChargeFlag != 0x00);
+    const int peer = mergePlugAndCharge ? getMergePeerGun(gun) : -1;
+    GunState* peerGs = (mergePlugAndCharge && peer >= 0) ? &m_gunStates[peer] : NULL;
     if (!gs.plugAndChargeActive || gs.state != STATE_STARTING || !gs.plugAndChargeVehicleIdConfirmed) {
         cJSON* evt = cJSON_CreateObject();
         cJSON_AddStringToObject(evt, "cmd", resultSource ? resultSource : "plug_and_charge_auth_result");
@@ -2479,7 +2841,21 @@ void ChargeLogicProcess::handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data,
         cJSON_Delete(evt);
         return;
     }
-    if (gs.plugAndChargeAuthResultSent) {
+    if (peerGs) {
+        if (!peerGs->plugAndChargeActive ||
+            peerGs->state != STATE_STARTING ||
+            !peerGs->plugAndChargeVehicleIdConfirmed) {
+            cJSON* evt = cJSON_CreateObject();
+            cJSON_AddStringToObject(evt, "cmd", resultSource ? resultSource : "plug_and_charge_auth_result");
+            cJSON_AddStringToObject(evt, "reason", "merge_peer_not_ready");
+            cJSON_AddNumberToObject(evt, "peerGun", peer);
+            cJSON_AddStringToObject(evt, "peerState", stateToString(peerGs->state));
+            publishLogicEvent(gun, "cmd_reject", evt);
+            cJSON_Delete(evt);
+            return;
+        }
+    }
+    if (gs.plugAndChargeAuthResultSent || (peerGs && peerGs->plugAndChargeAuthResultSent)) {
         return;
     }
 
@@ -2525,128 +2901,142 @@ void ChargeLogicProcess::handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data,
         failReason = 0x02;
     }
 
-    if (data) {
-        const char* userNo = getString(data, "chargeUserNo");
-        if (!userNo || !userNo[0]) userNo = getString(data, "userNo");
-        if (!userNo || !userNo[0]) userNo = getString(data, "userId");
-        if (userNo && userNo[0]) {
-            gs.chargeUserNo = userNo;
-        }
+    const size_t targetCount = peerGs ? 2U : 1U;
+    for (size_t idx = 0; idx < targetCount; ++idx) {
+        const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
+        GunState& targetGs = m_gunStates[targetGun];
 
-        const char* orderNo = getString(data, "orderNo");
-        if (!orderNo || !orderNo[0]) orderNo = getString(data, "chargeOrderNo");
-        if (orderNo && orderNo[0]) {
-            gs.orderNo = orderNo;
-        }
+        if (data) {
+            const char* userNo = getString(data, "chargeUserNo");
+            if (!userNo || !userNo[0]) userNo = getString(data, "userNo");
+            if (!userNo || !userNo[0]) userNo = getString(data, "userId");
+            if (userNo && userNo[0]) {
+                targetGs.chargeUserNo = userNo;
+            }
 
-        const char* preTradeNo = getString(data, "preTradeNo");
-        if (preTradeNo && preTradeNo[0]) {
-            gs.preTradeNo = preTradeNo;
-        } else if (gs.preTradeNo.empty() && !gs.orderNo.empty()) {
-            gs.preTradeNo = gs.orderNo;
-        }
+            const char* orderNo = getString(data, "orderNo");
+            if (!orderNo || !orderNo[0]) orderNo = getString(data, "chargeOrderNo");
+            if (orderNo && orderNo[0]) {
+                targetGs.orderNo = orderNo;
+            }
 
-        const char* tradeNo = getString(data, "tradeNo");
-        if (tradeNo && tradeNo[0]) {
-            gs.tradeNo = tradeNo;
-        } else if (gs.tradeNo.empty()) {
-            const std::string baseTradeNo = gs.preTradeNo.empty() ? gs.orderNo : gs.preTradeNo;
-            gs.tradeNo = baseTradeNo.empty()
-                ? ("T" + std::to_string(gun) + "_" + std::to_string(gs.chargeStartTime))
-                : baseTradeNo;
-        }
+            const char* preTradeNo = getString(data, "preTradeNo");
+            if (preTradeNo && preTradeNo[0]) {
+                targetGs.preTradeNo = preTradeNo;
+            } else if (targetGs.preTradeNo.empty() && !targetGs.orderNo.empty()) {
+                targetGs.preTradeNo = targetGs.orderNo;
+            }
 
-        int chargeMode = 0;
-        if (jsonGetInt(data, "chargeMode", chargeMode)) {
-            gs.chargeMode = chargeMode;
-        }
+            const char* tradeNo = getString(data, "tradeNo");
+            if (tradeNo && tradeNo[0]) {
+                targetGs.tradeNo = tradeNo;
+            } else if (targetGs.tradeNo.empty()) {
+                const std::string baseTradeNo = targetGs.preTradeNo.empty() ? targetGs.orderNo : targetGs.preTradeNo;
+                targetGs.tradeNo = baseTradeNo.empty()
+                    ? ("T" + std::to_string(targetGun) + "_" + std::to_string(targetGs.chargeStartTime))
+                    : baseTradeNo;
+            }
 
-        cJSON* prechargeAmount = cJSON_GetObjectItem(data, "prechargeAmount");
-        if (!prechargeAmount) prechargeAmount = cJSON_GetObjectItem(data, "prepaidAmount");
-        if (prechargeAmount && cJSON_IsNumber(prechargeAmount)) {
-            gs.prechargeAmount = prechargeAmount->valuedouble;
-        }
+            int chargeMode = 0;
+            if (jsonGetInt(data, "chargeMode", chargeMode)) {
+                targetGs.chargeMode = chargeMode;
+            }
 
-        int feeModelNo = 0;
-        if (jsonGetInt(data, "feeModelNo", feeModelNo)) {
-            gs.feeModelNo = feeModelNo;
-        }
+            cJSON* prechargeAmount = cJSON_GetObjectItem(data, "prechargeAmount");
+            if (!prechargeAmount) prechargeAmount = cJSON_GetObjectItem(data, "prepaidAmount");
+            if (prechargeAmount && cJSON_IsNumber(prechargeAmount)) {
+                targetGs.prechargeAmount = prechargeAmount->valuedouble;
+            }
 
-        const char* feeModelId = getString(data, "feeModelId");
-        if (feeModelId && feeModelId[0]) {
-            gs.feeModelId = feeModelId;
-        }
+            int feeModelNo = 0;
+            if (jsonGetInt(data, "feeModelNo", feeModelNo)) {
+                targetGs.feeModelNo = feeModelNo;
+            }
 
-        gs.mergeChargeFlag = getMergeChargeFlag(data);
+            const char* feeModelId = getString(data, "feeModelId");
+            if (feeModelId && feeModelId[0]) {
+                targetGs.feeModelId = feeModelId;
+            }
 
-        if (cJSON_GetObjectItem(data, "timeNum")) {
-            parseFeeModel(gun, data);
-        }
-    }
+            targetGs.mergeChargeFlag = getMergeChargeFlag(data);
 
-    cJSON* pileData = cJSON_CreateObject();
-    cJSON_AddStringToObject(pileData, "vin", authVin.c_str());
-    cJSON_AddNumberToObject(pileData, "successFlag", authSuccess ? 0x00 : 0x01);
-    cJSON_AddNumberToObject(pileData, "failReason", failReason);
-    cJSON_AddStringToObject(pileData, "chargeUserNo", gs.chargeUserNo.c_str());
-    cJSON_AddStringToObject(pileData, "orderNo", gs.orderNo.c_str());
-    cJSON_AddStringToObject(pileData, "preTradeNo", gs.preTradeNo.c_str());
-    cJSON_AddStringToObject(pileData, "tradeNo", gs.tradeNo.c_str());
-    cJSON_AddNumberToObject(pileData, "chargeStartTime", static_cast<double>(gs.chargeStartTime));
-    cJSON_AddNumberToObject(pileData, "chargeMode", gs.chargeMode);
-    cJSON_AddNumberToObject(pileData, "prechargeAmount", gs.prechargeAmount);
-    cJSON_AddNumberToObject(pileData, "feeModelNo", gs.feeModelNo);
-    cJSON_AddStringToObject(pileData, "feeModelId", gs.feeModelId.c_str());
-    cJSON_AddNumberToObject(pileData, "plugAndChargeFlag", gs.plugAndChargeFlag);
-    cJSON_AddNumberToObject(pileData, "mergeChargeFlag", gs.mergeChargeFlag);
-    cJSON_AddNumberToObject(pileData, "timeNum", gs.feeTimeNum);
-    cJSON* timeSegArr = cJSON_CreateArray();
-    for (size_t i = 0; i < gs.feeTimeSegMinutes.size(); ++i) {
-        cJSON_AddItemToArray(timeSegArr, cJSON_CreateString(minuteToHHMM(gs.feeTimeSegMinutes[i]).c_str()));
-    }
-    cJSON_AddItemToObject(pileData, "timeSeg", timeSegArr);
-    cJSON* chargeFeeArr = cJSON_CreateArray();
-    for (size_t i = 0; i < gs.feeChargePricePerKwh.size(); ++i) {
-        cJSON_AddItemToArray(chargeFeeArr, cJSON_CreateNumber(gs.feeChargePricePerKwh[i]));
-    }
-    cJSON_AddItemToObject(pileData, "chargeFee", chargeFeeArr);
-    cJSON* serviceFeeArr = cJSON_CreateArray();
-    for (size_t i = 0; i < gs.feeServicePricePerKwh.size(); ++i) {
-        cJSON_AddItemToArray(serviceFeeArr, cJSON_CreateNumber(gs.feeServicePricePerKwh[i]));
-    }
-    cJSON_AddItemToObject(pileData, "serviceFee", serviceFeeArr);
-    publishPileCmd(gun, "vehicle_auth", pileData);
-    cJSON_Delete(pileData);
-
-    gs.plugAndChargeAuthResultSent = true;
-
-    cJSON* evt = cJSON_CreateObject();
-    cJSON_AddStringToObject(evt, "sourceCmd", resultSource ? resultSource : "");
-    cJSON_AddStringToObject(evt, "vin", authVin.c_str());
-    cJSON_AddNumberToObject(evt, "successFlag", authSuccess ? 0x00 : 0x01);
-    cJSON_AddNumberToObject(evt, "failReason", failReason);
-
-    if (!authSuccess) {
-        unsigned int startFailPoint = 0xF002U;
-        if (failReason == 0x01U) {
-            startFailPoint = 0x32U;
-        } else if (failReason == 0x03U) {
-            startFailPoint = 0x34U;
-        }
-        const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(startFailPoint));
-        if (result.valid) {
-            gs.stopReason = result.reason;
-            cJSON_AddNumberToObject(evt, "stopReason", static_cast<double>(gs.stopReason));
-            if (!result.message.empty()) {
-                cJSON_AddStringToObject(evt, "stopReasonText", result.message.c_str());
+            if (cJSON_GetObjectItem(data, "timeNum")) {
+                parseFeeModel(targetGun, data);
             }
         }
+
+        cJSON* pileData = cJSON_CreateObject();
+        cJSON_AddStringToObject(pileData, "vin", authVin.c_str());
+        cJSON_AddNumberToObject(pileData, "successFlag", authSuccess ? 0x00 : 0x01);
+        cJSON_AddNumberToObject(pileData, "failReason", failReason);
+        cJSON_AddStringToObject(pileData, "chargeUserNo", targetGs.chargeUserNo.c_str());
+        cJSON_AddStringToObject(pileData, "orderNo", targetGs.orderNo.c_str());
+        cJSON_AddStringToObject(pileData, "preTradeNo", targetGs.preTradeNo.c_str());
+        cJSON_AddStringToObject(pileData, "tradeNo", targetGs.tradeNo.c_str());
+        cJSON_AddNumberToObject(pileData, "chargeStartTime", static_cast<double>(targetGs.chargeStartTime));
+        cJSON_AddNumberToObject(pileData, "chargeMode", targetGs.chargeMode);
+        cJSON_AddNumberToObject(pileData, "prechargeAmount", targetGs.prechargeAmount);
+        cJSON_AddNumberToObject(pileData, "feeModelNo", targetGs.feeModelNo);
+        cJSON_AddStringToObject(pileData, "feeModelId", targetGs.feeModelId.c_str());
+        cJSON_AddNumberToObject(pileData, "plugAndChargeFlag", targetGs.plugAndChargeFlag);
+        cJSON_AddNumberToObject(pileData, "mergeChargeFlag", targetGs.mergeChargeFlag);
+        cJSON_AddNumberToObject(pileData, "timeNum", targetGs.feeTimeNum);
+        cJSON* timeSegArr = cJSON_CreateArray();
+        for (size_t i = 0; i < targetGs.feeTimeSegMinutes.size(); ++i) {
+            cJSON_AddItemToArray(timeSegArr, cJSON_CreateString(minuteToHHMM(targetGs.feeTimeSegMinutes[i]).c_str()));
+        }
+        cJSON_AddItemToObject(pileData, "timeSeg", timeSegArr);
+        cJSON* chargeFeeArr = cJSON_CreateArray();
+        for (size_t i = 0; i < targetGs.feeChargePricePerKwh.size(); ++i) {
+            cJSON_AddItemToArray(chargeFeeArr, cJSON_CreateNumber(targetGs.feeChargePricePerKwh[i]));
+        }
+        cJSON_AddItemToObject(pileData, "chargeFee", chargeFeeArr);
+        cJSON* serviceFeeArr = cJSON_CreateArray();
+        for (size_t i = 0; i < targetGs.feeServicePricePerKwh.size(); ++i) {
+            cJSON_AddItemToArray(serviceFeeArr, cJSON_CreateNumber(targetGs.feeServicePricePerKwh[i]));
+        }
+        cJSON_AddItemToObject(pileData, "serviceFee", serviceFeeArr);
+        publishPileCmd(targetGun, "vehicle_auth", pileData);
+        cJSON_Delete(pileData);
+
+        targetGs.plugAndChargeAuthResultSent = true;
+
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "sourceCmd", resultSource ? resultSource : "");
+        cJSON_AddStringToObject(evt, "vin", authVin.c_str());
+        cJSON_AddNumberToObject(evt, "successFlag", authSuccess ? 0x00 : 0x01);
+        cJSON_AddNumberToObject(evt, "failReason", failReason);
+        if (peerGs) {
+            cJSON_AddNumberToObject(evt, "peerGun", (targetGun == gun) ? peer : gun);
+        }
+
+        if (!authSuccess) {
+            unsigned int startFailPoint = 0xF002U;
+            if (failReason == 0x01U) {
+                startFailPoint = 0x32U;
+            } else if (failReason == 0x03U) {
+                startFailPoint = 0x34U;
+            }
+            const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(startFailPoint));
+            if (result.valid) {
+                targetGs.stopReason = result.reason;
+                cJSON_AddNumberToObject(evt, "stopReason", static_cast<double>(targetGs.stopReason));
+                if (!result.message.empty()) {
+                    cJSON_AddStringToObject(evt, "stopReasonText", result.message.c_str());
+                }
+            }
+        }
+        publishLogicEvent(targetGun, "plug_and_charge_auth_result_forwarded", evt);
+        cJSON_Delete(evt);
     }
-    publishLogicEvent(gun, "plug_and_charge_auth_result_forwarded", evt);
-    cJSON_Delete(evt);
 
     if (!authSuccess) {
-        transitionTo(gun, STATE_STOPPED, "plug_and_charge_auth_failed");
+        for (size_t idx = 0; idx < targetCount; ++idx) {
+            const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
+            if (m_gunStates[targetGun].state == STATE_STARTING) {
+                transitionTo(targetGun, STATE_STOPPED, "plug_and_charge_auth_failed");
+            }
+        }
     }
 }
 
@@ -2874,6 +3264,7 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.plugAndChargeFlag = 0x01;
     gs.mergeChargeFlag = 0x00;
     gs.plugAndChargeActive = false;
+    gs.plugAndChargeVehicleIdReceived = false;
     gs.plugAndChargeVehicleIdConfirmed = false;
     gs.plugAndChargeAuthRequestPublished = false;
     gs.plugAndChargeAuthResultSent = false;
@@ -2888,6 +3279,7 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.stopReason = 0;
     gs.chargeMode = 0;
     gs.prechargeAmount = 0.0;
+    gs.v2gMode = false;
     gs.feeModelNo = 0;
 
     gs.feeInitialized = false;

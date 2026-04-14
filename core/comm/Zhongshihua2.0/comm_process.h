@@ -222,6 +222,8 @@ private:
         std::string pendingVinAuthVin;     // 最近一次VIN鉴权请求缓存VIN
         uint8_t pendingVinAuthPlugAndChargeFlag; // 最近一次VIN鉴权请求即插即充标志
         uint8_t pendingVinAuthMergeChargeFlag;   // 最近一次VIN鉴权请求并充标志
+        uint8_t pendingVinAuthMasterGunFlag;     // 最近一次VIN鉴权请求主辅枪标记
+        std::string pendingVinAuthMergeSeq;      // 最近一次VIN鉴权请求并充序号
 
         GunRuntimeData()
             : startTimeBcd{{0}}
@@ -276,6 +278,7 @@ private:
             , feeTimeNum(0)
             , pendingVinAuthPlugAndChargeFlag(0x02)
             , pendingVinAuthMergeChargeFlag(0x00)
+            , pendingVinAuthMasterGunFlag(0x00)
         {}
     };
 
@@ -338,6 +341,8 @@ private:
     std::vector<uint8_t> buildCstBody(uint8_t gun) const; // 0x21 CST充电中止上送体
     std::vector<uint8_t> buildBsmBody(uint8_t gun) const; // 0x25 BSM充电中止BMS信息体
     std::vector<uint8_t> buildVinStartApplyBody(uint8_t gun, cJSON* data);
+    std::vector<uint8_t> buildMergeVinStartApplyBody(uint8_t gun, cJSON* data);
+    std::vector<uint8_t> buildRemoteMergeStartAckBody(uint8_t gun, uint8_t result, uint8_t failReason, const std::string& mergeSeq) const;
     std::vector<uint8_t> buildRemoteStartAckBody(uint8_t gun, uint8_t result) const; // 0xA7 远程启动应答体
     std::vector<uint8_t> buildQrCodeSetAckBody(uint8_t gunNoBcd, uint8_t result) const; // 0x5B 二维码设置应答体
     void reportChargeInfoPeriodic();
@@ -368,7 +373,9 @@ private:
 
     // BY ZF: 平台命令解析
     bool parseRemoteStart0A8(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel);
+    bool parseRemoteMergeStart0A4(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel, std::string& mergeSeq);
     bool parseStartApplyAck0A6(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel);
+    bool parseMergeChargeApplyAck0A2(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel);
     bool parseRemoteStop036(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
     bool parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
     bool parseQrCodeSet05A(const uint8_t* body, size_t bodyLen, uint8_t& gun, uint8_t& gunNoBcd, cJSON** outData) const;
@@ -405,6 +412,7 @@ private:
     std::vector<std::chrono::steady_clock::time_point> m_lastSetConfigPublishByGun;  // 每枪最近setConfig发布时间
     std::vector<std::string> m_lastSetConfigPayloadByGun;                              // 每枪最近setConfig内容
     std::vector<uint8_t> m_runtimeChangedByGun;      // 每枪运行态变化标记（1=有变化待立即上送）
+    std::vector<uint8_t> m_forcePluggedChargeInfoByGun; // 登录上线后每枪补发一条“插枪状态”的0x13
     
     std::vector<uint8_t> m_tcpRxCache;                // TCP 粘包缓存
     std::vector<GunRuntimeData> m_gunRuntimeData;     // 来自 pile/logic 的实时业务数据缓存

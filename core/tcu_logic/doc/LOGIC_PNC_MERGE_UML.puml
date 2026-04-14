@@ -1,0 +1,63 @@
+@startuml
+title tcu_logic 合并充双枪即插即充时序
+
+skinparam shadowing false
+skinparam defaultFontName PingFang SC
+
+actor HMI
+participant "tcu_logic" as LOGIC
+participant "pile_controller(主枪)" as GUN_A
+participant "pile_controller(副枪)" as GUN_B
+participant "platform" as PLAT
+
+HMI -> LOGIC : tcu/logic/{gun}/cmd\ncmd=vin_req\nplugAndChargeFlag=2\nmergeChargeFlag=1
+LOGIC -> LOGIC : 查找对枪\n校验双方都在 PREPARE
+
+alt 对枪不存在或不在 PREPARE
+  LOGIC -> HMI : cmd_reject
+else 可以进入合并充
+  LOGIC -> LOGIC : gunA armPendingStart
+  LOGIC -> LOGIC : gunB armPendingStart
+  LOGIC -> GUN_A : start_charge
+  LOGIC -> GUN_B : start_charge
+  LOGIC -> LOGIC : 双枪进入 STARTING
+
+  GUN_A -> LOGIC : vehicle_id(VIN_A)
+  GUN_B -> LOGIC : vehicle_id(VIN_B)
+
+  alt 单边 VIN 非法
+    LOGIC -> GUN_A : vehicle_id_confirm(fail)
+    LOGIC -> GUN_B : vehicle_id_confirm(fail)
+    LOGIC -> LOGIC : 双枪结束本次流程
+  else VIN_A != VIN_B
+    LOGIC -> GUN_A : vehicle_id_confirm(success)
+    LOGIC -> GUN_B : vehicle_id_confirm(success)
+    LOGIC -> GUN_A : vehicle_auth(fail, failReason=0x02)
+    LOGIC -> GUN_B : vehicle_auth(fail, failReason=0x02)
+    LOGIC -> LOGIC : 双枪 STARTING -> STOPPED
+  else VIN 一致
+    LOGIC -> GUN_A : vehicle_id_confirm(success)
+    LOGIC -> GUN_B : vehicle_id_confirm(success)
+    LOGIC -> PLAT : plug_and_charge_auth_request\n仅主枪发一次
+
+    alt 平台成功
+      PLAT -> LOGIC : start_charge / plug_and_charge_auth_result(success)
+      LOGIC -> GUN_A : vehicle_auth(success)
+      LOGIC -> GUN_B : vehicle_auth(success)
+      GUN_A -> LOGIC : start_complete
+      GUN_B -> LOGIC : start_complete
+      LOGIC -> LOGIC : 双枪进入 CHARGING
+    else 平台失败
+      PLAT -> LOGIC : plug_and_charge_auth_result(fail)
+      LOGIC -> GUN_A : vehicle_auth(fail)
+      LOGIC -> GUN_B : vehicle_auth(fail)
+      LOGIC -> LOGIC : 双枪 STARTING -> STOPPED
+    else 平台 30s 超时
+      LOGIC -> GUN_A : vehicle_auth(fail, failReason=0x03)
+      LOGIC -> GUN_B : vehicle_auth(fail, failReason=0x03)
+      LOGIC -> LOGIC : 双枪 STARTING -> STOPPED
+    end
+  end
+end
+
+@enduml

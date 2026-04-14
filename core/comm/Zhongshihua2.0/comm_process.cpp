@@ -591,6 +591,15 @@ namespace {
         }
     }
 
+    static std::string jsonGetStringCompat(cJSON* obj, const char* key1, const char* key2)
+    {
+        std::string text = jsonGetString(obj, key1);
+        if (text.empty() && key2) {
+            text = jsonGetString(obj, key2);
+        }
+        return text;
+    }
+
     // BY ZF: 浮点缩放并四舍五入到无符号整数。
     static uint32_t scaleToU32(double v, double scale)
     {
@@ -726,6 +735,7 @@ bool CommProcess::doInitialize()
     m_lastSetConfigPayloadByGun.assign(static_cast<size_t>(m_config.gunCount), std::string());
     m_lastChargeInfoReportByGun.assign(static_cast<size_t>(m_config.gunCount), std::chrono::steady_clock::now());
     m_runtimeChangedByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
+    m_forcePluggedChargeInfoByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
     m_logSender.info("init_completed", std::string("gun_count=") + std::to_string(m_config.gunCount));
     return true;
 }
@@ -976,9 +986,13 @@ bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& pa
             if (cJSON_IsString(evt) &&
                 std::strcmp(evt->valuestring, "plug_and_charge_auth_request") == 0 &&
                 cJSON_IsObject(data)) {
-                std::vector<uint8_t> body = buildVinStartApplyBody(gun, data);
+                int mergeChargeFlag = 0;
+                (void)jsonGetInt(data, "mergeChargeFlag", mergeChargeFlag);
+                std::vector<uint8_t> body = (mergeChargeFlag != 0)
+                        ? buildMergeVinStartApplyBody(gun, data)
+                        : buildVinStartApplyBody(gun, data);
                 if (!body.empty()) {
-                    (void)sendPlatformFrame(kCmdStartApply, body);
+                    (void)sendPlatformFrame((mergeChargeFlag != 0) ? kCmdMergeChargeApply : kCmdStartApply, body);
                 } else {
                     m_logSender.warn("platform_vin_start_apply", "build_body_fail");
                 }
@@ -1931,6 +1945,7 @@ bool CommProcess::connectPlatformTcp()
     m_lastChargeInfoReport = std::chrono::steady_clock::now();
     m_lastChargeInfoReportByGun.assign(static_cast<size_t>(m_config.gunCount), m_lastChargeInfoReport);
     m_runtimeChangedByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
+    m_forcePluggedChargeInfoByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
     m_tcpRxCache.clear();
     resetCryptoSession();
     m_logSender.info("platform_tcp_connected", m_config.masterHost + ":" + std::to_string(m_config.masterPort));
@@ -2767,13 +2782,9 @@ std::vector<uint8_t> CommProcess::buildVinStartApplyBody(uint8_t gun, cJSON* dat
     rd.pendingVinAuthVin = vin;
     rd.pendingVinAuthPlugAndChargeFlag = static_cast<uint8_t>(plugAndChargeFlag & 0xFF);
     rd.pendingVinAuthMergeChargeFlag = static_cast<uint8_t>(mergeChargeFlag & 0xFF);
+    rd.pendingVinAuthMasterGunFlag = 0x00;
+    rd.pendingVinAuthMergeSeq.clear();
 
-    if (mergeChargeFlag != 0x00) {
-        // BY ZF: TODO 并充场景应改走 0xA1，并补主辅枪标记、并充序号等字段；当前先保留点位，后续完善。
-        m_logSender.warn("platform_vin_start_apply", "merge_charge_todo_use_a1");
-    }
-
-    // BY ZF: 当前仅按单枪 VIN 启动组 0xA5；并充 0xA1 逻辑后续补齐。
     // BY ZF: 0xA5 VIN请求启动：桩编号BCD7 + 枪号BCD1 + 启动方式0x03 + 无密码0x00。
     appendPileCodeBcd7(body, m_config.cdzNo);
     const int gunNo = static_cast<int>(gun) + 1;
@@ -2783,6 +2794,66 @@ std::vector<uint8_t> CommProcess::buildVinStartApplyBody(uint8_t gun, cJSON* dat
     body.insert(body.end(), 8, 0x00);
     body.insert(body.end(), 16, 0x00);
     appendAsciiFixed(body, vin, 17, 0x00);
+    return body;
+}
+
+std::vector<uint8_t> CommProcess::buildMergeVinStartApplyBody(uint8_t gun, cJSON* data)
+{
+    std::vector<uint8_t> body;
+    if (!data || gun >= m_gunRuntimeData.size()) {
+        return body;
+    }
+
+    std::string vin = jsonGetStringCompat(data, "vin", "vinCode");
+    vin = sanitizeVin17(vin);
+    if (vin.empty()) {
+        return body;
+    }
+
+    int plugAndChargeFlag = 0x02;
+    (void)jsonGetInt(data, "plugAndChargeFlag", plugAndChargeFlag);
+    int mergeChargeFlag = 0x01;
+    (void)jsonGetInt(data, "mergeChargeFlag", mergeChargeFlag);
+
+    // BY ZF: 并充序号与主辅枪标记不再依赖 MQTT 传参。
+    const uint8_t leftGun = static_cast<uint8_t>(gun & static_cast<uint8_t>(~0x01));
+    const uint8_t masterGunFlag = 0x00;
+    std::string mergeSeq;
+    if (leftGun < m_gunRuntimeData.size()) {
+        mergeSeq = m_gunRuntimeData[leftGun].pendingVinAuthMergeSeq;
+    }
+    if (mergeSeq.empty()) {
+        const std::time_t nowSec = std::time(nullptr);
+        std::tm tmv;
+        localtime_r(&nowSec, &tmv);
+        char seqBuf[16];
+        std::snprintf(seqBuf, sizeof(seqBuf), "%02d%02d%02d%02d%02d%02d",
+                      (tmv.tm_year + 1900) % 100, tmv.tm_mon + 1, tmv.tm_mday,
+                      tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+        mergeSeq = seqBuf;
+        if (leftGun < m_gunRuntimeData.size()) {
+            m_gunRuntimeData[leftGun].pendingVinAuthMergeSeq = mergeSeq;
+        }
+    }
+
+    GunRuntimeData& rd = m_gunRuntimeData[gun];
+    rd.pendingVinAuthVin = vin;
+    rd.pendingVinAuthPlugAndChargeFlag = static_cast<uint8_t>(plugAndChargeFlag & 0xFF);
+    rd.pendingVinAuthMergeChargeFlag = static_cast<uint8_t>(mergeChargeFlag & 0xFF);
+    rd.pendingVinAuthMasterGunFlag = masterGunFlag;
+    rd.pendingVinAuthMergeSeq = mergeSeq;
+
+    // BY ZF: 0xA1 并充VIN请求启动：在0xA5基础上追加主辅枪标记 + 并充序号BCD6。
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    const int gunNo = static_cast<int>(gun) + 1;
+    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
+    body.push_back(0x03);
+    body.push_back(0x00);
+    body.insert(body.end(), 8, 0x00);
+    body.insert(body.end(), 16, 0x00);
+    appendAsciiFixed(body, vin, 17, 0x00);
+    body.push_back(static_cast<uint8_t>(masterGunFlag & 0xFF));
+    appendBcdFixed(body, mergeSeq, 6);
     return body;
 }
 
@@ -2798,6 +2869,24 @@ std::vector<uint8_t> CommProcess::buildRemoteStartAckBody(uint8_t gun, uint8_t r
     const int gunNo = static_cast<int>(gun) + 1;
     body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
     body.push_back(static_cast<uint8_t>(result));
+    return body;
+}
+
+std::vector<uint8_t> CommProcess::buildRemoteMergeStartAckBody(uint8_t gun, uint8_t result, uint8_t failReason, const std::string& mergeSeq) const
+{
+    std::vector<uint8_t> body;
+    if (gun >= m_gunRuntimeData.size()) {
+        return body;
+    }
+    // BY ZF: 0xA3 远程并充启动应答：交易流水号BCD16 + 桩编号BCD7 + 枪号BCD1 + 启动结果BCD1 + 失败原因BIN1 + 主辅枪标记BIN1 + 并充序号BCD6。
+    appendBcdFixed(body, m_gunRuntimeData[gun].orderNo, 16);
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    const int gunNo = static_cast<int>(gun) + 1;
+    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
+    body.push_back(static_cast<uint8_t>(result));
+    body.push_back(static_cast<uint8_t>(failReason));
+    body.push_back(0x00);
+    appendBcdFixed(body, mergeSeq, 6);
     return body;
 }
 
@@ -2877,9 +2966,11 @@ std::vector<uint8_t> CommProcess::buildChargeInfoBody(uint8_t gun)
 
     // 5) 枪是否归位（按联调要求固定 0x02）
     body.push_back(0x02);
-    // 6) 是否插枪：来自 yx 车辆连接状态
+    // 6) 是否插枪：登录刚上线时按要求强制补发一条“插枪状态”的0x13，随后恢复真实遥信。
     printf("rd.yxVehicleConnectStatus: %d\n", rd.yxVehicleConnectStatus);
-    body.push_back(rd.yxVehicleConnectStatus ? 0x01 : 0x00);
+    const bool forcePlugged = (gun < m_forcePluggedChargeInfoByGun.size() &&
+                               m_forcePluggedChargeInfoByGun[gun] != 0);
+    body.push_back((forcePlugged || rd.yxVehicleConnectStatus) ? 0x01 : 0x00);
 
     // 7) 输出电压（0.1V）
     const uint16_t outputVoltage = static_cast<uint16_t>(std::max(0.0, rd.voltage * 10.0));
@@ -2966,7 +3057,8 @@ void CommProcess::reportChargeInfoPeriodic()
         if (gun >= m_lastChargeInfoReportByGun.size() || gun >= m_runtimeChangedByGun.size()) {
             continue;
         }
-        const bool forceSend = (m_runtimeChangedByGun[gun] != 0);
+        const bool forceSend = (m_runtimeChangedByGun[gun] != 0) ||
+                               (gun < m_forcePluggedChargeInfoByGun.size() && m_forcePluggedChargeInfoByGun[gun] != 0);
         const bool charging = (m_gunRuntimeData[gun].gunStatus == 0x03);
         const std::chrono::seconds interval = charging ? std::chrono::seconds(15) : std::chrono::seconds(60);
         if (!forceSend && (now - m_lastChargeInfoReportByGun[gun] < interval)) {
@@ -2991,6 +3083,9 @@ void CommProcess::reportChargeInfoPeriodic()
             // }
             m_lastChargeInfoReportByGun[gun] = now;
             m_runtimeChangedByGun[gun] = 0;
+            if (gun < m_forcePluggedChargeInfoByGun.size()) {
+                m_forcePluggedChargeInfoByGun[gun] = 0;
+            }
         }
     }
 }
@@ -3335,6 +3430,8 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             }
             m_lastHeartbeat = std::chrono::steady_clock::now();
             m_lastHeartbeatRecv = std::chrono::steady_clock::now();
+            m_forcePluggedChargeInfoByGun.assign(static_cast<size_t>(m_config.gunCount), 1);
+            m_runtimeChangedByGun.assign(static_cast<size_t>(m_config.gunCount), 1);
             m_logSender.info("platform_login_step", "time_sync_ack_ok");
         }
         return;
@@ -3409,6 +3506,34 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         return;
     }
 
+    if (cmd == kCmdMergeChargeApplyAck) {
+        uint8_t gun = 0;
+        cJSON* startData = nullptr;
+        FeeModel parsedFeeModel;
+        if (parseMergeChargeApplyAck0A2(body, decBodyLen, gun, &startData, parsedFeeModel)) {
+            m_logSender.info("platform_merge_vin_start_apply_ack_rx",
+                             std::string("gun=") + std::to_string(static_cast<int>(gun)));
+            if (!parsedFeeModel.feeModelId.empty() && gun < m_feeModelByGun.size()) {
+                m_feeModelByGun[gun] = parsedFeeModel;
+            }
+            int successFlag = 1;
+            (void)jsonGetInt(startData, "successFlag", successFlag);
+            if (successFlag == 0) {
+                cJSON_DeleteItemFromObject(startData, "successFlag");
+                cJSON_DeleteItemFromObject(startData, "failReason");
+                publishPlatCommand(gun, "start_charge", startData);
+            } else {
+                publishPlatCommand(gun, "plug_and_charge_auth_result", startData);
+            }
+        } else {
+            m_logSender.warn("platform_merge_vin_start_apply_ack", "parse_or_validate_fail");
+        }
+        if (startData) {
+            cJSON_Delete(startData);
+        }
+        return;
+    }
+
     if (cmd == kCmdRemoteStartCmd) {
         uint8_t gun = 0;
         cJSON* startData = nullptr;
@@ -3441,6 +3566,72 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
                 (void)sendPlatformFrame(kCmdGunFeeModelReq, buildFeeModelRequestBody(static_cast<uint8_t>(i + 1)));
             }
             m_logSender.warn("platform_start_reject", "fee_model_not_ready_requery");
+        }
+        if (startData) {
+            cJSON_Delete(startData);
+        }
+        return;
+    }
+
+    if (cmd == kCmdRemoteMergeStart) {
+        uint8_t gun = 0;
+        cJSON* startData = nullptr;
+        FeeModel parsedFeeModel;
+        std::string mergeSeq;
+        if (parseRemoteMergeStart0A4(body, decBodyLen, gun, &startData, parsedFeeModel, mergeSeq)) {
+            const uint8_t leftGun = static_cast<uint8_t>(gun & static_cast<uint8_t>(~0x01));
+            const uint8_t rightGun = static_cast<uint8_t>(leftGun + 1);
+            if (!parsedFeeModel.feeModelId.empty()) {
+                if (leftGun < m_feeModelByGun.size()) {
+                    m_feeModelByGun[leftGun] = parsedFeeModel;
+                }
+                if (rightGun < m_feeModelByGun.size()) {
+                    m_feeModelByGun[rightGun] = parsedFeeModel;
+                }
+                m_logSender.saveFeeModel(parsedFeeModel);
+            }
+
+            if (leftGun < m_gunRuntimeData.size()) {
+                m_gunRuntimeData[leftGun].pendingVinAuthMergeSeq = mergeSeq;
+            }
+            if (rightGun < m_gunRuntimeData.size()) {
+                m_gunRuntimeData[rightGun].pendingVinAuthMergeSeq = mergeSeq;
+            }
+
+            if (startData) {
+                cJSON* leftData = cJSON_Duplicate(startData, 1);
+                cJSON* rightData = cJSON_Duplicate(startData, 1);
+                if (leftData) {
+                    cJSON_AddNumberToObject(leftData, "masterGunFlag", 0x00);
+                    publishPlatCommand(leftGun, "start_charge", leftData);
+                    cJSON_Delete(leftData);
+                }
+                if (rightGun < m_gunRuntimeData.size() && rightData) {
+                    cJSON_AddNumberToObject(rightData, "masterGunFlag", 0x01);
+                    publishPlatCommand(rightGun, "start_charge", rightData);
+                    cJSON_Delete(rightData);
+                } else if (rightData) {
+                    cJSON_Delete(rightData);
+                }
+            }
+
+            m_logSender.info("platform_remote_merge_start_rx",
+                             std::string("leftGun=") + std::to_string(static_cast<int>(leftGun)) +
+                             ",rightGun=" + std::to_string(static_cast<int>(rightGun)));
+            const std::vector<uint8_t> ackBody = buildRemoteMergeStartAckBody(leftGun, 0x01, 0x00, mergeSeq);
+            if (!ackBody.empty()) {
+                (void)sendPlatformFrame(kCmdMergeStartReply, ackBody, rxSeq);
+            }
+        } else {
+            const uint8_t gunNoBcd = (decBodyLen >= 24U) ? body[23] : 0x01;
+            const int gunNo = ((gunNoBcd >> 4) & 0x0F) * 10 + (gunNoBcd & 0x0F);
+            const uint8_t gunIndex = (gunNo > 0) ? static_cast<uint8_t>(gunNo - 1) : 0U;
+            const std::string mergeSeq = (decBodyLen >= 50U) ? bcdToDigitString(body + 44, 6) : std::string("000000000000");
+            const std::vector<uint8_t> nackBody = buildRemoteMergeStartAckBody(gunIndex, 0x00, 0x01, mergeSeq);
+            if (!nackBody.empty()) {
+                (void)sendPlatformFrame(kCmdMergeStartReply, nackBody, rxSeq);
+            }
+            m_logSender.warn("platform_remote_merge_start", "parse_or_validate_fail");
         }
         if (startData) {
             cJSON_Delete(startData);
@@ -3720,6 +3911,137 @@ bool CommProcess::parseRemoteStart0A8(const uint8_t* body, size_t bodyLen, uint8
     return true;
 }
 
+bool CommProcess::parseRemoteMergeStart0A4(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel, std::string& mergeSeq)
+{
+    if (!body || !outData) {
+        return false;
+    }
+    // BY ZF: 0xA4 最小长度：交易流水号16 + 桩编号7 + 枪号1 + 逻辑卡号8 + 物理卡号8 + 账户余额4 + 并充序号6
+    if (bodyLen < 50U) {
+        return false;
+    }
+
+    const uint8_t* tradeBcd = body;
+    const uint8_t* pileBcd = body + 16;
+    const uint8_t gunBcd = body[23];
+    const uint8_t* logicCardBcd = body + 24;
+    const uint8_t* phyCardBin = body + 32;
+    const uint32_t balanceRaw = static_cast<uint32_t>(body[40]) |
+                                (static_cast<uint32_t>(body[41]) << 8) |
+                                (static_cast<uint32_t>(body[42]) << 16) |
+                                (static_cast<uint32_t>(body[43]) << 24);
+    const uint8_t* mergeSeqBcd = body + 44;
+
+    const std::string recvPileCode = bcdToDigitString(pileBcd, 7);
+    const std::string localPileCode = normalizePileCode14(m_config.cdzNo);
+    if (recvPileCode != localPileCode) {
+        return false;
+    }
+
+    const int gunNo = ((gunBcd >> 4) & 0x0F) * 10 + (gunBcd & 0x0F);
+    if (gunNo <= 0) {
+        return false;
+    }
+    const int gunIndex = gunNo - 1;
+    if (gunIndex < 0 || gunIndex >= static_cast<int>(m_gunRuntimeData.size())) {
+        return false;
+    }
+    gun = static_cast<uint8_t>(gunIndex);
+
+    mergeSeq = bcdToDigitString(mergeSeqBcd, 6);
+
+    const std::string orderNo = bcdToDigitString(tradeBcd, 16);
+    const std::string chargeUserNo = bcdToDigitString(logicCardBcd, 8);
+    (void)phyCardBin;
+
+    if (gun < m_feeModelByGun.size()) {
+        feeModel = m_feeModelByGun[gun];
+    } else {
+        feeModel.feeModelId.clear();
+        feeModel.timeNum = 0;
+        feeModel.timeSeg.clear();
+        feeModel.segFlag.clear();
+        feeModel.chargeFee.clear();
+        feeModel.serviceFee.clear();
+    }
+    const bool feeModelReady =
+            (!feeModel.feeModelId.empty()) &&
+            (feeModel.timeNum > 0) &&
+            (feeModel.timeSeg.size() >= static_cast<size_t>(feeModel.timeNum)) &&
+            (feeModel.chargeFee.size() >= static_cast<size_t>(feeModel.timeNum)) &&
+            (feeModel.serviceFee.size() >= static_cast<size_t>(feeModel.timeNum));
+    if (!feeModelReady) {
+        if (gun < m_gunRuntimeData.size()) {
+            m_gunRuntimeData[gun].orderNo = orderNo;
+            m_gunRuntimeData[gun].pendingVinAuthMergeSeq = mergeSeq;
+        }
+        return false;
+    }
+
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddNumberToObject(data, "startTime", static_cast<double>(std::time(nullptr)) * 1000.0);
+    cJSON_AddStringToObject(data, "chargeUserNo", chargeUserNo.c_str());
+    cJSON_AddStringToObject(data, "orderNo", orderNo.c_str());
+    cJSON_AddStringToObject(data, "logicCardNo", chargeUserNo.c_str());
+    cJSON_AddStringToObject(data, "preTradeNo", orderNo.c_str());
+    cJSON_AddStringToObject(data, "tradeNo", orderNo.c_str());
+    cJSON_AddNumberToObject(data, "chargeMode", 0x60);
+    cJSON_AddNumberToObject(data, "prechargeAmount", static_cast<double>(balanceRaw) / 100.0);
+    cJSON_AddNumberToObject(data, "feeModelNo", 0);
+    cJSON_AddStringToObject(data, "feeModelId", feeModel.feeModelId.c_str());
+    cJSON_AddNumberToObject(data, "billingFlag", 0);
+    cJSON_AddNumberToObject(data, "userStatus", 0);
+    cJSON_AddNumberToObject(data, "loadControlSwitch", 0x02);
+    cJSON_AddNumberToObject(data, "plugAndChargeFlag", 0x01);
+    cJSON_AddNumberToObject(data, "auxPowerVoltage", 0x0C);
+    cJSON_AddNumberToObject(data, "mergeChargeFlag", 0x01);
+    cJSON_AddStringToObject(data, "mergeChargeSeq", mergeSeq.c_str());
+    cJSON_AddStringToObject(data, "mergeSeq", mergeSeq.c_str());
+
+    cJSON_AddNumberToObject(data, "timeNum", static_cast<int>(feeModel.timeNum));
+    cJSON* timeSeg = cJSON_CreateArray();
+    cJSON* chargeFee = cJSON_CreateArray();
+    cJSON* serviceFee = cJSON_CreateArray();
+    for (size_t i = 0; i < feeModel.timeSeg.size(); ++i) {
+        cJSON_AddItemToArray(timeSeg, cJSON_CreateString(feeModel.timeSeg[i].c_str()));
+    }
+    for (size_t i = 0; i < feeModel.chargeFee.size(); ++i) {
+        cJSON_AddItemToArray(chargeFee, cJSON_CreateNumber(static_cast<double>(feeModel.chargeFee[i]) / 100000.0));
+    }
+    for (size_t i = 0; i < feeModel.serviceFee.size(); ++i) {
+        cJSON_AddItemToArray(serviceFee, cJSON_CreateNumber(static_cast<double>(feeModel.serviceFee[i]) / 100000.0));
+    }
+    cJSON_AddItemToObject(data, "timeSeg", timeSeg);
+    cJSON_AddItemToObject(data, "chargeFee", chargeFee);
+    cJSON_AddItemToObject(data, "serviceFee", serviceFee);
+
+    if (gun < m_gunRuntimeData.size()) {
+        GunRuntimeData& rd = m_gunRuntimeData[gun];
+        rd.chargeUserNo = chargeUserNo;
+        rd.orderNo = orderNo;
+        rd.chargeMode = 0x60;
+        rd.prechargeAmount = static_cast<double>(balanceRaw) / 100.0;
+        rd.userStatus = 0;
+        rd.billingFlag = 0;
+        rd.feeModelId = feeModel.feeModelId;
+        rd.feeTimeNum = static_cast<int>(feeModel.timeNum);
+        rd.pendingVinAuthMergeChargeFlag = 0x01;
+        rd.pendingVinAuthMergeSeq = mergeSeq;
+        rd.feeSegments.clear();
+        const size_t periodCount = feeModel.timeSeg.size();
+        rd.feeSegments.reserve(periodCount);
+        for (size_t i = 0; i < periodCount; ++i) {
+            FeeSegmentData seg;
+            seg.startTs = feeModel.timeSeg[i];
+            seg.endTs = (i + 1 < periodCount) ? feeModel.timeSeg[i + 1] : "2400";
+            rd.feeSegments.push_back(seg);
+        }
+    }
+
+    *outData = data;
+    return true;
+}
+
 bool CommProcess::parseStartApplyAck0A6(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel)
 {
     if (!body || !outData) {
@@ -3838,6 +4160,37 @@ bool CommProcess::parseStartApplyAck0A6(const uint8_t* body, size_t bodyLen, uin
     }
 
     *outData = data;
+    return true;
+}
+
+bool CommProcess::parseMergeChargeApplyAck0A2(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData, FeeModel& feeModel)
+{
+    if (!body || !outData) {
+        return false;
+    }
+    if (bodyLen < 46U) {
+        return false;
+    }
+
+    if (!parseStartApplyAck0A6(body, 40U, gun, outData, feeModel)) {
+        return false;
+    }
+
+    const uint8_t* mergeSeqBcd = body + 40U;
+    const std::string mergeSeq = bcdToDigitString(mergeSeqBcd, 6);
+    if (!*outData || !cJSON_IsObject(*outData)) {
+        return false;
+    }
+
+    cJSON_AddStringToObject(*outData, "mergeChargeSeq", mergeSeq.c_str());
+    cJSON_AddStringToObject(*outData, "mergeSeq", mergeSeq.c_str());
+    cJSON_AddNumberToObject(*outData, "mergeChargeFlag", 0x01);
+    if (gun < m_gunRuntimeData.size()) {
+        cJSON_AddNumberToObject(*outData, "masterGunFlag", m_gunRuntimeData[gun].pendingVinAuthMasterGunFlag);
+        m_gunRuntimeData[gun].pendingVinAuthMergeSeq = mergeSeq;
+    } else {
+        cJSON_AddNumberToObject(*outData, "masterGunFlag", 0x00);
+    }
     return true;
 }
 

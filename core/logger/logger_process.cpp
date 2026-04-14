@@ -11,7 +11,6 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
-#include <regex>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -833,24 +832,31 @@ void LoggerProcess::parseAndLogMessage(const std::string& jsonData)
             try { return std::stod(jsonData.substr(start, p - start)); } catch (...) { return 0.0; }
         };
         auto parseIntMulti = [&](const std::string& key)->int {
-            int v = getInt(jsonData, key);
-            if (v > 0) return v;
-            // 尝试引号内数字
-            size_t q = jsonData.find("\"" + key + "\":\"");
-            if (q!=std::string::npos) {
-                q += key.size() + 4; size_t st = (q<jsonData.size() && jsonData[q]=='"')? q+1 : q;
-                size_t en = jsonData.find('"', st);
-                if (en!=std::string::npos) {
-                    long long vv=0; bool dig=false; for(size_t i=st;i<en;++i){ if(jsonData[i]>='0'&&jsonData[i]<='9'){ vv=vv*10+(jsonData[i]-'0'); dig=true;} }
-                    if (dig) return (int)vv;
-                }
+            size_t p = jsonData.find("\"" + key + "\":");
+            if (p == std::string::npos) {
+                return 0;
             }
-            // 宽松正则
-            try {
-                std::regex rgx("\\\"" + key + "\\\"\\s*:\\s*\\\"?(\\\\d+)\\\"?");
-                std::smatch m; if (std::regex_search(jsonData, m, rgx) && m.size()>=2) return std::stoi(m[1]);
-            } catch (...) {}
-            return 0;
+            p += key.size() + 3;
+            while (p < jsonData.size() &&
+                   (jsonData[p] == ' ' || jsonData[p] == '\t' || jsonData[p] == '\n' || jsonData[p] == '\r')) {
+                ++p;
+            }
+            bool quoted = false;
+            if (p < jsonData.size() && jsonData[p] == '"') {
+                quoted = true;
+                ++p;
+            }
+            long long val = 0;
+            bool hasDigit = false;
+            while (p < jsonData.size() && jsonData[p] >= '0' && jsonData[p] <= '9') {
+                val = val * 10 + (jsonData[p] - '0');
+                hasDigit = true;
+                ++p;
+            }
+            if (quoted && p < jsonData.size() && jsonData[p] == '"') {
+                ++p;
+            }
+            return hasDigit ? static_cast<int>(val) : 0;
         };
         // 基本字段解析
         int gunNo = getInt(jsonData, "gun_no");

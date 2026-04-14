@@ -1079,9 +1079,11 @@ void RuntimeWindow::bindStaticUi()
     }
     if (btnMergeCharge) {
         btnMergeCharge->setVisible(m_config.enableMergeChargeEntry);
+        connect(btnMergeCharge, SIGNAL(clicked()), this, SLOT(onAuthorizeMergeChargeClicked()));
     }
     if (btnVin) {
         btnVin->setVisible(m_config.enableVinEntry);
+        connect(btnVin, SIGNAL(clicked()), this, SLOT(onAuthorizeVinClicked()));
     }
     if (btnCard) {
         btnCard->setVisible(m_config.enableCardEntry);
@@ -3236,6 +3238,99 @@ void RuntimeWindow::onAuthorizeCardClicked()
               << " payload=" << payload.toStdString() << std::endl;
 }
 
+void RuntimeWindow::onAuthorizeMergeChargeClicked()
+{
+    markScreenActivity();
+    bool allow = false;
+    {
+        QMutexLocker locker(&m_dataMutex);
+        allow = (m_gunCount > 1 &&
+                 m_guns.size() > 1 &&
+                 m_guns[0].state == "PREPARE" &&
+                 m_guns[1].state == "PREPARE");
+    }
+
+    if (!allow) {
+        QLabel *tips = m_authorizePage ? m_authorizePage->findChild<QLabel *>("lblTips") : 0;
+        if (tips) {
+            tips->setText(QString::fromUtf8("请同时连接A、B枪"));
+            tips->setGeometry(80, 58, 640, 34);
+            tips->setAlignment(Qt::AlignCenter);
+            tips->setStyleSheet("QLabel{color:white;font-weight:bold;background:transparent;font:24px 'MS Shell Dlg 2';}");
+            tips->show();
+            tips->raise();
+        }
+        return;
+    }
+
+    QLabel *tips = m_authorizePage ? m_authorizePage->findChild<QLabel *>("lblTips") : 0;
+    if (tips) {
+        tips->hide();
+    }
+    publishVinRequest(true);
+}
+
+void RuntimeWindow::onAuthorizeVinClicked()
+{
+    markScreenActivity();
+    QLabel *tips = m_authorizePage ? m_authorizePage->findChild<QLabel *>("lblTips") : 0;
+    if (tips) {
+        tips->hide();
+    }
+    publishVinRequest(false);
+}
+
+bool RuntimeWindow::publishVinRequest(bool mergeCharge)
+{
+    if (!m_mqttReady) {
+        std::cerr << "[HMI] publish vin_req skipped: mqtt not ready" << std::endl;
+        return false;
+    }
+
+    int gun = 0;
+    {
+        QMutexLocker locker(&m_dataMutex);
+        gun = m_focusGun;
+        if (gun < 0 || gun >= static_cast<int>(m_guns.size())) {
+            gun = 0;
+        }
+    }
+
+    const uint64_t ts = nowMs();
+    const uint64_t seq = ++m_uiSeq;
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "ts", static_cast<double>(ts));
+    cJSON_AddNumberToObject(root, "seq", static_cast<double>(seq));
+    cJSON_AddStringToObject(root, "source", "hmi");
+    cJSON_AddNumberToObject(root, "gun", gun);
+    cJSON_AddStringToObject(root, "cmd", "vin_req");
+
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddNumberToObject(data, "startTime", static_cast<double>(ts));
+    cJSON_AddNumberToObject(data, "plugAndChargeFlag", 2);
+    cJSON_AddNumberToObject(data, "mergeChargeFlag", mergeCharge ? 1 : 0);
+    cJSON_AddNumberToObject(data, "auxPowerVoltage", 12);
+    cJSON_AddItemToObject(root, "data", data);
+
+    char *payloadRaw = cJSON_PrintUnformatted(root);
+    const QString payload = payloadRaw ? QString::fromUtf8(payloadRaw) : QString();
+    if (payloadRaw) {
+        cJSON_free(payloadRaw);
+    }
+    cJSON_Delete(root);
+
+    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun) + "/cmd";
+    if (!m_mqtt.publish(topic, payload.toStdString(), 1, false)) {
+        std::cerr << "[HMI] publish vin_req failed topic=" << topic
+                  << " payload=" << payload.toStdString() << std::endl;
+        return false;
+    }
+
+    std::cerr << "[HMI] publish vin_req topic=" << topic
+              << " payload=" << payload.toStdString() << std::endl;
+    return true;
+}
+
 void RuntimeWindow::openConfigKeyboard(QLineEdit *target, bool numericOnly)
 {
     if (!target || !m_configKeyboard) {
@@ -3968,6 +4063,7 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
     std::vector<QPushButton *> entryButtons;
     if (btnMergeCharge) {
         if (inserted && m_config.enableMergeChargeEntry) {
+            btnMergeCharge->setEnabled(true);
             btnMergeCharge->show();
             entryButtons.push_back(btnMergeCharge);
         } else {

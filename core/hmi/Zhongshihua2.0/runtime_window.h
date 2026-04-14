@@ -66,6 +66,8 @@ private slots:
     void onStorageExportLogClicked();
     void onStorageUpgradeClicked();
     void onAuthorizeCardClicked();
+    void onAuthorizeMergeChargeClicked();
+    void onAuthorizeVinClicked();
     void onConfigEditMaskClicked();
     void onConfigKeyboardButtonClicked();
     void onConfigGunCountChanged();
@@ -237,6 +239,7 @@ private:
     void loadStorageFileList(const QString &path);
     QString selectedStoragePath() const;
     void openConfigKeyboard(QLineEdit *target, bool numericOnly);
+    bool publishVinRequest(bool mergeCharge);
     void refreshConfigKeyboardLayout();
     void refreshIdlePage(const std::vector<GunUiData> &guns);
     void refreshAuthorizePage(const GunUiData &gun);

@@ -1,0 +1,473 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>C6FlushCadClass</class>
+ <widget class="BaseDialog" name="C6FlushCadClass">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>800</width>
+    <height>480</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>C6FlushCad</string>
+  </property>
+  <widget class="QLabel" name="base_bottom">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>425</y>
+     <width>800</width>
+     <height>55</height>
+    </rect>
+   </property>
+   <property name="pixmap">
+    <pixmap>:/cui/Resources/base_bottom.png</pixmap>
+   </property>
+   <property name="scaledContents">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="lblPole">
+   <property name="geometry">
+    <rect>
+     <x>170</x>
+     <y>0</y>
+     <width>120</width>
+     <height>46</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>30</pointsize>
+     <weight>75</weight>
+     <italic>false</italic>
+     <bold>true</bold>
+     <underline>false</underline>
+     <strikeout>false</strikeout>
+    </font>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignCenter</set>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_cdz_icon">
+   <property name="geometry">
+    <rect>
+     <x>8</x>
+     <y>2</y>
+     <width>32</width>
+     <height>32</height>
+    </rect>
+   </property>
+   <property name="pixmap">
+    <pixmap>:/cui/Resources/cdz_tb.png</pixmap>
+   </property>
+   <property name="scaledContents">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_cdz_title">
+   <property name="geometry">
+    <rect>
+     <x>44</x>
+     <y>0</y>
+     <width>180</width>
+     <height>41</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>25</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string>直流充电桩</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+   </property>
+  </widget>
+  <widget class="QPushButton" name="btnBack">
+   <property name="geometry">
+    <rect>
+     <x>662</x>
+     <y>430</y>
+     <width>124</width>
+     <height>36</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>18</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string>返回</string>
+   </property>
+   <property name="focusPolicy">
+    <enum>Qt::NoFocus</enum>
+   </property>
+   <property name="layoutDirection">
+    <enum>Qt::RightToLeft</enum>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">QPushButton{border:none;background:transparent;color:white;padding-right:6px;}QPushButton:pressed{padding-top:1px;}</string>
+   </property>
+   <property name="icon">
+    <iconset>
+     <normaloff>:/cui/Resources/back.png</normaloff>:/cui/Resources/back.png</iconset>
+   </property>
+   <property name="iconSize">
+    <size>
+     <width>24</width>
+     <height>24</height>
+    </size>
+   </property>
+  </widget>
+  <widget class="QRWidget" name="qrMain" native="true">
+   <property name="geometry">
+    <rect>
+     <x>70</x>
+     <y>130</y>
+     <width>220</width>
+     <height>220</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QLabel" name="lblTips">
+   <property name="geometry">
+    <rect>
+     <x>40</x>
+     <y>62</y>
+     <width>720</width>
+     <height>50</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>32</pointsize>
+     <weight>50</weight>
+     <italic>false</italic>
+     <bold>false</bold>
+     <underline>false</underline>
+     <strikeout>false</strikeout>
+    </font>
+   </property>
+   <property name="text">
+    <string>请刷卡</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignCenter</set>
+   </property>
+   <property name="wordWrap">
+    <bool>true</bool>
+   </property>
+  </widget>
+  <widget class="QLabel" name="lblTips_2">
+   <property name="geometry">
+    <rect>
+     <x>46</x>
+     <y>356</y>
+     <width>268</width>
+     <height>64</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>27</pointsize>
+     <weight>50</weight>
+     <italic>false</italic>
+     <bold>false</bold>
+     <underline>false</underline>
+     <strikeout>false</strikeout>
+    </font>
+   </property>
+   <property name="text">
+    <string>启动充电请扫描左侧二维码</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignCenter</set>
+   </property>
+   <property name="wordWrap">
+    <bool>true</bool>
+   </property>
+  </widget>
+  <widget class="QPushButton" name="bbms">
+   <property name="geometry">
+    <rect>
+     <x>448</x>
+     <y>132</y>
+     <width>88</width>
+     <height>88</height>
+    </rect>
+   </property>
+   <property name="focusPolicy">
+    <enum>Qt::NoFocus</enum>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="icon">
+    <iconset resource="cui.qrc">
+     <normaloff>:/cui/Resources/hb.png</normaloff>:/cui/Resources/hb.png</iconset>
+   </property>
+   <property name="iconSize">
+    <size>
+     <width>88</width>
+     <height>88</height>
+    </size>
+   </property>
+  </widget>
+  <widget class="QPushButton" name="vin">
+   <property name="geometry">
+    <rect>
+     <x>628</x>
+     <y>132</y>
+     <width>88</width>
+     <height>88</height>
+    </rect>
+   </property>
+   <property name="focusPolicy">
+    <enum>Qt::NoFocus</enum>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="icon">
+    <iconset resource="cui.qrc">
+     <normaloff>:/cui/Resources/vin.png</normaloff>:/cui/Resources/vin.png</iconset>
+   </property>
+   <property name="iconSize">
+    <size>
+     <width>88</width>
+     <height>88</height>
+    </size>
+   </property>
+  </widget>
+  <widget class="QPushButton" name="card">
+   <property name="geometry">
+    <rect>
+     <x>448</x>
+     <y>242</y>
+     <width>88</width>
+     <height>88</height>
+    </rect>
+   </property>
+   <property name="focusPolicy">
+    <enum>Qt::NoFocus</enum>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="icon">
+    <iconset resource="cui.qrc">
+     <normaloff>:/cui/Resources/card.png</normaloff>:/cui/Resources/card.png</iconset>
+   </property>
+   <property name="iconSize">
+    <size>
+     <width>88</width>
+     <height>88</height>
+    </size>
+   </property>
+  </widget>
+  <widget class="QPushButton" name="btnAbout">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>435</y>
+     <width>191</width>
+     <height>51</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">QPushButton{background:transparent;border:none;}</string>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_ewm">
+   <property name="geometry">
+    <rect>
+     <x>34</x>
+     <y>118</y>
+     <width>292</width>
+     <height>264</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="qcq">
+   <property name="geometry">
+    <rect>
+     <x>40</x>
+     <y>120</y>
+     <width>720</width>
+     <height>60</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <family>MS Shell Dlg 2</family>
+     <pointsize>32</pointsize>
+     <weight>50</weight>
+     <italic>false</italic>
+     <bold>false</bold>
+     <underline>false</underline>
+     <strikeout>false</strikeout>
+    </font>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignCenter</set>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label">
+   <property name="geometry">
+    <rect>
+     <x>90</x>
+     <y>440</y>
+     <width>71</width>
+     <height>41</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>20</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="text">
+    <string>关于</string>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">color:white;font-weight:bold;background:transparent;</string>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_about">
+   <property name="geometry">
+    <rect>
+     <x>40</x>
+     <y>450</y>
+     <width>22</width>
+     <height>23</height>
+    </rect>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_ms">
+   <property name="geometry">
+    <rect>
+     <x>406</x>
+     <y>90</y>
+     <width>350</width>
+     <height>40</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>27</pointsize>
+    </font>
+   </property>
+   <property name="text">
+    <string>请选择启动方式</string>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignCenter</set>
+   </property>
+  </widget>
+  <widget class="QLabel" name="label_id">
+   <property name="geometry">
+    <rect>
+     <x>590</x>
+     <y>0</y>
+     <width>211</width>
+     <height>41</height>
+    </rect>
+   </property>
+   <property name="font">
+    <font>
+     <pointsize>25</pointsize>
+     <weight>75</weight>
+     <bold>true</bold>
+    </font>
+   </property>
+   <property name="layoutDirection">
+    <enum>Qt::LeftToRight</enum>
+   </property>
+   <property name="text">
+    <string/>
+   </property>
+   <property name="alignment">
+    <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+   </property>
+  </widget>
+  <zorder>qcq</zorder>
+  <zorder>label_ewm</zorder>
+  <zorder>lblTips</zorder>
+  <zorder>lblPole</zorder>
+  <zorder>qrMain</zorder>
+  <zorder>bbms</zorder>
+  <zorder>vin</zorder>
+  <zorder>card</zorder>
+  <zorder>lblTips_2</zorder>
+  <zorder>btnBack</zorder>
+  <zorder>label</zorder>
+  <zorder>label_about</zorder>
+  <zorder>btnAbout</zorder>
+  <zorder>label_ms</zorder>
+  <zorder>label_cdz_icon</zorder>
+  <zorder>label_cdz_title</zorder>
+  <zorder>label_id</zorder>
+ </widget>
+ <layoutdefault spacing="6" margin="11"/>
+ <customwidgets>
+  <customwidget>
+   <class>BaseDialog</class>
+   <extends>QWidget</extends>
+   <header>basedialog.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>WNumEdit</class>
+   <extends>QLineEdit</extends>
+   <header location="global">wnumedit.h</header>
+  </customwidget>
+  <customwidget>
+   <class>QRWidget</class>
+   <extends>QWidget</extends>
+   <header>qrwidget.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
+ <resources>
+  <include location="cui.qrc"/>
+ </resources>
+ <connections/>
+</ui>

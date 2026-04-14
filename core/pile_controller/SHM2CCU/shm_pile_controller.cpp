@@ -23,6 +23,7 @@ SHMPileController::SHMPileController()
     , m_gunNo(1)
     , m_gunIndex(0)
     , m_shmKey(85000)
+    , m_cachedStopSoc(0)
 {
     zeroMemory(&m_startChargeData, sizeof(m_startChargeData));
     zeroMemory(&m_stopChargeData, sizeof(m_stopChargeData));
@@ -43,9 +44,9 @@ bool SHMPileController::initialize(const char* commType, const char* config)
         return false;
     }
     if (m_shm == nullptr) {
-        m_shm = new CShm();
+        m_shm = new CShm(static_cast<key_t>(m_shmKey));
     }
-    return m_shm != nullptr;
+    return m_shm != nullptr && m_shm->isReady();
 }
 
 void SHMPileController::cleanup()
@@ -124,6 +125,7 @@ int SHMPileController::getStatus(uint8_t gunNo, PileStatus* status)
     }
 
     memset(status, 0, sizeof(*status));
+    refreshStopSocCache();
     status->gunNo = m_gunNo;
     status->outputVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_OUTPUT_VOLTAGE));
     status->outputCurrent = getYcSignedValue(SHM2CCU::YC_OUTPUT_CURRENT);
@@ -131,10 +133,10 @@ int SHMPileController::getStatus(uint8_t gunNo, PileStatus* status)
         (static_cast<double>(status->outputVoltage) / 10.0) *
         (static_cast<double>(status->outputCurrent) / 10.0));
     status->cumulativeEnergy = static_cast<uint32_t>(getYcValue(SHM2CCU::YC_CHARGE_ENERGY) * 100U);
-    status->workStatus = getChargePortWorkStatus();
+    status->workStatus = getDerivedWorkStatus();
     status->faultCode = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_START_RESULT));
     status->soc = static_cast<uint8_t>(getYcValue(SHM2CCU::YC_SOC));
-    status->temperature = static_cast<uint16_t>(getYcSignedValue(SHM2CCU::YC_PILE_ENV_TEMP) * 10);
+    status->temperature = static_cast<uint16_t>(getYcMinus50TempValue(SHM2CCU::YC_PILE_ENV_TEMP) * 10);
     return 0;
 }
 
@@ -176,26 +178,91 @@ int SHMPileController::powerAdjust()
     return 0;
 }
 
+void SHMPileController::updateFeeData(double totalAmount, double totalEnergy, double chargedTime)
+{
+    if (m_shm == nullptr) {
+        return;
+    }
+
+    YC* amountPoint = getYcPoint(SHM2CCU::YC_CURRENT_AMOUNT);
+    if (amountPoint != nullptr) {
+        amountPoint->value = (totalAmount <= 0.0)
+            ? 0U
+            : static_cast<unsigned int>(totalAmount * 10000.0 + 0.5);
+    }
+
+    YC* chargeSecondsPoint = getYcPoint(SHM2CCU::YC_CUMULATIVE_CHARGE_SECONDS);
+    if (chargeSecondsPoint != nullptr) {
+        // BY ZF: feeData.chargedTime 单位为秒，直接写 YC168/YC424。
+        chargeSecondsPoint->value = (chargedTime <= 0.0)
+            ? 0U
+            : static_cast<unsigned int>(chargedTime + 0.5);
+    }
+
+    YC* chargeEnergyPoint = getYcPoint(SHM2CCU::YC_CHARGE_ENERGY);
+    YC* dischargeEnergyPoint = getYcPoint(SHM2CCU::YC_DISCHARGE_ENERGY);
+    const unsigned int energyValue = (totalEnergy <= 0.0)
+        ? 0U
+        : static_cast<unsigned int>(totalEnergy * 10000.0 + 0.5);
+
+    DD* chargeEnergyDdPoint = getDdPoint(SHM2CCU::DD_CHARGE_ENERGY);
+    if (m_startChargeData.v2g != 0) {
+        if (chargeEnergyDdPoint != nullptr) {
+            chargeEnergyDdPoint->value = energyValue;
+        }
+        if (dischargeEnergyPoint != nullptr) {
+            dischargeEnergyPoint->value = energyValue;
+        }
+        if (chargeEnergyPoint != nullptr && energyValue == 0U) {
+            chargeEnergyPoint->value = 0U;
+        }
+        return;
+    }
+
+    if (chargeEnergyDdPoint != nullptr) {
+        chargeEnergyDdPoint->value = energyValue;
+    }
+    if (chargeEnergyPoint != nullptr) {
+        chargeEnergyPoint->value = energyValue;
+    }
+    if (dischargeEnergyPoint != nullptr && energyValue == 0U) {
+        dischargeEnergyPoint->value = 0U;
+    }
+}
+
+void SHMPileController::setPlugAndChargeState(uint8_t value)
+{
+    if (m_shm == nullptr) {
+        return;
+    }
+    YC* point = getYcPoint(SHM2CCU::YC_PLUG_AND_CHARGE_STATE);
+    if (point != nullptr) {
+        // BY ZF: YC210/YC466 即插即充鉴权过程状态，由 logic 状态机事件驱动写入。
+        point->value = value;
+    }
+}
+
 bool SHMPileController::getYC20Data(TCU2CCU_DataYC20* data) const
 {
     if (data == nullptr || m_shm == nullptr) {
         return false;
     }
     zeroMemory(data, sizeof(*data));
+    refreshStopSocCache();
     data->outputVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_OUTPUT_VOLTAGE));
     data->outputCurrent = getYcSignedValue(SHM2CCU::YC_OUTPUT_CURRENT);
     data->soc = static_cast<uint8_t>(getYcValue(SHM2CCU::YC_SOC));
-    data->batteryMinTemp = getYcSignedValue(SHM2CCU::YC_BATTERY_MIN_TEMP);
-    data->batteryMaxTemp = getYcSignedValue(SHM2CCU::YC_BATTERY_MAX_TEMP);
+    data->batteryMinTemp = getYcMinus50TempValue(SHM2CCU::YC_BATTERY_MIN_TEMP);
+    data->batteryMaxTemp = getYcMinus50TempValue(SHM2CCU::YC_BATTERY_MAX_TEMP);
     data->cellMaxVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_CELL_MAX_VOLTAGE));
     data->cellMinVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_CELL_MIN_VOLTAGE));
-    data->pileEnvTemp = getYcSignedValue(SHM2CCU::YC_PILE_ENV_TEMP);
+    data->pileEnvTemp = getYcMinus50TempValue(SHM2CCU::YC_PILE_ENV_TEMP);
     data->guideVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_GUIDE_VOLTAGE));
     data->bmsReqVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_BMS_REQ_VOLTAGE));
-    data->bmsReqCurrent = getYcSignedValue(SHM2CCU::YC_BMS_REQ_CURRENT);
+    data->bmsReqCurrent = getYcOffsetCurrentValue(SHM2CCU::YC_BMS_REQ_CURRENT);
     data->chargeMode = static_cast<uint8_t>(getYcValue(SHM2CCU::YC_CHARGE_MODE));
     data->bmsMeasuredVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_BMS_MEASURED_VOLTAGE));
-    data->bmsMeasuredCurrent = getYcSignedValue(SHM2CCU::YC_BMS_MEASURED_CURRENT);
+    data->bmsMeasuredCurrent = getYcOffsetCurrentValue(SHM2CCU::YC_BMS_MEASURED_CURRENT);
     data->estimatedRemainTime = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_ESTIMATED_REMAIN_TIME));
     data->interfaceTemp1 = getYcSignedValue(SHM2CCU::YC_INTERFACE_TEMP_1);
     data->interfaceTemp2 = getYcSignedValue(SHM2CCU::YC_INTERFACE_TEMP_2);
@@ -204,8 +271,8 @@ bool SHMPileController::getYC20Data(TCU2CCU_DataYC20* data) const
     data->maxVoltageCellNo = static_cast<uint8_t>(getYcValue(SHM2CCU::YC_MAX_VOLTAGE_CELL_NO));
     data->maxTempPointNo = static_cast<uint8_t>(getYcValue(SHM2CCU::YC_MAX_TEMP_POINT_NO));
     data->minTempPointNo = static_cast<uint8_t>(getYcValue(SHM2CCU::YC_MIN_TEMP_POINT_NO));
-    data->inletTemp = getYcSignedValue(SHM2CCU::YC_INLET_TEMP);
-    data->outletTemp = getYcSignedValue(SHM2CCU::YC_OUTLET_TEMP);
+    data->inletTemp = getYcMinus50TempValue(SHM2CCU::YC_INLET_TEMP);
+    data->outletTemp = getYcMinus50TempValue(SHM2CCU::YC_OUTLET_TEMP);
     data->envHumidity = static_cast<uint8_t>(getYcValue(SHM2CCU::YC_ENV_HUMIDITY));
     return true;
 }
@@ -216,7 +283,8 @@ bool SHMPileController::getYX22Data(TCU2CCU_DataYX22* data) const
         return false;
     }
     zeroMemory(data, sizeof(*data));
-    data->workStatus = static_cast<uint8_t>(getChargePortWorkStatus() & 0x03U);
+    refreshStopSocCache();
+    data->workStatus = getDerivedWorkStatus();
     data->totalFault = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_TOTAL_FAULT));
     data->totalAlarm = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_TOTAL_ALARM));
     data->emergencyStopFault = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_EMERGENCY_STOP_FAULT));
@@ -374,11 +442,12 @@ bool SHMPileController::getStopCompleteData(TCU2CCU_StatusStopCompleteData* data
         data->bmsChargeFaultReason = static_cast<uint16_t>(static_cast<unsigned char>(desname[SHM2CCU::STOP_COMPLETE_OFFSET_BMS_CHARGE_FAULT_REASON]));
         data->bmsStopErrorReason = static_cast<uint8_t>(static_cast<unsigned char>(desname[SHM2CCU::STOP_COMPLETE_OFFSET_BMS_STOP_ERROR_REASON]));
     }
-    data->stopSoc = static_cast<uint8_t>(getYcValue(SHM2CCU::YC_START_COMPLETE_SOC));
+    refreshStopSocCache();
+    data->stopSoc = m_cachedStopSoc;
     data->cellMinVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_CELL_MIN_VOLTAGE));
     data->cellMaxVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_CELL_MAX_VOLTAGE));
-    data->batteryMinTemp = getYcSignedValue(SHM2CCU::YC_BATTERY_MIN_TEMP);
-    data->batteryMaxTemp = getYcSignedValue(SHM2CCU::YC_BATTERY_MAX_TEMP);
+    data->batteryMinTemp = getYcMinus50TempValue(SHM2CCU::YC_BATTERY_MIN_TEMP);
+    data->batteryMaxTemp = getYcMinus50TempValue(SHM2CCU::YC_BATTERY_MAX_TEMP);
     return true;
 }
 
@@ -419,7 +488,8 @@ void SHMPileController::clearPowerCtrlResponseEvent()
 
 uint8_t SHMPileController::getWorkStatus() const
 {
-    return getChargePortWorkStatus();
+    refreshStopSocCache();
+    return getDerivedWorkStatus();
 }
 
 uint8_t SHMPileController::getTotalFault() const
@@ -466,6 +536,11 @@ int SHMPileController::ycIndex(int baseIndex) const
     return SHM2CCU::getGunScopedYcIndex(baseIndex, m_gunIndex);
 }
 
+int SHMPileController::ddIndex(int baseIndex) const
+{
+    return SHM2CCU::getGunScopedDdIndex(baseIndex, m_gunIndex);
+}
+
 YX* SHMPileController::getYxPoint(int baseIndex) const
 {
     return (m_shm == nullptr) ? nullptr : m_shm->getYx(yxIndex(baseIndex));
@@ -474,6 +549,11 @@ YX* SHMPileController::getYxPoint(int baseIndex) const
 YC* SHMPileController::getYcPoint(int baseIndex) const
 {
     return (m_shm == nullptr) ? nullptr : m_shm->getYc(ycIndex(baseIndex));
+}
+
+DD* SHMPileController::getDdPoint(int baseIndex) const
+{
+    return (m_shm == nullptr) ? nullptr : m_shm->getDd(ddIndex(baseIndex));
 }
 
 const char* SHMPileController::getYxDesname(int baseIndex) const
@@ -503,6 +583,41 @@ unsigned int SHMPileController::getYcValue(int baseIndex) const
 int16_t SHMPileController::getYcSignedValue(int baseIndex) const
 {
     return static_cast<int16_t>(getYcValue(baseIndex) & 0xFFFFU);
+}
+
+int16_t SHMPileController::getYcOffsetCurrentValue(int baseIndex) const
+{
+    // BY ZF: 共享内存电流沿用 CAN 口径，按 4000-raw 还原为有符号 0.1A。
+    return static_cast<int16_t>(4000 - static_cast<int32_t>(getYcValue(baseIndex) & 0xFFFFU));
+}
+
+int16_t SHMPileController::getYcMinus50TempValue(int baseIndex) const
+{
+    // BY ZF: 温度点位按协议语义减去 50 偏移，得到实际摄氏度。
+    return static_cast<int16_t>(static_cast<int32_t>(getYcValue(baseIndex) & 0xFFFFU) - 50);
+}
+
+unsigned int SHMPileController::getRawGunWorkStatusValue() const
+{
+    return getYcValue(SHM2CCU::YC_GUN_WORK_STATUS_RAW) & 0xFFU;
+}
+
+uint8_t SHMPileController::getDerivedWorkStatus() const
+{
+    // BY ZF: 按枪口遥测 YC227/YC483 推导工作状态，02~09 视为工作中。
+    const unsigned int raw = getRawGunWorkStatusValue();
+    return (raw > 0x01U && raw < 0x0AU) ? 1U : 0U;
+}
+
+void SHMPileController::refreshStopSocCache() const
+{
+    // BY ZF: 停止完成没有独立 SOC 点位，充电过程中实时缓存，回到 idle 后清零。
+    const unsigned int rawWorkStatus = getRawGunWorkStatusValue();
+    if (rawWorkStatus > 0x01U && rawWorkStatus < 0x0AU) {
+        m_cachedStopSoc = static_cast<uint8_t>(getYcValue(SHM2CCU::YC_SOC) & 0xFFU);
+        return;
+    }
+    m_cachedStopSoc = 0;
 }
 
 uint8_t SHMPileController::getChargePortWorkStatus() const
@@ -571,4 +686,14 @@ void SHMPileController::fillBatteryProdDate(uint8_t& year, uint8_t& month, uint8
     year = static_cast<uint8_t>(parsedYear & 0xFFU);
     month = static_cast<uint8_t>(parsedMonth & 0xFFU);
     day = static_cast<uint8_t>(parsedDay & 0xFFU);
+    if (!isValidBatteryProdDate(year, month, day)) {
+        year = 0;
+        month = 0;
+        day = 0;
+    }
+}
+
+bool SHMPileController::isValidBatteryProdDate(uint8_t year, uint8_t month, uint8_t day) const
+{
+    return year <= 99U && month >= 1U && month <= 12U && day >= 1U && day <= 31U;
 }

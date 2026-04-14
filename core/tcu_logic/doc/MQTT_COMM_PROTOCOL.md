@@ -239,13 +239,14 @@
 - `v2g`：V2G 标志（可选）
 
 `start_charge.data`（平台下发业务参数）建议字段：
-- `startTime`：启动时间戳（ms）
+- `startTime`：启动时间戳
 - `chargeUserNo`：充电用户号
 - `orderNo`：充电订单号
 - `preTradeNo`：平台交易流水
 - `tradeNo`：本地交易流水（可选）
 - `plugAndChargeFlag`：即插即充标志，`0x01` 非即插即充，`0x02` 即插即充
 - `mergeChargeFlag`：合并充电标志
+- `v2g`：充放电模式标志0充 1 放
 - `chargeMode`：充电模式
 - `prechargeAmount`：预充值金额
 - `feeModelNo`：计费模型编号
@@ -270,7 +271,7 @@ Topic：`tcu/logic/{gun}/cmd`
   "data": {
     "startTime": 1736150000000,
     "plugAndChargeFlag": 2,
-    "mergeChargeFlag": 1,
+    "mergeChargeFlag": 0,
     "auxPowerVoltage": 12
   }
 }
@@ -379,30 +380,30 @@ Topic：`tcu/logic/{gun}/event`
 ### 4.1.4 平台返回即插即充启动参数
 Topic：`tcu/plat/{gun}/cmd`
 ```json
-{
-  "ts": 1736150003200,
-  "seq": 104,
-  "source": "platform",
-  "gun": 0,
-  "cmd": "start_charge",
-  "data": {
-    "vin": "LDC913L27A1234567",
-    "chargeUserNo": "U10001",
-    "orderNo": "P202602120001",
-    "preTradeNo": "P202602120001",
-    "tradeNo": "P202602120001",
-    "plugAndChargeFlag": 2,
-    "mergeChargeFlag": 1,
-    "chargeMode": 1,
-    "prechargeAmount": 100.0,
-    "feeModelNo": 1,
-    "feeModelId": "MODEL001",
-    "timeNum": 12,
-    "timeSeg": ["0000", "1200", "1430", "1535", "1538", "1540", "1550", "1600", "1730", "1830", "1930", "2130"],
-    "chargeFee": [70, 0.90, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
-    "serviceFee": [15, 0.15, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2]
-  }
-}
+// {
+//   "ts": 1736150003200,
+//   "seq": 104,
+//   "source": "platform",
+//   "gun": 0,
+//   "cmd": "start_charge",
+//   "data": {
+//     "vin": "LDC913L27A1234567",
+//     "chargeUserNo": "U10001",
+//     "orderNo": "P202602120001",
+//     "preTradeNo": "P202602120001",
+//     "tradeNo": "P202602120001",
+//     "plugAndChargeFlag": 2,
+//     "mergeChargeFlag": 0,
+//     "chargeMode": 1,
+//     "prechargeAmount": 100.0,
+//     "feeModelNo": 1,
+//     "feeModelId": "MODEL001",
+//     "timeNum": 12,
+//     "timeSeg": ["0000", "1200", "1430", "1535", "1538", "1540", "1550", "1600", "1730", "1830", "1930", "2130"],
+//     "chargeFee": [70, 0.90, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+//     "serviceFee": [15, 0.15, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+//   }
+// }
 ```
 
 ### 4.1.5 logic 下发车辆识别鉴权帧
@@ -428,7 +429,7 @@ Topic：`tcu/pile/{gun}/cmd`
     "feeModelNo": 1,
     "feeModelId": "MODEL001",
     "plugAndChargeFlag": 2,
-    "mergeChargeFlag": 1,
+    "mergeChargeFlag": ,
     "timeNum": 12,
     "timeSeg": ["0000", "1200", "1430", "1535", "1538", "1540", "1550", "1600", "1730", "1830", "1930", "2130"],
     "chargeFee": [70, 0.90, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],

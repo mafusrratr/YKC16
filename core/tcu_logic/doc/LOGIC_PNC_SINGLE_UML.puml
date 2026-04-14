@@ -1,0 +1,42 @@
+@startuml
+title tcu_logic 单枪即插即充时序
+
+skinparam shadowing false
+skinparam defaultFontName PingFang SC
+
+actor HMI
+participant "tcu_logic" as LOGIC
+participant "pile_controller" as PILE
+participant "platform" as PLAT
+
+HMI -> LOGIC : tcu/logic/{gun}/cmd\ncmd=vin_req\nplugAndChargeFlag=2
+LOGIC -> LOGIC : updateAuthBasis\narmPendingStart
+LOGIC -> PILE : start_charge
+LOGIC -> LOGIC : PREPARE -> STARTING
+
+PILE -> LOGIC : vehicle_id(vin,soc,voltage,...)
+LOGIC -> LOGIC : 校验 VIN 合法性
+
+alt VIN 合法
+  LOGIC -> PILE : vehicle_id_confirm(success)
+  LOGIC -> PLAT : plug_and_charge_auth_request
+  alt 平台返回成功
+    PLAT -> LOGIC : start_charge / auth_result /\nplug_and_charge_auth_result
+    LOGIC -> PILE : vehicle_auth(success)
+    PILE -> LOGIC : vehicle_auth_ack
+    PILE -> LOGIC : start_complete(success)
+    LOGIC -> LOGIC : STARTING -> CHARGING
+  else 平台返回失败
+    PLAT -> LOGIC : plug_and_charge_auth_result(fail)
+    LOGIC -> PILE : vehicle_auth(fail)
+    LOGIC -> LOGIC : STARTING -> STOPPED
+  else 平台 30s 超时
+    LOGIC -> PILE : vehicle_auth(fail, failReason=0x03)
+    LOGIC -> LOGIC : STARTING -> STOPPED
+  end
+else VIN 非法
+  LOGIC -> PILE : vehicle_id_confirm(fail)
+  LOGIC -> LOGIC : 结束本次即插即充流程
+end
+
+@enduml

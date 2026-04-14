@@ -9,6 +9,7 @@
 #include <sstream>
 #include <cstring>
 #include <cmath>
+#include <cstdio>
 #include <cjson/cJSON.h>
 
 namespace {
@@ -22,6 +23,19 @@ static uint16_t roundToUint16(double value)
         return 65535;
     }
     return static_cast<uint16_t>(value + 0.5);
+}
+
+static bool getJsonNumber(cJSON* obj, const char* key, double& out)
+{
+    if (obj == nullptr || key == nullptr) {
+        return false;
+    }
+    cJSON* item = cJSON_GetObjectItem(obj, key);
+    if (!cJSON_IsNumber(item)) {
+        return false;
+    }
+    out = item->valuedouble;
+    return true;
 }
 
 }
@@ -162,12 +176,14 @@ void PileControllerProcess::doCleanup()
 
 void PileControllerProcess::feedWatchdog()
 {
+    // BY ZF: SHM 主控看门狗每 5 秒上报一次，进程名必须与 daemon.ini 的进程键保持一致。
+    static const std::chrono::seconds kWatchdogInterval(5);
     static MessageQueue watchdogQueue(MSG_KEY_WATCHDOG);
     static int queueReady = -1;
     static std::chrono::steady_clock::time_point lastFeedTime =
-        std::chrono::steady_clock::now() - std::chrono::seconds(5);
+        std::chrono::steady_clock::now() - kWatchdogInterval;
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-    if ((now - lastFeedTime) < std::chrono::seconds(5)) {
+    if ((now - lastFeedTime) < kWatchdogInterval) {
         return;
     }
     if (queueReady == -1) {
@@ -177,6 +193,7 @@ void PileControllerProcess::feedWatchdog()
         const char* processName = "tcu_shmctrl";
         watchdogQueue.send(MSG_WATCHDOG_FEED, processName, strlen(processName));
         lastFeedTime = now;
+        std::cout << "[SHM2CCU] Watchdog fed: " << processName << std::endl;
     }
 }
 
@@ -239,8 +256,8 @@ void PileControllerProcess::updateStatusFromController()
                 cJSON_AddNumberToObject(data, "soc", current.soc);
                 cJSON_AddNumberToObject(data, "batteryMinTemp", current.batteryMinTemp);
                 cJSON_AddNumberToObject(data, "batteryMaxTemp", current.batteryMaxTemp);
-                cJSON_AddNumberToObject(data, "cellMaxVoltage", static_cast<double>(current.cellMaxVoltage) / 10.0);
-                cJSON_AddNumberToObject(data, "cellMinVoltage", static_cast<double>(current.cellMinVoltage) / 10.0);
+                cJSON_AddNumberToObject(data, "cellMaxVoltage", static_cast<double>(current.cellMaxVoltage) / 100.0);
+                cJSON_AddNumberToObject(data, "cellMinVoltage", static_cast<double>(current.cellMinVoltage) / 100.0);
                 cJSON_AddNumberToObject(data, "pileEnvTemp", current.pileEnvTemp);
                 cJSON_AddNumberToObject(data, "guideVoltage", static_cast<double>(current.guideVoltage) / 10.0);
                 cJSON_AddNumberToObject(data, "bmsReqVoltage", static_cast<double>(current.bmsReqVoltage) / 10.0);
@@ -249,10 +266,10 @@ void PileControllerProcess::updateStatusFromController()
                 cJSON_AddNumberToObject(data, "bmsMeasuredVoltage", static_cast<double>(current.bmsMeasuredVoltage) / 10.0);
                 cJSON_AddNumberToObject(data, "bmsMeasuredCurrent", static_cast<double>(current.bmsMeasuredCurrent) / 10.0);
                 cJSON_AddNumberToObject(data, "estimatedRemainTime", current.estimatedRemainTime);
-                cJSON_AddNumberToObject(data, "interfaceTemp1", current.interfaceTemp1);
-                cJSON_AddNumberToObject(data, "interfaceTemp2", current.interfaceTemp2);
-                cJSON_AddNumberToObject(data, "interfaceTemp3", current.interfaceTemp3);
-                cJSON_AddNumberToObject(data, "interfaceTemp4", current.interfaceTemp4);
+                cJSON_AddNumberToObject(data, "interfaceTemp1", static_cast<double>(current.interfaceTemp1) / 10.0);
+                cJSON_AddNumberToObject(data, "interfaceTemp2", static_cast<double>(current.interfaceTemp2) / 10.0);
+                cJSON_AddNumberToObject(data, "interfaceTemp3", static_cast<double>(current.interfaceTemp3) / 10.0);
+                cJSON_AddNumberToObject(data, "interfaceTemp4", static_cast<double>(current.interfaceTemp4) / 10.0);
                 cJSON_AddNumberToObject(data, "maxVoltageCellNo", current.maxVoltageCellNo);
                 cJSON_AddNumberToObject(data, "maxTempPointNo", current.maxTempPointNo);
                 cJSON_AddNumberToObject(data, "minTempPointNo", current.minTempPointNo);
@@ -378,18 +395,30 @@ void PileControllerProcess::updateStatusFromController()
                         }
                         cJSON_AddItemToObject(obj, key, arr);
                     };
+                    auto addProdDate = [&eventData](cJSON* obj) {
+                        if (eventData.batteryProdYear == 0 || eventData.batteryProdMonth == 0 || eventData.batteryProdDay == 0) {
+                            cJSON_AddStringToObject(obj, "batteryProdDate", "");
+                            return;
+                        }
+                        char buf[16];
+                        std::snprintf(buf, sizeof(buf), "20%02u-%02u-%02u",
+                                      static_cast<unsigned int>(eventData.batteryProdYear),
+                                      static_cast<unsigned int>(eventData.batteryProdMonth),
+                                      static_cast<unsigned int>(eventData.batteryProdDay));
+                        cJSON_AddStringToObject(obj, "batteryProdDate", buf);
+                    };
                     cJSON_AddNumberToObject(data, "successFlag", eventData.successFlag);
                     cJSON_AddNumberToObject(data, "chargeFailReason", eventData.chargeFailReason);
                     cJSON_AddNumberToObject(data, "batteryType", eventData.batteryType);
                     cJSON_AddNumberToObject(data, "maxAllowTemp", eventData.maxAllowTemp);
-                    cJSON_AddNumberToObject(data, "bmsMaxChargeVoltage", eventData.bmsMaxChargeVoltage);
-                    cJSON_AddNumberToObject(data, "cellMaxChargeVoltage", eventData.cellMaxChargeVoltage);
-                    cJSON_AddNumberToObject(data, "maxAllowChargeCurrent", eventData.maxAllowChargeCurrent);
-                    cJSON_AddNumberToObject(data, "ratedTotalVoltage", eventData.ratedTotalVoltage);
-                    cJSON_AddNumberToObject(data, "currentTotalVoltage", eventData.currentTotalVoltage);
-                    cJSON_AddNumberToObject(data, "ratedCapacity", eventData.ratedCapacity);
-                    cJSON_AddNumberToObject(data, "nominalEnergy", eventData.nominalEnergy);
-                    cJSON_AddNumberToObject(data, "soc", eventData.soc);
+                    cJSON_AddNumberToObject(data, "bmsMaxChargeVoltage", static_cast<double>(eventData.bmsMaxChargeVoltage) / 10.0);
+                    cJSON_AddNumberToObject(data, "cellMaxChargeVoltage", static_cast<double>(eventData.cellMaxChargeVoltage) / 100.0);
+                    cJSON_AddNumberToObject(data, "maxAllowChargeCurrent", static_cast<double>(eventData.maxAllowChargeCurrent) / 10.0);
+                    cJSON_AddNumberToObject(data, "ratedTotalVoltage", static_cast<double>(eventData.ratedTotalVoltage) / 10.0);
+                    cJSON_AddNumberToObject(data, "currentTotalVoltage", static_cast<double>(eventData.currentTotalVoltage) / 10.0);
+                    cJSON_AddNumberToObject(data, "ratedCapacity", static_cast<double>(eventData.ratedCapacity) / 10.0);
+                    cJSON_AddNumberToObject(data, "nominalEnergy", static_cast<double>(eventData.nominalEnergy) / 10.0);
+                    cJSON_AddNumberToObject(data, "soc", static_cast<double>(eventData.soc) / 10.0);
                     cJSON_AddNumberToObject(data, "pileMaxOutputVoltage", eventData.pileMaxOutputVoltage);
                     cJSON_AddNumberToObject(data, "pileMinOutputVoltage", eventData.pileMinOutputVoltage);
                     cJSON_AddNumberToObject(data, "pileMaxOutputCurrent", eventData.pileMaxOutputCurrent);
@@ -400,6 +429,7 @@ void PileControllerProcess::updateStatusFromController()
                     cJSON_AddNumberToObject(data, "batteryProdYear", eventData.batteryProdYear);
                     cJSON_AddNumberToObject(data, "batteryProdMonth", eventData.batteryProdMonth);
                     cJSON_AddNumberToObject(data, "batteryProdDay", eventData.batteryProdDay);
+                    addProdDate(data);
                     addByteArray(data, "batteryChargeCount", eventData.batteryChargeCount, sizeof(eventData.batteryChargeCount));
                     cJSON_AddNumberToObject(data, "batteryPropertyFlag", eventData.batteryPropertyFlag);
                     addByteArray(data, "bmsSoftwareVersion", eventData.bmsSoftwareVersion, sizeof(eventData.bmsSoftwareVersion));
@@ -417,8 +447,8 @@ void PileControllerProcess::updateStatusFromController()
                     cJSON_AddNumberToObject(data, "bmsChargeFaultReason", eventData.bmsChargeFaultReason);
                     cJSON_AddNumberToObject(data, "bmsStopErrorReason", eventData.bmsStopErrorReason);
                     cJSON_AddNumberToObject(data, "stopSoc", eventData.stopSoc);
-                    cJSON_AddNumberToObject(data, "cellMinVoltage", eventData.cellMinVoltage);
-                    cJSON_AddNumberToObject(data, "cellMaxVoltage", eventData.cellMaxVoltage);
+                    cJSON_AddNumberToObject(data, "cellMinVoltage", eventData.cellMinVoltage/100.0);
+                    cJSON_AddNumberToObject(data, "cellMaxVoltage", eventData.cellMaxVoltage/100.0);
                     cJSON_AddNumberToObject(data, "batteryMinTemp", eventData.batteryMinTemp);
                     cJSON_AddNumberToObject(data, "batteryMaxTemp", eventData.batteryMaxTemp);
                 });
@@ -453,6 +483,12 @@ bool PileControllerProcess::initMqtt()
             std::ostringstream t;
             t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo - 1) << "/cmd";
             m_mqtt.subscribe(t.str(), 1);
+            std::ostringstream feeTopic;
+            feeTopic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gunNo - 1) << "/feeData";
+            m_mqtt.subscribe(feeTopic.str(), 1);
+            std::ostringstream logicEventTopic;
+            logicEventTopic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gunNo - 1) << "/event";
+            m_mqtt.subscribe(logicEventTopic.str(), 2);
         }
     });
     if (!m_mqtt.connect(m_config.mqttHost, m_config.mqttPort, m_config.mqttKeepalive)) {
@@ -484,7 +520,7 @@ void PileControllerProcess::publishCmdUpset(uint8_t gunNo, const std::string& pa
 void PileControllerProcess::onMqttMessage(const std::string& topic, const std::string& payload)
 {
     int gun = -1;
-    if (!parseGunFromTopic(topic, gun) || topic.find("/cmd") == std::string::npos) {
+    if (!parseGunFromTopic(topic, gun)) {
         return;
     }
     if (gun < 0 || gun >= static_cast<int>(m_controllers.size())) {
@@ -501,7 +537,17 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
     }
     cJSON* cmd = cJSON_GetObjectItem(root, "cmd");
     cJSON* data = cJSON_GetObjectItem(root, "data");
-    if (!cJSON_IsString(cmd)) {
+    if (topic.find("/feeData") != std::string::npos) {
+        handleFeeDataMessage(gun, data);
+        cJSON_Delete(root);
+        return;
+    }
+    if (topic.find("/event") != std::string::npos) {
+        handleLogicEventMessage(gun, root, data);
+        cJSON_Delete(root);
+        return;
+    }
+    if (topic.find("/cmd") == std::string::npos || !cJSON_IsString(cmd)) {
         cJSON_Delete(root);
         return;
     }
@@ -600,6 +646,57 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
     cJSON_Delete(root);
 }
 
+bool PileControllerProcess::handleFeeDataMessage(int gun, cJSON* data)
+{
+    if (gun < 0 || gun >= static_cast<int>(m_controllers.size()) || !cJSON_IsObject(data)) {
+        return false;
+    }
+
+    SHMPileController* shm = dynamic_cast<SHMPileController*>(m_controllers[gun].get());
+    if (shm == nullptr) {
+        return false;
+    }
+
+    double totalAmount = 0.0;
+    double totalEnergy = 0.0;
+    double chargedTime = 0.0;
+    bool hasAmount = getJsonNumber(data, "totalAmount", totalAmount);
+    bool hasEnergy = getJsonNumber(data, "totalEnergy", totalEnergy);
+    bool hasChargedTime = getJsonNumber(data, "chargedTime", chargedTime);
+    if (!hasAmount && !hasEnergy && !hasChargedTime) {
+        return false;
+    }
+
+    shm->updateFeeData(totalAmount, totalEnergy, chargedTime);
+    return true;
+}
+
+bool PileControllerProcess::handleLogicEventMessage(int gun, cJSON* root, cJSON* data)
+{
+    if (gun < 0 || gun >= static_cast<int>(m_controllers.size()) || root == nullptr || !cJSON_IsObject(data)) {
+        return false;
+    }
+
+    cJSON* event = cJSON_GetObjectItem(root, "event");
+    if (!cJSON_IsString(event) || std::string(event->valuestring) != "state_change") {
+        return false;
+    }
+
+    cJSON* to = cJSON_GetObjectItem(data, "to");
+    if (!cJSON_IsString(to) || std::string(to->valuestring) != "STOPPED") {
+        return false;
+    }
+
+    SHMPileController* shm = dynamic_cast<SHMPileController*>(m_controllers[gun].get());
+    if (shm == nullptr) {
+        return false;
+    }
+
+    // BY ZF: logic 进入 STOPPED 时通知 CCU/HMI 进入停机结算界面，YC210/YC466 写 11。
+    shm->setPlugAndChargeState(11);
+    return true;
+}
+
 std::string PileControllerProcess::buildDataPayload(uint8_t gunNo,
                                                     const std::string& type,
                                                     const std::function<void(cJSON*)>& fillData)
@@ -628,20 +725,24 @@ std::string PileControllerProcess::buildDataPayload(uint8_t gunNo,
 bool PileControllerProcess::parseGunFromTopic(const std::string& topic, int& outGun) const
 {
     outGun = -1;
-    const std::string marker = "/pile/";
-    const size_t pos = topic.find(marker);
-    if (pos == std::string::npos) {
-        return false;
+    const char* markers[] = { "/pile/", "/logic/" };
+    for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); ++i) {
+        const std::string marker = markers[i];
+        const size_t pos = topic.find(marker);
+        if (pos == std::string::npos) {
+            continue;
+        }
+        const size_t start = pos + marker.size();
+        const size_t end = topic.find('/', start);
+        if (end == std::string::npos) {
+            return false;
+        }
+        try {
+            outGun = std::stoi(topic.substr(start, end - start));
+            return true;
+        } catch (...) {
+            return false;
+        }
     }
-    const size_t start = pos + marker.size();
-    const size_t end = topic.find('/', start);
-    if (end == std::string::npos) {
-        return false;
-    }
-    try {
-        outGun = std::stoi(topic.substr(start, end - start));
-    } catch (...) {
-        return false;
-    }
-    return true;
+    return false;
 }

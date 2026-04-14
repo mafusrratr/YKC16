@@ -1,0 +1,49 @@
+@startuml
+title tcu_logic 业务总览
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName PingFang SC
+
+component "HMI" as HMI
+component "Platform" as PLAT
+component "pile_controller" as PILE
+component "meter" as METER
+database "logger" as LOGGER
+queue "MQTT Broker" as BROKER
+
+package "tcu_logic" {
+  [ChargeLogicProcess] as LOGIC
+  [Per-Gun StateMachine\nIDLE/PREPARE/STARTING/\nCHARGING/STOPPING/STOPPED/ERROR] as FSM
+  [PlugAndCharge Coordinator] as PNC
+  [Fee & Trade Context] as FEE
+}
+
+HMI --> BROKER : tcu/logic/{gun}/cmd
+PLAT --> BROKER : tcu/plat/{gun}/cmd,event
+PILE --> BROKER : tcu/pile/{gun}/event,data
+METER --> BROKER : tcu/meter/{gun}/data,event
+LOGGER --> BROKER : tcu/logger/{gun}/event
+
+BROKER --> LOGIC : subscribe
+LOGIC --> BROKER : publish
+
+LOGIC --> FSM : drive state transition
+LOGIC --> PNC : vehicle_id / vehicle_auth
+LOGIC --> FEE : start context / fee model / trade record
+
+LOGIC --> BROKER : tcu/pile/{gun}/cmd\nstart_charge / stop_charge /\nvehicle_id_confirm / vehicle_auth / power_ctrl
+LOGIC --> BROKER : tcu/logic/{gun}/event\nstate_change / cmd_reject /\nplug_and_charge_auth_request /\nplug_and_charge_auth_*
+LOGIC --> BROKER : tcu/logic/{gun}/feeData
+
+note right of PNC
+  即插即充职责:
+  1. 接收 vehicle_id
+  2. 完成 VIN 校验
+  3. 发布平台鉴权请求
+  4. 接收平台鉴权结果
+  5. 下发 vehicle_auth
+  6. 合并充场景下校验双枪 VIN 一致性
+end note
+
+@enduml

@@ -1,0 +1,48 @@
+@startuml
+title tcu_logic 普通启动与停机流程
+
+skinparam shadowing false
+skinparam defaultFontName PingFang SC
+
+start
+
+:pile 遥信上送车辆已连接;
+if (meter/pile 在线?) then (是)
+  :状态 IDLE -> PREPARE;
+else (否)
+  :进入 ERROR;
+  stop
+endif
+
+:收到 HMI/平台 start_charge;
+:updateAuthBasis;
+:缓存 pendingStartData;
+:状态机放行;
+:向 pile 下发 start_charge;
+:状态 PREPARE -> STARTING;
+
+if (30s 内未 start_complete?) then (是)
+  :重发一次 start_charge;
+endif
+
+if (收到 start_complete 成功?) then (是)
+  :状态 STARTING -> CHARGING;
+else (否)
+  :进入 STOPPING;
+endif
+
+if (充电中收到 stop_charge/\nworkStatus=0/故障/金额停机?) then (是)
+  :进入 STOPPING;
+endif
+
+while (未满足停止收口条件?)
+  :每 2s 重发 stop_charge;
+  :等待电表稳定;
+endwhile (否)
+
+:状态 STOPPING -> STOPPED;
+:等待拔枪;
+:状态 STOPPED -> IDLE;
+stop
+
+@enduml

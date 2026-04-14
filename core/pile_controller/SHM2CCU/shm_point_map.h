@@ -8,9 +8,11 @@
 namespace SHM2CCU {
 
 // BY ZF: Gun-scoped SHM YC/YX points use left-gun base indices.
-// BY ZF: Right-gun points are addressed by adding SHM_GUN_POINT_OFFSET.
+// BY ZF: Right-gun YC/YX points are addressed by adding SHM_GUN_POINT_OFFSET.
+// BY ZF: Right-gun DD points are addressed by adding SHM_GUN_DD_POINT_OFFSET.
 // BY ZF: Example: left YX99 -> right YX355, left YC100 -> right YC356.
 static const int SHM_GUN_POINT_OFFSET = 256;
+static const int SHM_GUN_DD_POINT_OFFSET = 64;
 static const int SHM_MAX_GUN_COUNT = 2;
 
 enum GunChannel {
@@ -66,6 +68,11 @@ inline int getGunScopedYxIndex(int baseIndex, int gunIndex)
 inline int getGunScopedYcIndex(int baseIndex, int gunIndex)
 {
     return baseIndex + gunIndex * SHM_GUN_POINT_OFFSET;
+}
+
+inline int getGunScopedDdIndex(int baseIndex, int gunIndex)
+{
+    return baseIndex + gunIndex * SHM_GUN_DD_POINT_OFFSET;
 }
 
 enum ChargePortField {
@@ -185,7 +192,8 @@ enum ShmYcPoint {
     YC_AUX_POWER_VOLTAGE = 205,
     YC_PLUG_AND_CHARGE_STOP_CODE = 208,
     YC_HMI_MAIN_STATE = 209,
-    YC_PLUG_AND_CHARGE_STATE = 210
+    YC_PLUG_AND_CHARGE_STATE = 210,
+    YC_GUN_WORK_STATUS_RAW = 227
 };
 
 enum ShmYxPoint {
@@ -398,10 +406,10 @@ static const MqttFieldBinding kMqttYcBindings[] = {
     { "bmsMeasuredVoltage", SHM_SOURCE_YC, YC_BMS_MEASURED_VOLTAGE, 0.1 },
     { "bmsMeasuredCurrent", SHM_SOURCE_YC, YC_BMS_MEASURED_CURRENT, 0.1 },
     { "estimatedRemainTime", SHM_SOURCE_YC, YC_ESTIMATED_REMAIN_TIME, 1.0 },
-    { "interfaceTemp1", SHM_SOURCE_YC, YC_INTERFACE_TEMP_1, 1.0 },
-    { "interfaceTemp2", SHM_SOURCE_YC, YC_INTERFACE_TEMP_2, 1.0 },
-    { "interfaceTemp3", SHM_SOURCE_YC, YC_INTERFACE_TEMP_3, 1.0 },
-    { "interfaceTemp4", SHM_SOURCE_YC, YC_INTERFACE_TEMP_4, 1.0 },
+    { "interfaceTemp1", SHM_SOURCE_YC, YC_INTERFACE_TEMP_1, 0.1 },
+    { "interfaceTemp2", SHM_SOURCE_YC, YC_INTERFACE_TEMP_2, 0.1 },
+    { "interfaceTemp3", SHM_SOURCE_YC, YC_INTERFACE_TEMP_3, 0.1 },
+    { "interfaceTemp4", SHM_SOURCE_YC, YC_INTERFACE_TEMP_4, 0.1 },
     { "maxVoltageCellNo", SHM_SOURCE_YC, YC_MAX_VOLTAGE_CELL_NO, 1.0 },
     { "maxTempPointNo", SHM_SOURCE_YC, YC_MAX_TEMP_POINT_NO, 1.0 },
     { "minTempPointNo", SHM_SOURCE_YC, YC_MIN_TEMP_POINT_NO, 1.0 },
@@ -412,7 +420,7 @@ static const MqttFieldBinding kMqttYcBindings[] = {
 
 // BY ZF: MQTT "yx" compatibility plan for SHM2CCU.
 static const MqttFieldBinding kMqttYxBindings[] = {
-    { "workStatus", SHM_SOURCE_CHARGE_PORT, CHARGE_PORT_FIELD_WORK_STATUS, 1.0 },
+    { "workStatus", SHM_SOURCE_YC, YC_GUN_WORK_STATUS_RAW, 1.0 },
     { "totalFault", SHM_SOURCE_YX, YX_TOTAL_FAULT, 1.0 },
     { "totalAlarm", SHM_SOURCE_YX, YX_TOTAL_ALARM, 1.0 },
     { "emergencyStopFault", SHM_SOURCE_YX, YX_EMERGENCY_STOP_FAULT, 1.0 },
@@ -559,7 +567,7 @@ static const StructFieldCoverage kStatusStopCompleteCoverage[] = {
 
 // BY ZF: Coverage audit for state/data structs used by current CAN2CCU flow.
 static const StructFieldCoverage kStatusPileStateCoverage[] = {
-    { "pileStatus", SHM_COVER_COMPOSED, SHM_SOURCE_CHARGE_PORT, CHARGE_PORT_FIELD_WORK_STATUS, "prefer chargePort.WorkStatus" },
+    { "pileStatus", SHM_COVER_COMPOSED, SHM_SOURCE_YC, YC_GUN_WORK_STATUS_RAW, "from YC227/YC483: >0x01 and <0x0A => 1, else 0" },
     { "vin", SHM_COVER_DIRECT, SHM_SOURCE_YC, YC_VIN, "YC130.desname" },
     { "batteryChargeCount", SHM_COVER_DIRECT, SHM_SOURCE_YC, YC_BATTERY_CHARGE_COUNT, "" },
     { "soc", SHM_COVER_DIRECT, SHM_SOURCE_YC, YC_START_COMPLETE_SOC, "" },
@@ -580,7 +588,7 @@ static const StructFieldCoverage kDataYC21Coverage[] = {
 };
 
 static const StructFieldCoverage kDataYX22Coverage[] = {
-    { "workStatus", SHM_COVER_COMPOSED, SHM_SOURCE_CHARGE_PORT, CHARGE_PORT_FIELD_WORK_STATUS, "from chargePort.WorkStatus" },
+    { "workStatus", SHM_COVER_COMPOSED, SHM_SOURCE_YC, YC_GUN_WORK_STATUS_RAW, "from YC227/YC483: >0x01 and <0x0A => 1, else 0" },
     { "faultBits102to137", SHM_COVER_DIRECT, SHM_SOURCE_YX, YX_EMERGENCY_STOP_FAULT, "direct one-to-one mapping through YX137" },
     { "otherFault", SHM_COVER_COMPOSED, SHM_SOURCE_YX, YX_OTHER_FAULT_VALUE, "YX170.value with auxiliary fault detail in desname" }
 };
