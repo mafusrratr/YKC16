@@ -29,6 +29,7 @@ struct MeterConfig {
     int mqttKeepalive;
     std::string mqttClientId;
     std::string mqttTopicPrefix;
+    int biasNo;
 
     int pollIntervalMs;
     int readTimeoutMs;
@@ -44,6 +45,7 @@ struct MeterConfig {
         , mqttPort(1883)
         , mqttKeepalive(60)
         , mqttTopicPrefix("tcu")
+        , biasNo(0)
         , pollIntervalMs(500)
         , readTimeoutMs(200)
         , retryCount(2)

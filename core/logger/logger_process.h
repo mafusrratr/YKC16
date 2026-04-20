@@ -164,6 +164,7 @@ private:
     int m_mqttKeepalive;
     std::string m_mqttClientId;
     std::string m_mqttTopicPrefix;
+    int m_mqttBiasNo;
     std::atomic<uint64_t> m_mqttSeq;
     
     // BY ZF: 备份相关

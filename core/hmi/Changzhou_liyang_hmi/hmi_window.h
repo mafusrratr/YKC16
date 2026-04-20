@@ -22,6 +22,7 @@ struct HmiConfig {
     int mqttKeepalive;
     std::string mqttClientId;
     std::string mqttTopicPrefix;
+    int biasNo;
     std::string mqttUsername;
     std::string mqttPassword;
 
@@ -34,6 +35,7 @@ struct HmiConfig {
         , mqttKeepalive(60)
         , mqttClientId("tcu_hmi")
         , mqttTopicPrefix("tcu")
+        , biasNo(0)
     {
     }
 };
@@ -99,10 +101,10 @@ private:
 
     void rebuildQrPayload(int gun);
 
-    static bool parseTopicGun(const std::string& topic,
-                              const std::string& prefix,
-                              uint8_t& gun,
-                              std::string& tail);
+    bool parseTopicGun(const std::string& topic,
+                       const std::string& prefix,
+                       uint8_t& gun,
+                       std::string& tail) const;
 
     void drawGunPanel(QPainter& painter, const QRect& rect, const GunUiData& data);
     void drawQrPlaceholder(QPainter& painter, const QRect& rect, const std::string& payload);

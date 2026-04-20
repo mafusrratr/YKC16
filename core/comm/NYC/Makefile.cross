@@ -7,8 +7,6 @@ AR = $(CROSS_COMPILE)ar
 CXXFLAGS = -Wall -O2 -std=c++11
 # BY ZF: 工具链库路径（用于必要时设置运行时搜索路径）。
 TOOLCHAIN_LIB_PATH ?= $(shell dirname $(shell which $(CXX) 2>/dev/null || echo /usr/bin/g++))/../lib
-# BY ZF: 通信进程默认静态链接 libstdc++/libgcc，避免目标机 GLIBCXX 版本不匹配。
-STATIC_STDCPP ?= 1
 # BY ZF: 增加 OpenSSL 头文件目录（本模块内置拷贝）。
 INCLUDES = -I../../base -I../../interfaces -I../../base/mqtt -I../../base/mqtt/include -I../../base/cjson/include -I./openssl/include
 
@@ -24,6 +22,12 @@ else ifeq ($(CROSS_COMPILE),arm-nuvoton-linux-uclibceabi-)
 PLATFORM := nuc980
 endif
 endif
+# BY ZF: 仅 jzq 默认静态链接 libstdc++/libgcc，其他平台默认动态链接以控制体积。
+DEFAULT_STATIC_STDCPP = 0
+ifeq ($(PLATFORM),jzq)
+DEFAULT_STATIC_STDCPP = 1
+endif
+STATIC_STDCPP ?= $(DEFAULT_STATIC_STDCPP)
 PLATFORM_LIB_PATH = $(if $(PLATFORM),$(EXTRA_LIB_PATH)/$(PLATFORM),$(EXTRA_LIB_PATH))
 
 OBJ_DIR = obj

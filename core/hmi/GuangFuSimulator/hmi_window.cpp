@@ -152,6 +152,7 @@ bool HmiWindow::loadConfig()
     m_config.mqttKeepalive = cfg.getInt(section, "mqtt_keepalive", 60);
     m_config.mqttClientId = cfg.getString(section, "mqtt_client_id", "tcu_hmi");
     m_config.mqttTopicPrefix = cfg.getString(section, "mqtt_topic_prefix", "tcu");
+    m_config.biasNo = cfg.getInt(section, "bias_no", 0);
     m_config.mqttUsername = cfg.getString(section, "mqtt_username", "");
     m_config.mqttPassword = cfg.getString(section, "mqtt_password", "");
 
@@ -464,7 +465,7 @@ void HmiWindow::handleMeterData(uint8_t gun, const std::string& payload)
 bool HmiWindow::parseTopicGun(const std::string& topic,
                               const std::string& prefix,
                               uint8_t& gun,
-                              std::string& tail)
+                              std::string& tail) const
 {
     if (topic.find(prefix) != 0U) {
         return false;
@@ -481,7 +482,7 @@ bool HmiWindow::parseTopicGun(const std::string& topic,
         return false;
     }
 
-    const int g = std::atoi(gunStr.c_str());
+    const int g = std::atoi(gunStr.c_str()) - m_config.biasNo;
     if (g < 0 || g > 255) {
         return false;
     }
@@ -722,7 +723,7 @@ void HmiWindow::publishLogicCmd(uint8_t gun, const char* cmd, bool v2g)
     }
 
     std::ostringstream topic;
-    topic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gun) << "/cmd";
+    topic << m_config.mqttTopicPrefix << "/logic/" << (static_cast<int>(gun) + m_config.biasNo) << "/cmd";
     m_mqtt.publish(topic.str(), txt, 1, false);
     cJSON_free(txt);
 
@@ -762,7 +763,7 @@ void HmiWindow::publishOutputVACmd(uint8_t gun, double voltage, double current)
     }
 
     std::ostringstream topic;
-    topic << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gun) << "/cmd";
+    topic << m_config.mqttTopicPrefix << "/pile/" << (static_cast<int>(gun) + m_config.biasNo) << "/cmd";
     const bool ok = m_mqtt.publish(topic.str(), txt, 1, false);
     std::cout << "[HMI][MQTT_TX] topic=" << topic.str()
               << " cmd=outputVA_ctrl"

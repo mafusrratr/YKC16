@@ -144,6 +144,7 @@ bool MeterProcess::loadConfig()
     m_cfg.mqttKeepalive = cfg.getInt(section, "mqtt_keepalive", 60);
     m_cfg.mqttClientId = cfg.getString(section, "mqtt_client_id", "tcu_meter");
     m_cfg.mqttTopicPrefix = cfg.getString(section, "mqtt_topic_prefix", "tcu");
+    m_cfg.biasNo = cfg.getInt(section, "bias_no", 0);
 
     // BY ZF: 运行参数（轮询周期、单次读超时、失败重试次数）
     m_cfg.pollIntervalMs = cfg.getInt(section, "poll_interval_ms", 500);
@@ -362,7 +363,7 @@ void MeterProcess::publishData(uint8_t gun, const MeterReading& value)
 {
     // BY ZF: data topic 只携带计量值，不承载链路状态
     std::ostringstream topic;
-    topic << m_cfg.mqttTopicPrefix << "/meter/" << static_cast<int>(gun) << "/data";
+    topic << m_cfg.mqttTopicPrefix << "/meter/" << (static_cast<int>(gun) + m_cfg.biasNo) << "/data";
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "ts", static_cast<double>(nowMs()));
@@ -393,7 +394,7 @@ void MeterProcess::publishEvent(uint8_t gun, const std::string& event, const std
 {
     // BY ZF: event topic 表达链路状态（online/offline）与原因
     std::ostringstream topic;
-    topic << m_cfg.mqttTopicPrefix << "/meter/" << static_cast<int>(gun) << "/event";
+    topic << m_cfg.mqttTopicPrefix << "/meter/" << (static_cast<int>(gun) + m_cfg.biasNo) << "/event";
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "ts", static_cast<double>(nowMs()));

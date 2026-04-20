@@ -698,6 +698,7 @@ RuntimeWindow::HmiConfig::HmiConfig()
     , mqttKeepalive(60)
     , mqttClientId("tcu_hmi_zsh")
     , mqttTopicPrefix("tcu")
+    , biasNo(0)
     , enableMergeChargeEntry(false)
     , enableVinEntry(false)
     , enableQrEntry(false)
@@ -925,6 +926,7 @@ bool RuntimeWindow::loadConfig()
     m_config.mqttKeepalive = cfg.getInt(section, "mqtt_keepalive", 60);
     m_config.mqttClientId = cfg.getString(section, "mqtt_client_id", "tcu_hmi_zsh");
     m_config.mqttTopicPrefix = cfg.getString(section, "mqtt_topic_prefix", "tcu");
+    m_config.biasNo = cfg.getInt(section, "bias_no", 0);
     m_config.mqttUsername = cfg.getString(section, "mqtt_username", "");
     m_config.mqttPassword = cfg.getString(section, "mqtt_password", "");
     m_config.enableMergeChargeEntry = cfg.getBool(section, "enable_merge_charge_entry", false);
@@ -3270,7 +3272,7 @@ void RuntimeWindow::onAuthorizeCardClicked()
         cJSON_free(payloadRaw);
     }
     cJSON_Delete(root);
-    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun) + "/cmd";
+    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun + m_config.biasNo) + "/cmd";
     if (!m_mqtt.publish(topic, payload.toStdString(), 1, false)) {
         std::cerr << "[HMI] publish request_card_start failed topic=" << topic
                   << " payload=" << payload.toStdString() << std::endl;
@@ -3367,7 +3369,7 @@ bool RuntimeWindow::publishVinRequest(bool mergeCharge)
     }
     cJSON_Delete(root);
 
-    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun) + "/cmd";
+    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun + m_config.biasNo) + "/cmd";
     if (!m_mqtt.publish(topic, payload.toStdString(), 1, false)) {
         std::cerr << "[HMI] publish vin_req failed topic=" << topic
                   << " payload=" << payload.toStdString() << std::endl;
@@ -4474,7 +4476,7 @@ RuntimeWindow::PageId RuntimeWindow::decidePage(const std::vector<GunUiData> &gu
 bool RuntimeWindow::parseTopicGun(const std::string &topic,
                                   const std::string &prefix,
                                   uint8_t &gun,
-                                  std::string &tail)
+                                  std::string &tail) const
 {
     if (topic.find(prefix) != 0U) {
         return false;
@@ -4491,7 +4493,7 @@ bool RuntimeWindow::parseTopicGun(const std::string &topic,
         return false;
     }
 
-    const int g = std::atoi(gunStr.c_str());
+    const int g = std::atoi(gunStr.c_str()) - m_config.biasNo;
     if (g < 0 || g > 255) {
         return false;
     }

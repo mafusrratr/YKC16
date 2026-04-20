@@ -102,6 +102,7 @@ LoggerProcess::LoggerProcess()
     , m_mqttKeepalive(60)
     , m_mqttClientId("tcu_logger")
     , m_mqttTopicPrefix("tcu")
+    , m_mqttBiasNo(0)
     , m_mqttSeq(0)
     , m_backupEnabled(false)
     , m_backupDir()
@@ -135,6 +136,7 @@ bool LoggerProcess::initialize(const char* config)
     m_mqttKeepalive = m_config.getInt("MQTT", "mqtt_keepalive", 60);
     m_mqttClientId = m_config.getString("MQTT", "mqtt_client_id", "tcu_logger");
     m_mqttTopicPrefix = m_config.getString("MQTT", "mqtt_topic_prefix", "tcu");
+    m_mqttBiasNo = m_config.getInt("MQTT", "bias_no", 0);
     // 初始化数据库管理器
     m_dbManager = &DatabaseManager::getInstance();
     m_mainDbPath = m_config.getString("Database", "main_db_path", "/usr/app/data/tcu.db");
@@ -195,12 +197,8 @@ bool LoggerProcess::initialize(const char* config)
     }
     
     // BY ZF: 初始化共享内存
+    // BY ZF: CShm 构造函数内部已经完成 init，这里不重复初始化，避免共享内存重复创建/附着。
     CShm* cshm = new CShm();
-    if (!cshm->init()) {
-        std::cerr << "Failed to initialize shared memory" << std::endl;
-        delete cshm;
-        return false;
-    }
     m_shm = cshm;
     
     // BY ZF: 加载最新计费模型到共享内存
@@ -1286,7 +1284,7 @@ bool LoggerProcess::publishUnconfirmedRecordToLogic(const TradeRecord& rec)
         return false;
     }
     std::ostringstream topic;
-    topic << m_mqttTopicPrefix << "/logger/" << rec.gunNo << "/event";
+    topic << m_mqttTopicPrefix << "/logger/" << (rec.gunNo + m_mqttBiasNo) << "/event";
     const std::string payload = buildUpdateRecordPayload(rec);
     if (payload.empty()) {
         return false;

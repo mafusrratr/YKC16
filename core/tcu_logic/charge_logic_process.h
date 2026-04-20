@@ -30,6 +30,7 @@ struct ChargeLogicConfig {
     int mqttKeepalive;              // MQTT keepalive 秒数
     std::string mqttClientId;       // MQTT client id
     std::string mqttTopicPrefix;    // 主题前缀（默认 tcu）
+    int biasNo;                     // BY ZF: MQTT topic 枪号偏置
     std::string pileConfigPath;     // pile_controller 配置路径（用于复用枪数）
     double prechargeStopMargin;     // 预充触发停机的剩余金额阈值
 
@@ -38,6 +39,7 @@ struct ChargeLogicConfig {
         , mqttPort(1883)
         , mqttKeepalive(60)
         , mqttTopicPrefix("tcu")
+        , biasNo(0)
         , prechargeStopMargin(3.0)
     {}
 };
@@ -94,6 +96,8 @@ private:
         bool hasOtherFault;                     // 是否收到过 otherFault
         bool meterOfflineFaultActive;           // 电表离线故障是否激活
         bool meterOfflineEventLatched;          // 电表离线事件是否已确认生效
+        bool platformOfflineFaultActive;        // 平台离线故障是否激活
+        bool platformOfflineEventLatched;       // 平台离线事件是否已确认生效
         bool pileOfflineFaultActive;            // 主控心跳超时故障是否激活
         bool pileOfflineEventLatched;           // 主控离线事件是否已确认生效
         bool hasMeterValue;                     // 是否收到过电量
@@ -104,6 +108,8 @@ private:
         double lastMeterCurrent;                // 最近电流(A)
         bool hasTotalAmount;                    // 是否有总金额
         double lastTotalAmount;                 // 最近总金额(元)
+        bool chargingMeterVoltageNormalSeen;    // 进入充电后是否曾观测到电表电压>=10V
+        bool meteringAbnormalTriggered;         // 是否已触发电能计量异常停机
         uint8_t meterStableCount;               // 电量连续不变化次数
         bool tcuStopReqSent;                    // 是否已发送 tcu_stop_request
         unsigned int lastOtherFault;            // 最近一次 otherFault 原始值
@@ -181,6 +187,7 @@ private:
         std::chrono::steady_clock::time_point lastMeterValueTime; // 最近电量变化时间
         std::chrono::steady_clock::time_point lastStopCmdTime;    // 最近 stop_charge 下发时间
         std::chrono::steady_clock::time_point meterOfflinePendingTime;    // 电表离线待确认开始时间
+        std::chrono::steady_clock::time_point platformOfflinePendingTime; // 平台离线待确认开始时间
         std::chrono::steady_clock::time_point pileOfflinePendingTime;     // 主控离线待确认开始时间
         GunState()
             : state(STATE_IDLE)
@@ -193,6 +200,8 @@ private:
             , hasOtherFault(false)
             , meterOfflineFaultActive(true)
             , meterOfflineEventLatched(false)
+            , platformOfflineFaultActive(true)
+            , platformOfflineEventLatched(false)
             , pileOfflineFaultActive(true)
             , pileOfflineEventLatched(false)
             , hasMeterValue(false)
@@ -203,6 +212,8 @@ private:
             , lastMeterCurrent(0.0)
             , hasTotalAmount(false)
             , lastTotalAmount(0.0)
+            , chargingMeterVoltageNormalSeen(false)
+            , meteringAbnormalTriggered(false)
             , meterStableCount(0)
             , tcuStopReqSent(false)
             , lastOtherFault(0)
@@ -324,8 +335,10 @@ private:
     int getCurrentMinuteOfDay() const;
     void applyEnergyDeltaToFee(uint8_t gun, double deltaKwh);
     void maybeTriggerTcuStopByPrecharge(uint8_t gun);
+    bool maybeTriggerMeteringAbnormalByLowVoltage(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     bool maybeHandlePlugAndChargeAuthTimeout(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     bool maybeConfirmMeterOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
+    bool maybeConfirmPlatformOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     bool maybeConfirmPileOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     void handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data);
     void handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data, const char* resultSource);

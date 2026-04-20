@@ -708,6 +708,7 @@ CommProcess::CommProcess()
     , m_heartbeatCounter(0)
     , m_sm4SessionKeyReady(false)
     , m_loginCryptoPrepared(false)
+    , m_platformOfflineTimeoutReported(false)
     , m_platformOnlineEventActive(false)
 {
     m_sm4SessionKey.fill(0);
@@ -782,6 +783,7 @@ bool CommProcess::loadConfig()
     m_config.mqttKeepalive = cfg.getInt(section, "mqtt_keepalive", 60);
     m_config.mqttClientId = cfg.getString(section, "mqtt_client_id", "tcu_comm");
     m_config.mqttTopicPrefix = cfg.getString(section, "mqtt_topic_prefix", "tcu");
+    m_config.biasNo = cfg.getInt(section, "bias_no", 0);
     m_config.mqttUsername = cfg.getString(section, "mqtt_username", "");
     m_config.mqttPassword = cfg.getString(section, "mqtt_password", "");
     m_config.masterHost = cfg.getString(section, "master_host", "127.0.0.1");
@@ -929,7 +931,12 @@ bool CommProcess::parseTopic(const std::string& topic, std::string& module, uint
         return false;
     }
     module = seg[1];
-    gun = static_cast<uint8_t>(std::atoi(seg[2].c_str()));
+    const int externalGun = std::atoi(seg[2].c_str());
+    const int localGun = externalGun - m_config.biasNo;
+    if (localGun < 0 || localGun > 255) {
+        return false;
+    }
+    gun = static_cast<uint8_t>(localGun);
     leaf = seg[3];
     return true;
 }
@@ -1876,7 +1883,8 @@ std::string CommProcess::ensureGunField(const std::string& payload, uint8_t gun)
 std::string CommProcess::buildTopic(const char* module, uint8_t gun, const char* leaf) const
 {
     std::ostringstream oss;
-    oss << m_config.mqttTopicPrefix << "/" << module << "/" << static_cast<int>(gun) << "/" << leaf;
+    oss << m_config.mqttTopicPrefix << "/" << module << "/"
+        << (static_cast<int>(gun) + m_config.biasNo) << "/" << leaf;
     return oss.str();
 }
 
@@ -1955,11 +1963,14 @@ bool CommProcess::connectPlatformTcp()
 void CommProcess::closePlatformTcp()
 {
     if (m_tcpFd >= 0) {
+        // BY ZF: 主动双向关闭平台 TCP，避免异常恢复时旧连接残留在半开状态影响重连。
+        ::shutdown(m_tcpFd, SHUT_RDWR);
         ::close(m_tcpFd);
         m_tcpFd = -1;
     }
     m_platformConnected = false;
     m_loginState = LOGIN_IDLE;
+    m_tcpRxCache.clear();
     // BY ZF: 返回登录流程时增加 10 秒限流，避免链路异常时连续刷 0x01 登录请求。
     m_nextLoginAllowedTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     // BY ZF: TCP断开不直接判平台通信故障，统一由心跳接收超时触发 offline 事件。
@@ -3188,13 +3199,23 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
 void CommProcess::maintainPlatformTcp()
 {
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-    const int heartbeatTimeoutSec = std::max(m_config.tcpHeartbeatSec * 3, 90);
-    // BY ZF: 平台通信故障统一按心跳超时判定；即使底层TCP已断，也要按最后一次心跳时间决定是否上报offline。
-    if (m_platformOnlineEventActive &&
-        !m_config.offlineRunMode &&
+    const int heartbeatTimeoutSec = std::max(m_config.tcpHeartbeatSec * 2, 20);
+    // BY ZF: 平台通信故障统一按心跳超时判定，不再要求先处于LOGIN_ONLINE；
+    // BY ZF: 只要命中心跳接收超时就上报一次offline，后续等待online恢复后再重新允许下一次offline。
+    if (!m_config.offlineRunMode &&
+        !m_platformOfflineTimeoutReported &&
         now - m_lastHeartbeatRecv >= std::chrono::seconds(heartbeatTimeoutSec)) {
-        m_platformOnlineEventActive = false;
+        if (m_lastHeartbeatRecv.time_since_epoch().count() == 0) {
+            return;
+        }
+        m_platformOfflineTimeoutReported = true;
+        if (m_platformOnlineEventActive) {
+            m_platformOnlineEventActive = false;
+        }
         publishPlatformLinkEvent(false, "heartbeat_timeout");
+        // BY ZF: 心跳超时视为当前平台会话失效，立即断链并走重连登录，避免旧连接残留卡死。
+        closePlatformTcp();
+        return;
     }
 
     if (!m_platformConnected.load()) {
@@ -3353,6 +3374,14 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         // BY ZF: 仅在全枪均非充电中时更新计费模型，避免充电过程中切换费率。
         for (size_t i = 0; i < m_gunRuntimeData.size(); ++i) {
             if (m_gunRuntimeData[i].gunStatus == 0x03) {
+                // BY ZF: 充电中又收到0x0A，说明平台侧在掉线重登；此时直接切到上线态，避免卡死在费率请求阶段。
+                m_loginState = LOGIN_ONLINE;
+                m_lastHeartbeat = std::chrono::steady_clock::now();
+                m_lastHeartbeatRecv = std::chrono::steady_clock::now();
+                if (!m_platformOnlineEventActive) {
+                    m_platformOnlineEventActive = true;
+                    publishPlatformLinkEvent(true, "relogin_fee_model_ignored_charging");
+                }
                 m_logSender.warn("platform_login_step", "fee_model_ack_ignored_charging");
                 return;
             }
@@ -4411,6 +4440,9 @@ void CommProcess::publishPlatformLinkEvent(bool online, const char* reason)
         online = true;
         reason = "offline_mode";
         m_platformOnlineEventActive = true;
+    }
+    if (online) {
+        m_platformOfflineTimeoutReported = false;
     }
     for (uint8_t gun = 0; gun < m_config.gunCount; ++gun) {
         cJSON* root = cJSON_CreateObject();

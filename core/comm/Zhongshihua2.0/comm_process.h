@@ -27,6 +27,7 @@ struct CommConfig {
     int mqttKeepalive;                // MQTT keepalive 秒
     std::string mqttClientId;         // MQTT clientId
     std::string mqttTopicPrefix;      // 主题前缀（默认 tcu）
+    int biasNo;                       // BY ZF: MQTT topic 枪号偏置
     std::string mqttUsername;         // MQTT 用户名（可空）
     std::string mqttPassword;         // MQTT 密码（可空）
 
@@ -55,6 +56,7 @@ struct CommConfig {
         , mqttPort(1883)
         , mqttKeepalive(60)
         , mqttTopicPrefix("tcu")
+        , biasNo(0)
         , masterPort(9000)
         , tcpReconnectSec(3)
         , chargerType(0x01)
@@ -231,7 +233,7 @@ private:
             , prechargeAmount(0.0)
             , userStatus(0)
             , billingFlag(0)
-            , gunStatus(0)
+            , gunStatus(2)
             , yxWorkStatus(0)
             , yxTotalFault(0)
             , yxTotalAlarm(0)
@@ -413,6 +415,7 @@ private:
     std::vector<std::string> m_lastSetConfigPayloadByGun;                              // 每枪最近setConfig内容
     std::vector<uint8_t> m_runtimeChangedByGun;      // 每枪运行态变化标记（1=有变化待立即上送）
     std::vector<uint8_t> m_forcePluggedChargeInfoByGun; // 登录上线后每枪补发一条“插枪状态”的0x13
+    bool m_platformOfflineTimeoutReported;           // 心跳超时离线事件去重标记
     
     std::vector<uint8_t> m_tcpRxCache;                // TCP 粘包缓存
     std::vector<GunRuntimeData> m_gunRuntimeData;     // 来自 pile/logic 的实时业务数据缓存

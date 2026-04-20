@@ -944,6 +944,7 @@ bool CommProcess::loadConfig()
     m_config.mqttKeepalive = cfg.getInt(section, "mqtt_keepalive", 60);
     m_config.mqttClientId = cfg.getString(section, "mqtt_client_id", "tcu_comm");
     m_config.mqttTopicPrefix = cfg.getString(section, "mqtt_topic_prefix", "tcu");
+    m_config.biasNo = cfg.getInt(section, "bias_no", 0);
     m_config.mqttUsername = cfg.getString(section, "mqtt_username", "");
     m_config.mqttPassword = cfg.getString(section, "mqtt_password", "");
     m_config.masterHost = cfg.getString(section, "master_host", "127.0.0.1");
@@ -1107,7 +1108,12 @@ bool CommProcess::parseTopic(const std::string& topic, std::string& module, uint
         return false;
     }
     module = seg[1];
-    gun = static_cast<uint8_t>(std::atoi(seg[2].c_str()));
+    const int externalGun = std::atoi(seg[2].c_str());
+    const int localGun = externalGun - m_config.biasNo;
+    if (localGun < 0 || localGun > 255) {
+        return false;
+    }
+    gun = static_cast<uint8_t>(localGun);
     leaf = seg[3];
     return true;
 }
@@ -1115,7 +1121,8 @@ bool CommProcess::parseTopic(const std::string& topic, std::string& module, uint
 bool CommProcess::publishPlatCmd(uint8_t gun, const std::string& payload)
 {
     const std::string outTopic = buildTopic("plat", gun, "cmd");
-    return m_mqtt.publish(outTopic, ensureGunField(payload, gun), 1, false);
+    // BY ZF: NYC 平台命令 topic 统一按 QoS 2 发布，确保业务命令可靠投递。
+    return m_mqtt.publish(outTopic, ensureGunField(payload, gun), 2, false);
 }
 
 bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& payload)
@@ -1989,7 +1996,8 @@ std::string CommProcess::ensureGunField(const std::string& payload, uint8_t gun)
 std::string CommProcess::buildTopic(const char* module, uint8_t gun, const char* leaf) const
 {
     std::ostringstream oss;
-    oss << m_config.mqttTopicPrefix << "/" << module << "/" << static_cast<int>(gun) << "/" << leaf;
+    oss << m_config.mqttTopicPrefix << "/" << module << "/"
+        << (static_cast<int>(gun) + m_config.biasNo) << "/" << leaf;
     return oss.str();
 }
 
@@ -2072,11 +2080,14 @@ bool CommProcess::connectPlatformTcp()
 void CommProcess::closePlatformTcp()
 {
     if (m_tcpFd >= 0) {
+        // BY ZF: 主动双向关闭平台 TCP，避免异常恢复时旧连接残留在半开状态影响重连。
+        ::shutdown(m_tcpFd, SHUT_RDWR);
         ::close(m_tcpFd);
         m_tcpFd = -1;
     }
     m_platformConnected = false;
     m_loginState = LOGIN_IDLE;
+    m_tcpRxCache.clear();
     // BY ZF: 返回登录流程时增加 10 秒限流，避免链路异常时连续刷 0x01 登录请求。
     m_nextLoginAllowedTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     // BY ZF: TCP断开不直接判平台通信故障，统一由心跳接收超时触发 offline 事件。
@@ -2340,16 +2351,31 @@ bool CommProcess::tryUpdateRsaPubKeyFromResponse(const uint8_t* body, size_t bod
         return false;
     }
 
-    std::string key(reinterpret_cast<const char*>(body + off), keyLen);
-    while (!key.empty() && (key[0] == '\0' || std::isspace(static_cast<unsigned char>(key[0])) != 0)) {
-        key.erase(key.begin());
-    }
-    while (!key.empty() && (key[key.size() - 1U] == '\0' ||
-                            std::isspace(static_cast<unsigned char>(key[key.size() - 1U])) != 0)) {
-        key.erase(key.end() - 1);
-    }
-    if (key.empty()) {
-        return false;
+    std::string key;
+    {
+        const unsigned char* p = body + off;
+        RSA* rsa = d2i_RSAPublicKey(nullptr, &p, static_cast<long>(keyLen));
+        if (!rsa) {
+            p = body + off;
+            rsa = d2i_RSA_PUBKEY(nullptr, &p, static_cast<long>(keyLen));
+        }
+        if (rsa) {
+            // BY ZF: 平台 0x01 返回的是二进制 DER 公钥，统一转成 HEX 文本保存到运行态和 ini。
+            key = toHex(body + off, keyLen);
+            RSA_free(rsa);
+        } else {
+            key.assign(reinterpret_cast<const char*>(body + off), keyLen);
+            while (!key.empty() && (key[0] == '\0' || std::isspace(static_cast<unsigned char>(key[0])) != 0)) {
+                key.erase(key.begin());
+            }
+            while (!key.empty() && (key[key.size() - 1U] == '\0' ||
+                                    std::isspace(static_cast<unsigned char>(key[key.size() - 1U])) != 0)) {
+                key.erase(key.end() - 1);
+            }
+            if (key.empty()) {
+                return false;
+            }
+        }
     }
 
     // BY ZF: 先实际加载一次，避免把异常内容写入运行态和配置。
@@ -2404,7 +2430,7 @@ std::vector<uint8_t> CommProcess::buildPlatformFrameEx(uint8_t cmd, const std::v
             : 0x03;
     const uint8_t chargerAddr = (chargerAddrOverride >= 0)
             ? static_cast<uint8_t>(chargerAddrOverride & 0xFF)
-            : m_config.chargerAddress;
+            : 0;
 
     std::vector<uint8_t> frame;
     frame.reserve(static_cast<size_t>(3U + totalLen));
@@ -3175,7 +3201,7 @@ void CommProcess::reportTelesignalPeriodic()
     // BY ZF: 保留充电过程中 0x23/0x24 周期业务上送，不与 0x12/0x17 互相耦合。
     for (uint8_t gun = 0; gun < static_cast<uint8_t>(std::min(m_gunRuntimeData.size(), m_lastChargeInfoReportByGun.size())); ++gun) {
         const bool charging = (m_gunRuntimeData[gun].gunStatus == 0x03);
-        if (!charging && now - m_lastChargeInfoReportByGun[gun] < std::chrono::seconds(15)) {
+        if (now - m_lastChargeInfoReportByGun[gun] < std::chrono::seconds(15)) {
             continue;
         }
         if (charging) {
@@ -3241,7 +3267,8 @@ void CommProcess::driveLoginStateMachine(const std::chrono::steady_clock::time_p
         break;
     case LOGIN_REQ_FEE_MODEL: {
         if (now - m_lastLoginAction >= std::chrono::seconds(m_config.loginRetrySec)) {
-            if (sendPlatformFrame(kCmdFeeModelReq, buildFeeModelRequestBody(0x01))) {
+            if (sendPlatformFrameEx(kCmdFeeModelReq, buildFeeModelRequestBody(0x01), -1,
+                                    0x03, 0x01, 0x00)) {
                 m_logSender.info("platform_login_step", "fee_model_req_sent");
             } else {
                 closePlatformTcp();

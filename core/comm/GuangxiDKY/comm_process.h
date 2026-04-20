@@ -34,6 +34,7 @@ private:
         int mqttKeepalive;
         std::string mqttClientId;
         std::string mqttTopicPrefix;
+        int biasNo;
         std::string mqttUsername;
         std::string mqttPassword;
 
@@ -57,6 +58,7 @@ private:
             , mqttPort(1883)
             , mqttKeepalive(60)
             , mqttTopicPrefix("tcu")
+            , biasNo(0)
             , serialDevice("/dev/ttyS4")
             , serialBaudrate(9600)
             , serialDataBits(8)

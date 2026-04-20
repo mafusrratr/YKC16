@@ -164,6 +164,7 @@ bool PileControllerProcess::loadGunConfigs()
     m_config.mqttKeepalive = config.getInt("PileController", "mqtt_keepalive", 60);
     m_config.mqttClientId = config.getString("PileController", "mqtt_client_id", "pile_controller");
     m_config.mqttTopicPrefix = config.getString("PileController", "mqtt_topic_prefix", "tcu");
+    m_config.biasNo = config.getInt("PileController", "bias_no", 0);
     
     std::cout << "[PileController] Loaded config for " << static_cast<int>(m_config.gunCount) << " gun(s)" << std::endl;
     return true;
@@ -756,7 +757,7 @@ bool PileControllerProcess::initMqtt()
         for (uint8_t i = 0; i < m_config.gunCount; i++) {
             uint8_t gunNo = m_config.gunConfigs[i].gunNo;
             std::ostringstream t;
-            t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo - 1) << "/cmd";
+            t << m_config.mqttTopicPrefix << "/pile/" << (static_cast<int>(gunNo - 1) + m_config.biasNo) << "/cmd";
             m_mqtt.subscribe(t.str(), 1);
         }
         // BY ZF: MQTT重连后补发当前主控通信状态（retain），避免 retain 状态丢失。
@@ -787,7 +788,7 @@ bool PileControllerProcess::initMqtt()
     for (uint8_t i = 0; i < m_config.gunCount; i++) {
         uint8_t gunNo = m_config.gunConfigs[i].gunNo;
         std::ostringstream t;
-        t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo - 1) << "/cmd";
+        t << m_config.mqttTopicPrefix << "/pile/" << (static_cast<int>(gunNo - 1) + m_config.biasNo) << "/cmd";
         m_mqtt.subscribe(t.str(), 1);
     }
     return true;
@@ -796,14 +797,14 @@ bool PileControllerProcess::initMqtt()
 void PileControllerProcess::publishData(uint8_t gunNo, const std::string& type, const std::string& payload, bool retain)
 {
     std::ostringstream t;
-    t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo) << "/data";
+    t << m_config.mqttTopicPrefix << "/pile/" << (static_cast<int>(gunNo) + m_config.biasNo) << "/data";
     m_mqtt.publish(t.str(), payload, 0, retain);
 }
 
 void PileControllerProcess::publishCmdUpset(uint8_t gunNo, const std::string& payload, bool retain)
 {
     std::ostringstream t;
-    t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo) << "/event";
+    t << m_config.mqttTopicPrefix << "/pile/" << (static_cast<int>(gunNo) + m_config.biasNo) << "/event";
     m_mqtt.publish(t.str(), payload, 2, retain);
 }
 
@@ -1040,9 +1041,9 @@ bool PileControllerProcess::parseGunFromTopic(const std::string& topic, int& out
     }
     std::string gunStr = topic.substr(start, end - start);
     try {
-        outGun = std::stoi(gunStr);
+        outGun = std::stoi(gunStr) - m_config.biasNo;
     } catch (...) {
         return false;
     }
-    return true;
+    return outGun >= 0;
 }

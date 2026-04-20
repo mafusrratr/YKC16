@@ -167,6 +167,9 @@ install.tar.gz (解压后)
 
 详细说明：参见 [update_handle/config/README.md](update_handle/config/README.md)
 
+
+##特殊脚本
+./patch_run_sh.sh /usr/app/run.sh 用于对中石化2.0项目的网线方式runsh启动脚本修改
 ## 项目特点
 
 1. **模块化设计**：打包和更新分离，职责清晰
@@ -193,3 +196,4 @@ install.tar.gz (解压后)
 ## 许可证
 
 项目开发中...
+

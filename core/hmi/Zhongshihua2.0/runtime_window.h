@@ -94,6 +94,7 @@ public:
         int mqttKeepalive;
         std::string mqttClientId;
         std::string mqttTopicPrefix;
+        int biasNo;
         std::string mqttUsername;
         std::string mqttPassword;
         bool enableMergeChargeEntry;
@@ -252,10 +253,10 @@ private:
     PageId decidePage(const std::vector<GunUiData> &guns, int &focusGun) const;
     void feedWatchdog();
 
-    static bool parseTopicGun(const std::string &topic,
-                              const std::string &prefix,
-                              uint8_t &gun,
-                              std::string &tail);
+    bool parseTopicGun(const std::string &topic,
+                       const std::string &prefix,
+                       uint8_t &gun,
+                       std::string &tail) const;
 
 private:
     HmiConfig m_config;

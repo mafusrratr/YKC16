@@ -6,24 +6,39 @@ CXX = $(CROSS_COMPILE)g++
 CXXFLAGS = -pipe -std=c++0x -O2 -D_REENTRANT -w
 # BY ZF: 工具链库路径（可通过环境变量 TOOLCHAIN_LIB_PATH 指定，用于解决 libstdc++ 版本问题）
 TOOLCHAIN_LIB_PATH ?= $(shell dirname $(shell which $(CXX) 2>/dev/null || echo /usr/bin/g++))/../lib
-# BY ZF: 是否静态链接 libstdc++（可通过环境变量 STATIC_STDCPP=1 启用，解决版本不匹配问题）
-STATIC_STDCPP ?= 0
 
 # BY ZF: 外部库路径配置（可通过环境变量 EXTRA_LIB_PATH 覆盖）
 EXTRA_LIB_PATH ?= $(shell cd ../.. && pwd)/extraLib
 # BY ZF: 平台特定库路径（可通过环境变量 PLATFORM 指定，如 jzq/nuc980/imx6ul）
 PLATFORM ?= 
+ifeq ($(PLATFORM),)
+ifeq ($(CROSS_COMPILE),arm-none-linux-gnueabi-)
+PLATFORM := jzq
+else ifeq ($(CROSS_COMPILE),arm-linux-gnueabihf-)
+PLATFORM := imx6ul
+else ifeq ($(CROSS_COMPILE),arm-nuvoton-linux-uclibceabi-)
+PLATFORM := nuc980
+endif
+endif
 PLATFORM_LIB_PATH = $(if $(PLATFORM),$(EXTRA_LIB_PATH)/$(PLATFORM),$(EXTRA_LIB_PATH))
+# BY ZF: 仅 jzq 默认静态链接 libstdc++/libgcc，其他平台默认动态链接以控制体积。
+DEFAULT_STATIC_STDCPP = 0
+ifeq ($(PLATFORM),jzq)
+DEFAULT_STATIC_STDCPP = 1
+else ifeq ($(CROSS_COMPILE),arm-none-linux-gnueabi-)
+DEFAULT_STATIC_STDCPP = 1
+endif
+STATIC_STDCPP ?= $(DEFAULT_STATIC_STDCPP)
 # BY ZF: libevsshm.so 统一从 extraLib 路径查找，不再依赖 libv2gshm 输出目录。
 LIBDIRS = -L$(PLATFORM_LIB_PATH) -L$(EXTRA_LIB_PATH)
 # BY ZF: 运行时库搜索路径（rpath），确保运行时能找到共享库
 RPATH = -Wl,-rpath,$(PLATFORM_LIB_PATH):$(EXTRA_LIB_PATH):$(TOOLCHAIN_LIB_PATH):/usr/lib:/lib
 # BY ZF: 链接库（添加 -ldl 因为 sqlite3 需要 dlopen/dlsym）
 LIBS = -lpthread -lsqlite3 -levsshm -ldl -lmosquitto -lcjson
-# BY ZF: 如果启用静态链接 libstdc++，解决版本不匹配问题（会增加文件大小）
+# BY ZF: 如果启用静态链接 libstdc++/libgcc，解决版本不匹配问题（会增加文件大小）
 ifeq ($(STATIC_STDCPP),1)
-    LIBS += -static-libstdc++
-    CXXFLAGS += -static-libstdc++
+    LIBS += -static-libstdc++ -static-libgcc
+    CXXFLAGS += -static-libstdc++ -static-libgcc
 endif
 
 # 包含路径

@@ -27,6 +27,7 @@ struct CommConfig {
     int mqttKeepalive;                // MQTT keepalive 秒
     std::string mqttClientId;         // MQTT clientId
     std::string mqttTopicPrefix;      // 主题前缀（默认 tcu）
+    int biasNo;                       // BY ZF: MQTT topic 枪号偏置
     std::string mqttUsername;         // MQTT 用户名（可空）
     std::string mqttPassword;         // MQTT 密码（可空）
 
@@ -58,6 +59,7 @@ struct CommConfig {
         , mqttPort(1883)
         , mqttKeepalive(60)
         , mqttTopicPrefix("tcu")
+        , biasNo(0)
         , masterPort(9000)
         , tcpReconnectSec(3)
         , chargerAddress(0x01)

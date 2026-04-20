@@ -38,6 +38,23 @@ static bool getJsonNumber(cJSON* obj, const char* key, double& out)
     return true;
 }
 
+static void printPileCmdTrace(int gun, const char* cmdName, const std::string& topic, const std::string& payload)
+{
+    std::cout << "[SHM2CCU] pile cmd received, gun=" << gun
+              << ", cmd=" << (cmdName == nullptr ? "unknown" : cmdName)
+              << ", topic=" << topic
+              << ", payload=" << payload
+              << std::endl;
+}
+
+static void printPileCmdRawTrace(int gun, const std::string& topic, const std::string& payload)
+{
+    std::cout << "[SHM2CCU] pile cmd raw message, gun=" << gun
+              << ", topic=" << topic
+              << ", payload=" << payload
+              << std::endl;
+}
+
 }
 
 PileControllerProcess::PileControllerProcess()
@@ -114,6 +131,7 @@ bool PileControllerProcess::loadGunConfigs()
     m_config.mqttKeepalive = config.getInt("PileController", "mqtt_keepalive", 60);
     m_config.mqttClientId = config.getString("PileController", "mqtt_client_id", "shm2ccu");
     m_config.mqttTopicPrefix = config.getString("PileController", "mqtt_topic_prefix", "tcu");
+    m_config.biasNo = config.getInt("PileController", "bias_no", 0);
     return true;
 }
 
@@ -481,13 +499,13 @@ bool PileControllerProcess::initMqtt()
         for (uint8_t i = 0; i < m_config.gunCount; ++i) {
             uint8_t gunNo = m_config.gunConfigs[i].gunNo;
             std::ostringstream t;
-            t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo - 1) << "/cmd";
+            t << m_config.mqttTopicPrefix << "/pile/" << (static_cast<int>(gunNo - 1) + m_config.biasNo) << "/cmd";
             m_mqtt.subscribe(t.str(), 1);
             std::ostringstream feeTopic;
-            feeTopic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gunNo - 1) << "/feeData";
+            feeTopic << m_config.mqttTopicPrefix << "/logic/" << (static_cast<int>(gunNo - 1) + m_config.biasNo) << "/feeData";
             m_mqtt.subscribe(feeTopic.str(), 1);
             std::ostringstream logicEventTopic;
-            logicEventTopic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gunNo - 1) << "/event";
+            logicEventTopic << m_config.mqttTopicPrefix << "/logic/" << (static_cast<int>(gunNo - 1) + m_config.biasNo) << "/event";
             m_mqtt.subscribe(logicEventTopic.str(), 2);
         }
     });
@@ -506,14 +524,14 @@ bool PileControllerProcess::initMqtt()
 void PileControllerProcess::publishData(uint8_t gunNo, const std::string& type, const std::string& payload, bool retain)
 {
     std::ostringstream t;
-    t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo) << "/data";
+    t << m_config.mqttTopicPrefix << "/pile/" << (static_cast<int>(gunNo) + m_config.biasNo) << "/data";
     m_mqtt.publish(t.str(), payload, 0, retain);
 }
 
 void PileControllerProcess::publishCmdUpset(uint8_t gunNo, const std::string& payload, bool retain)
 {
     std::ostringstream t;
-    t << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gunNo) << "/event";
+    t << m_config.mqttTopicPrefix << "/pile/" << (static_cast<int>(gunNo) + m_config.biasNo) << "/event";
     m_mqtt.publish(t.str(), payload, 2, retain);
 }
 
@@ -531,8 +549,20 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
         return;
     }
 
+    const bool isPileCmdTopic = topic.find("/pile/") != std::string::npos
+                             && topic.find("/cmd") != std::string::npos;
+    if (isPileCmdTopic) {
+        // BY ZF: 先打印原始 pile cmd 报文，便于排查 stop/start 在 JSON 解析前就被过滤的情况。
+        printPileCmdRawTrace(gun, topic, payload);
+    }
+
     cJSON* root = cJSON_Parse(payload.c_str());
     if (root == nullptr) {
+        if (isPileCmdTopic) {
+            std::cout << "[SHM2CCU] pile cmd json parse failed, gun=" << gun
+                      << ", topic=" << topic
+                      << std::endl;
+        }
         return;
     }
     cJSON* cmd = cJSON_GetObjectItem(root, "cmd");
@@ -548,12 +578,19 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
         return;
     }
     if (topic.find("/cmd") == std::string::npos || !cJSON_IsString(cmd)) {
+        if (isPileCmdTopic) {
+            std::cout << "[SHM2CCU] pile cmd ignored: missing string field `cmd`, gun=" << gun
+                      << ", topic=" << topic
+                      << std::endl;
+        }
         cJSON_Delete(root);
         return;
     }
     const std::string cmdStr = cmd->valuestring;
 
     if (cmdStr == "start_charge") {
+        // BY ZF: 启动命令收包打印入口，方便联调时确认 pile cmd 已进入 SHM2CCU。
+        printPileCmdTrace(gun, "start_charge", topic, payload);
         TCU2CCU_CmdStartChargeData startData;
         memset(&startData, 0, sizeof(startData));
         startData.loadControlSwitch = 0x02;
@@ -585,6 +622,8 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
             publishCmdUpset(static_cast<uint8_t>(gun), ack);
         }
     } else if (cmdStr == "stop_charge") {
+        // BY ZF: 停机命令收包打印入口，方便联调时确认 pile cmd 已进入 SHM2CCU。
+        printPileCmdTrace(gun, "stop_charge", topic, payload);
         TCU2CCU_CmdStopChargeData stopData;
         memset(&stopData, 0, sizeof(stopData));
         stopData.stopReason = 0x01;
@@ -641,6 +680,11 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
             shm->setPowerAdjustData(&adjustData);
             shm->powerAdjust();
         }
+    } else if (isPileCmdTopic) {
+        std::cout << "[SHM2CCU] pile cmd ignored: unsupported cmd=" << cmdStr
+                  << ", gun=" << gun
+                  << ", topic=" << topic
+                  << std::endl;
     }
 
     cJSON_Delete(root);
@@ -738,8 +782,8 @@ bool PileControllerProcess::parseGunFromTopic(const std::string& topic, int& out
             return false;
         }
         try {
-            outGun = std::stoi(topic.substr(start, end - start));
-            return true;
+            outGun = std::stoi(topic.substr(start, end - start)) - m_config.biasNo;
+            return outGun >= 0;
         } catch (...) {
             return false;
         }

@@ -491,7 +491,9 @@ static void setRestrictedAboutTabsEnabled(QTabWidget *tabWidget, bool enabled)
             continue;
         }
         const QString pageName = page->objectName();
-        if (pageName == QString::fromUtf8("tab_10") || pageName == QString::fromUtf8("tab_4")) {
+        if (pageName == QString::fromUtf8("tab_10") ||
+            pageName == QString::fromUtf8("tab_4") ||
+            pageName == QString::fromUtf8("tab_7")) {
             tabWidget->setTabEnabled(i, enabled);
         }
     }
@@ -664,6 +666,7 @@ RuntimeWindow::HmiConfig::HmiConfig()
     , mqttKeepalive(60)
     , mqttClientId("tcu_hmi_zsh")
     , mqttTopicPrefix("tcu")
+    , biasNo(0)
     , enableMergeChargeEntry(false)
     , enableVinEntry(false)
     , enableQrEntry(false)
@@ -890,6 +893,7 @@ bool RuntimeWindow::loadConfig()
     m_config.mqttKeepalive = cfg.getInt(section, "mqtt_keepalive", 60);
     m_config.mqttClientId = cfg.getString(section, "mqtt_client_id", "tcu_hmi_zsh");
     m_config.mqttTopicPrefix = cfg.getString(section, "mqtt_topic_prefix", "tcu");
+    m_config.biasNo = cfg.getInt(section, "bias_no", 0);
     m_config.mqttUsername = cfg.getString(section, "mqtt_username", "");
     m_config.mqttPassword = cfg.getString(section, "mqtt_password", "");
     m_config.enableMergeChargeEntry = cfg.getBool(section, "enable_merge_charge_entry", false);
@@ -1865,6 +1869,16 @@ void RuntimeWindow::setupChargeRecordTab()
         m_aboutTabWidget->setTabText(idx, QString::fromUtf8("充电记录"));
     }
 
+    QWidget *permissionTab = m_aboutPage->findChild<QWidget *>("tab_6");
+    QWidget *configTab = m_aboutPage->findChild<QWidget *>("tab_4");
+    const int permissionIdx = permissionTab ? m_aboutTabWidget->indexOf(permissionTab) : -1;
+    const int configIdx = configTab ? m_aboutTabWidget->indexOf(configTab) : -1;
+    idx = m_aboutTabWidget->indexOf(aTab);
+    if (idx >= 0 && permissionIdx >= 0 && configIdx >= 0 && permissionIdx < configIdx && idx != permissionIdx + 1) {
+        m_aboutTabWidget->removeTab(idx);
+        m_aboutTabWidget->insertTab(permissionIdx + 1, aTab, QString::fromUtf8("充电记录"));
+    }
+
     QList<QWidget *> tabChildren;
     const QObjectList tabObjects = aTab->children();
     int i = 0;
@@ -2546,7 +2560,9 @@ void RuntimeWindow::handleAboutTabChanged(int index)
     }
 
     const QString tabName = currentTab->objectName();
-    const bool restricted = (tabName == QString::fromUtf8("tab_10") || tabName == QString::fromUtf8("tab_4"));
+    const bool restricted = (tabName == QString::fromUtf8("tab_10") ||
+                             tabName == QString::fromUtf8("tab_4") ||
+                             tabName == QString::fromUtf8("tab_7"));
     if (!restricted || m_aboutPermissionGranted) {
         if (tabName == QString::fromUtf8("tab_10")) {
             scanExternalStorage();
@@ -3222,7 +3238,7 @@ void RuntimeWindow::onAuthorizeCardClicked()
         cJSON_free(payloadRaw);
     }
     cJSON_Delete(root);
-    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun) + "/cmd";
+    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun + m_config.biasNo) + "/cmd";
     if (!m_mqtt.publish(topic, payload.toStdString(), 1, false)) {
         std::cerr << "[HMI] publish request_card_start failed topic=" << topic
                   << " payload=" << payload.toStdString() << std::endl;
@@ -3319,7 +3335,7 @@ bool RuntimeWindow::publishVinRequest(bool mergeCharge)
     }
     cJSON_Delete(root);
 
-    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun) + "/cmd";
+    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun + m_config.biasNo) + "/cmd";
     if (!m_mqtt.publish(topic, payload.toStdString(), 1, false)) {
         std::cerr << "[HMI] publish vin_req failed topic=" << topic
                   << " payload=" << payload.toStdString() << std::endl;
@@ -4411,7 +4427,7 @@ RuntimeWindow::PageId RuntimeWindow::decidePage(const std::vector<GunUiData> &gu
 bool RuntimeWindow::parseTopicGun(const std::string &topic,
                                   const std::string &prefix,
                                   uint8_t &gun,
-                                  std::string &tail)
+                                  std::string &tail) const
 {
     if (topic.find(prefix) != 0U) {
         return false;
@@ -4428,7 +4444,7 @@ bool RuntimeWindow::parseTopicGun(const std::string &topic,
         return false;
     }
 
-    const int g = std::atoi(gunStr.c_str());
+    const int g = std::atoi(gunStr.c_str()) - m_config.biasNo;
     if (g < 0 || g > 255) {
         return false;
     }

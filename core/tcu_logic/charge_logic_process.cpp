@@ -34,7 +34,7 @@ namespace {
         }
     }
 
-    bool parseTopicGun(const std::string& topic, const std::string& prefix, uint8_t& gunOut, std::string& tailOut) {
+    bool parseTopicGun(const std::string& topic, const std::string& prefix, int biasNo, uint8_t& gunOut, std::string& tailOut) {
         if (topic.find(prefix) != 0) {
             return false;
         }
@@ -45,7 +45,12 @@ namespace {
         }
         std::string gunStr = rest.substr(0, slash);
         tailOut = rest.substr(slash + 1);
-        gunOut = static_cast<uint8_t>(std::stoi(gunStr));
+        const int externalGun = std::stoi(gunStr);
+        const int localGun = externalGun - biasNo;
+        if (localGun < 0 || localGun > 255) {
+            return false;
+        }
+        gunOut = static_cast<uint8_t>(localGun);
         return true;
     }
 
@@ -309,6 +314,15 @@ bool ChargeLogicProcess::doInitialize()
     m_logSender.requestUnconfirmedTradeRecords(100);
     // BY ZF: 初始化完成后写入一条 info 日志，便于联调确认进程已就绪
     m_logSender.info("init_completed", std::string("gun_count=") + std::to_string(m_config.gunCount));
+    // BY ZF: 初始化完成后主动上报一次当前枪状态，避免订阅方在未发生状态迁移前无法获知 logic 当前处于 IDLE。
+    for (size_t gun = 0; gun < m_gunStates.size(); ++gun) {
+        cJSON* data = cJSON_CreateObject();
+        cJSON_AddStringToObject(data, "from", "NULL");
+        cJSON_AddStringToObject(data, "to", stateToString(m_gunStates[gun].state));
+        cJSON_AddStringToObject(data, "reason", "logic_init");
+        publishLogicEvent(static_cast<uint8_t>(gun), "state_change", data);
+        cJSON_Delete(data);
+    }
     return true;
 }
 
@@ -333,11 +347,17 @@ void ChargeLogicProcess::doRun()
         if (maybeConfirmMeterOfflineFault(static_cast<uint8_t>(i), now)) {
             continue;
         }
+        if (maybeConfirmPlatformOfflineFault(static_cast<uint8_t>(i), now)) {
+            continue;
+        }
         if (maybeConfirmPileOfflineFault(static_cast<uint8_t>(i), now)) {
             continue;
         }
         if (gs.state == STATE_CHARGING) {
             maybeTriggerTcuStopByPrecharge(static_cast<uint8_t>(i));
+            if (maybeTriggerMeteringAbnormalByLowVoltage(static_cast<uint8_t>(i), now)) {
+                continue;
+            }
             // BY ZF: feeData 保底机制，充电中即便电量未变化也至少 15 秒发布一次。
             if (gs.lastFeeDataPublishTime.time_since_epoch().count() == 0 ||
                 (now - gs.lastFeeDataPublishTime) >= std::chrono::seconds(15)) {
@@ -420,6 +440,7 @@ bool ChargeLogicProcess::loadConfig()
     m_config.mqttKeepalive = cfg.getInt("ChargeLogic", "mqtt_keepalive", 60);
     m_config.mqttClientId = cfg.getString("ChargeLogic", "mqtt_client_id", "tcu_logic");
     m_config.mqttTopicPrefix = cfg.getString("ChargeLogic", "mqtt_topic_prefix", "tcu");
+    m_config.biasNo = cfg.getInt("ChargeLogic", "bias_no", 0);
     m_config.gunCount = static_cast<uint8_t>(cfg.getInt("ChargeLogic", "gun_count", 1));
     m_config.pileConfigPath = cfg.getString("ChargeLogic", "pile_config_path", "");
     m_config.prechargeStopMargin = std::atof(
@@ -447,14 +468,15 @@ bool ChargeLogicProcess::initMqtt()
         }
         for (uint8_t gun = 0; gun < m_config.gunCount; gun++) {
             std::ostringstream t1, t2, t2e, t3, t4, t5, t6, t7;
-            t1 << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gun) << "/cmd";
-            t2 << m_config.mqttTopicPrefix << "/plat/" << static_cast<int>(gun) << "/cmd";
-            t2e << m_config.mqttTopicPrefix << "/plat/" << static_cast<int>(gun) << "/event";
-            t3 << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gun) << "/event";
-            t4 << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gun) << "/data";
-            t5 << m_config.mqttTopicPrefix << "/meter/" << static_cast<int>(gun) << "/data";
-            t6 << m_config.mqttTopicPrefix << "/logger/" << static_cast<int>(gun) << "/event";
-            t7 << m_config.mqttTopicPrefix << "/meter/" << static_cast<int>(gun) << "/event";
+            const int topicGun = static_cast<int>(gun) + m_config.biasNo;
+            t1 << m_config.mqttTopicPrefix << "/logic/" << topicGun << "/cmd";
+            t2 << m_config.mqttTopicPrefix << "/plat/" << topicGun << "/cmd";
+            t2e << m_config.mqttTopicPrefix << "/plat/" << topicGun << "/event";
+            t3 << m_config.mqttTopicPrefix << "/pile/" << topicGun << "/event";
+            t4 << m_config.mqttTopicPrefix << "/pile/" << topicGun << "/data";
+            t5 << m_config.mqttTopicPrefix << "/meter/" << topicGun << "/data";
+            t6 << m_config.mqttTopicPrefix << "/logger/" << topicGun << "/event";
+            t7 << m_config.mqttTopicPrefix << "/meter/" << topicGun << "/event";
             m_mqtt.subscribe(t1.str(), 1);
             m_mqtt.subscribe(t2.str(), 1);
             m_mqtt.subscribe(t2e.str(), 1);
@@ -493,19 +515,19 @@ void ChargeLogicProcess::onMqttMessage(const std::string& topic, const std::stri
         return;
     }
 
-    if (parseTopicGun(topic, prefixLogic, gun, tail) && tail == "cmd") {
+    if (parseTopicGun(topic, prefixLogic, m_config.biasNo, gun, tail) && tail == "cmd") {
         const char* cmd = getString(root, "cmd");
         cJSON* data = cJSON_GetObjectItem(root, "data");
         handleLogicCmd(gun, cmd, data);
-    } else if (parseTopicGun(topic, prefixPlat, gun, tail) && tail == "cmd") {
+    } else if (parseTopicGun(topic, prefixPlat, m_config.biasNo, gun, tail) && tail == "cmd") {
         const char* cmd = getString(root, "cmd");
         cJSON* data = cJSON_GetObjectItem(root, "data");
         handlePlatCmd(gun, cmd, data);
-    } else if (parseTopicGun(topic, prefixPlat, gun, tail) && tail == "event") {
+    } else if (parseTopicGun(topic, prefixPlat, m_config.biasNo, gun, tail) && tail == "event") {
         const char* event = getString(root, "event");
         cJSON* data = cJSON_GetObjectItem(root, "data");
         handlePlatEvent(gun, event ? event : "", data);
-    } else if (parseTopicGun(topic, prefixPile, gun, tail)) {
+    } else if (parseTopicGun(topic, prefixPile, m_config.biasNo, gun, tail)) {
         if (tail == "event") {
             const char* type = getString(root, "type");
             cJSON* data = cJSON_GetObjectItem(root, "data");
@@ -515,7 +537,7 @@ void ChargeLogicProcess::onMqttMessage(const std::string& topic, const std::stri
             cJSON* data = cJSON_GetObjectItem(root, "data");
             handlePileData(gun, type, data);
         }
-    } else if (parseTopicGun(topic, prefixLogger, gun, tail) && tail == "event") {
+    } else if (parseTopicGun(topic, prefixLogger, m_config.biasNo, gun, tail) && tail == "event") {
         const char* event = getString(root, "event");
         cJSON* data = cJSON_GetObjectItem(root, "data");
         if (event && std::strcmp(event, "unconfirmed_record") == 0) {
@@ -531,7 +553,7 @@ void ChargeLogicProcess::onMqttMessage(const std::string& topic, const std::stri
                 }
             }
         }
-    } else if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/meter/", gun, tail)) {
+    } else if (parseTopicGun(topic, m_config.mqttTopicPrefix + "/meter/", m_config.biasNo, gun, tail)) {
         if (tail == "data") {
             cJSON* data = cJSON_GetObjectItem(root, "data");
             handleMeterData(gun, data);
@@ -873,7 +895,7 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
         gs.pileOfflineFaultActive = false;
         gs.pileOfflineEventLatched = false;
         gs.pileOfflinePendingTime = std::chrono::steady_clock::time_point();
-        if (gs.state == STATE_ERROR && !gs.meterOfflineFaultActive) {
+        if (gs.state == STATE_ERROR && !gs.meterOfflineFaultActive && !gs.platformOfflineFaultActive) {
             if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
                 transitionTo(gun, STATE_PREPARE, "pile_online");
             } else {
@@ -1015,6 +1037,9 @@ void ChargeLogicProcess::handleMeterData(uint8_t gun, cJSON* data)
         getNumber(data, "outputVoltage", voltage)) {
         gs.lastMeterVoltage = voltage;
         gs.hasMeterVoltage = true;
+        if (gs.state == STATE_CHARGING && voltage >= 10.0) {
+            gs.chargingMeterVoltageNormalSeen = true;
+        }
     }
 
     // BY ZF: 电表电流兼容字段解析
@@ -1064,7 +1089,7 @@ void ChargeLogicProcess::handleMeterEvent(uint8_t gun, const std::string& event,
         gs.meterOfflineFaultActive = false;
         gs.meterOfflineEventLatched = false;
         gs.meterOfflinePendingTime = std::chrono::steady_clock::time_point();
-        if (gs.state == STATE_ERROR && !gs.pileOfflineFaultActive) {
+        if (gs.state == STATE_ERROR && !gs.platformOfflineFaultActive && !gs.pileOfflineFaultActive) {
             if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
                 transitionTo(gun, STATE_PREPARE, "meter_online");
             } else {
@@ -1090,8 +1115,29 @@ void ChargeLogicProcess::handlePlatEvent(uint8_t gun, const std::string& event, 
     }
 
     (void)data;
-    // BY ZF: 平台在线/离线仅供显示及平台链路自身状态使用，logic 不再把该事件判定为故障。
-    return;
+    GunState& gs = m_gunStates[gun];
+    if (event == "platform_online") {
+        // BY ZF: 平台恢复在线后清除平台离线故障态；若当前处于 ERROR，则按链路状态恢复到 IDLE/PREPARE。
+        gs.platformOfflineFaultActive = false;
+        gs.platformOfflineEventLatched = false;
+        gs.platformOfflinePendingTime = std::chrono::steady_clock::time_point();
+        if (gs.state == STATE_ERROR && !gs.meterOfflineFaultActive && !gs.pileOfflineFaultActive) {
+            if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
+                transitionTo(gun, STATE_PREPARE, "platform_online");
+            } else {
+                transitionTo(gun, STATE_IDLE, "platform_online");
+            }
+        }
+        return;
+    }
+    if (event != "platform_offline") {
+        return;
+    }
+
+    // BY ZF: 平台离线增加 30 秒待确认窗口，避免链路短抖误报码。
+    if (!gs.platformOfflineEventLatched && gs.platformOfflinePendingTime.time_since_epoch().count() == 0) {
+        gs.platformOfflinePendingTime = std::chrono::steady_clock::now();
+    }
 }
 
 void ChargeLogicProcess::startOfflineCardFlow(uint8_t gun, cJSON* data)
@@ -1640,6 +1686,52 @@ bool ChargeLogicProcess::maybeConfirmMeterOfflineFault(uint8_t gun, const std::c
     return false;
 }
 
+bool ChargeLogicProcess::maybeConfirmPlatformOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now)
+{
+    if (gun >= m_gunStates.size()) {
+        return false;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    if (gs.platformOfflineEventLatched ||
+        gs.platformOfflinePendingTime.time_since_epoch().count() == 0 ||
+        now - gs.platformOfflinePendingTime < std::chrono::seconds(30)) {
+        return false;
+    }
+
+    gs.platformOfflinePendingTime = std::chrono::steady_clock::time_point();
+    gs.platformOfflineFaultActive = true;
+    gs.platformOfflineEventLatched = true;
+
+    if (gs.state == STATE_STARTING) {
+        const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0x0102U));
+        if (result.valid) {
+            gs.stopReason = result.reason;
+        }
+        handleEvent(gun, EVT_DEVICE_ERR, "platform_offline_confirmed_30s");
+        return true;
+    }
+    if (gs.state == STATE_CHARGING) {
+        const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(0x0102U));
+        if (result.valid) {
+            gs.stopReason = result.reason;
+        }
+        handleEvent(gun, EVT_DEVICE_ERR, "platform_offline_confirmed_30s");
+        return true;
+    }
+    if (gs.state == STATE_STOPPING) {
+        return false;
+    }
+
+    const FaultJudgeResult result = JudgeStandbyFaultPoint(MakeStandbyPointKey(0x0102U));
+    publishSaveErrorEvent(gun, result, 0x0102U, "platform");
+    if (gs.state != STATE_ERROR) {
+        handleEvent(gun, EVT_DEVICE_ERR, "platform_offline_confirmed_30s");
+        return true;
+    }
+    return false;
+}
+
 bool ChargeLogicProcess::maybeConfirmPileOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now)
 {
     if (gun >= m_gunStates.size()) {
@@ -1689,7 +1781,7 @@ bool ChargeLogicProcess::maybeConfirmPileOfflineFault(uint8_t gun, const std::ch
 void ChargeLogicProcess::publishPileCmd(uint8_t gun, const std::string& cmd, cJSON* data)
 {
     std::ostringstream topic;
-    topic << m_config.mqttTopicPrefix << "/pile/" << static_cast<int>(gun) << "/cmd";
+    topic << m_config.mqttTopicPrefix << "/pile/" << (static_cast<int>(gun) + m_config.biasNo) << "/cmd";
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "ts", static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1753,7 +1845,7 @@ std::string ChargeLogicProcess::getCardEventTopic() const
 void ChargeLogicProcess::publishLogicEvent(uint8_t gun, const std::string& event, cJSON* data)
 {
     std::ostringstream topic;
-    topic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gun) << "/event";
+    topic << m_config.mqttTopicPrefix << "/logic/" << (static_cast<int>(gun) + m_config.biasNo) << "/event";
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "ts", static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1811,7 +1903,7 @@ void ChargeLogicProcess::publishFeeData(uint8_t gun)
     const GunState& gs = m_gunStates[gun];
 
     std::ostringstream topic;
-    topic << m_config.mqttTopicPrefix << "/logic/" << static_cast<int>(gun) << "/feeData";
+    topic << m_config.mqttTopicPrefix << "/logic/" << (static_cast<int>(gun) + m_config.biasNo) << "/feeData";
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "ts", static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1880,7 +1972,7 @@ void ChargeLogicProcess::publishSaveErrorEvent(uint8_t gun, const FaultJudgeResu
     }
 
     std::ostringstream topic;
-    topic << m_config.mqttTopicPrefix << "/save/" << static_cast<int>(gun) << "/event";
+    topic << m_config.mqttTopicPrefix << "/save/" << (static_cast<int>(gun) + m_config.biasNo) << "/event";
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "ts", static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2578,6 +2670,34 @@ void ChargeLogicProcess::maybeTriggerTcuStopByPrecharge(uint8_t gun)
     }
 }
 
+bool ChargeLogicProcess::maybeTriggerMeteringAbnormalByLowVoltage(uint8_t gun, const std::chrono::steady_clock::time_point& now)
+{
+    if (gun >= m_gunStates.size()) {
+        return false;
+    }
+    GunState& gs = m_gunStates[gun];
+    if (gs.state != STATE_CHARGING || gs.meteringAbnormalTriggered) {
+        return false;
+    }
+    if (!gs.hasMeterVoltage || gs.chargingEnterTime.time_since_epoch().count() == 0) {
+        return false;
+    }
+    if (gs.chargingMeterVoltageNormalSeen || gs.lastMeterVoltage >= 10.0) {
+        return false;
+    }
+    if (now - gs.chargingEnterTime < std::chrono::seconds(30)) {
+        return false;
+    }
+
+    const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(0x0101U));
+    if (result.valid) {
+        gs.stopReason = result.reason;
+    }
+    gs.meteringAbnormalTriggered = true;
+    handleEvent(gun, EVT_DEVICE_ERR, "meter_voltage_below_10v_30s");
+    return true;
+}
+
 bool ChargeLogicProcess::maybeHandlePlugAndChargeAuthTimeout(
     uint8_t gun,
     const std::chrono::steady_clock::time_point& now)
@@ -3053,7 +3173,7 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
     case STATE_IDLE:
         if (evt == EVT_VEHICLE_CONNECTED) {
             // BY ZF: 电表离线故障是持续状态，未恢复在线前插枪应直接进入故障态，不能进入 PREPARE。
-            if (gs.meterOfflineFaultActive || gs.pileOfflineFaultActive) {
+            if (gs.meterOfflineFaultActive || gs.platformOfflineFaultActive || gs.pileOfflineFaultActive) {
                 transitionTo(gun, STATE_ERROR, "link_fault_active");
             } else {
                 transitionTo(gun, STATE_PREPARE, reason);
@@ -3187,10 +3307,14 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
         // BY ZF: 进入 CHARGING 时锁定计时起点，feeData.chargedTime 仅使用该起点计算。
         gs.chargingEnterTime = std::chrono::steady_clock::now();
         gs.startSuccessFlag = true;
+        gs.chargingMeterVoltageNormalSeen = false;
+        gs.meteringAbnormalTriggered = false;
     } else if (to == STATE_IDLE) {
         gs.chargingEnterTime = std::chrono::steady_clock::time_point();
         gs.startSuccessFlag = false;
         gs.vehicleDisconnectedDuringStopping = false;
+        gs.chargingMeterVoltageNormalSeen = false;
+        gs.meteringAbnormalTriggered = false;
     }
     // BY ZF: 状态切换同时写 logger，便于后续排查状态机流转。
     {
@@ -3304,6 +3428,8 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
 
     gs.hasTotalAmount = false;
     gs.lastTotalAmount = 0.0;
+    gs.chargingMeterVoltageNormalSeen = false;
+    gs.meteringAbnormalTriggered = false;
 }
 
 void ChargeLogicProcess::logTradeRecordOnStopped(uint8_t gun, const char* reason)

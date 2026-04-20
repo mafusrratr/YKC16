@@ -762,11 +762,14 @@ bool CommProcess::connectPlatformTcp()
 void CommProcess::closePlatformTcp()
 {
     if (m_tcpFd >= 0) {
+        // BY ZF: 主动双向关闭平台 TCP，避免异常恢复时旧连接残留在半开状态影响重连。
+        ::shutdown(m_tcpFd, SHUT_RDWR);
         ::close(m_tcpFd);
         m_tcpFd = -1;
     }
     m_platformConnected = false;
     m_loginState = LOGIN_IDLE;
+    m_tcpRxCache.clear();
 }
 
 bool CommProcess::sendPlatformText(const std::string& text)

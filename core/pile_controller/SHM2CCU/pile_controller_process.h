@@ -47,6 +47,7 @@ struct PileControllerConfig {
     int mqttKeepalive;
     std::string mqttClientId;
     std::string mqttTopicPrefix;
+    int biasNo;
 
     PileControllerConfig()
         : gunCount(0)
@@ -54,6 +55,7 @@ struct PileControllerConfig {
         , retryCount(0)
         , mqttPort(1883)
         , mqttKeepalive(60)
+        , biasNo(0)
     {}
 };
 

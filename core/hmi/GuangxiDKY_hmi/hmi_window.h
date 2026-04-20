@@ -23,6 +23,7 @@ struct HmiConfig {
     int mqttKeepalive;
     std::string mqttClientId;
     std::string mqttTopicPrefix;
+    int biasNo;
     std::string mqttUsername;
     std::string mqttPassword;
 
@@ -35,6 +36,7 @@ struct HmiConfig {
         , mqttKeepalive(60)
         , mqttClientId("tcu_hmi")
         , mqttTopicPrefix("tcu")
+        , biasNo(0)
     {
     }
 };
@@ -104,10 +106,10 @@ private:
     void handleMeterData(uint8_t gun, const std::string& payload);
     void publishLogicCmd(uint8_t gun, const char* cmd, bool v2g);
 
-    static bool parseTopicGun(const std::string& topic,
-                              const std::string& prefix,
-                              uint8_t& gun,
-                              std::string& tail);
+    bool parseTopicGun(const std::string& topic,
+                       const std::string& prefix,
+                       uint8_t& gun,
+                       std::string& tail) const;
 
     void drawGunPanel(QPainter& painter, const QRect& rect, const GunUiData& data);
     void drawActionButtons(QPainter& painter, const QRect& rect, const GunUiData& data, uint8_t gun);

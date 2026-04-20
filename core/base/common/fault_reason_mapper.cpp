@@ -371,7 +371,7 @@ namespace {
         m[0x27] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x27), "BSM 报文中动力蓄电池温度过高");
         m[0x28] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x28), "BSM 报文中动力蓄电池绝缘状态异常");
         m[0x29] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x29), "BSM 报文中连接器连接状态异常");
-        m[0x2A] = MakeRule(false, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x23), "BMS 正常终止充电");
+        m[0x2A] = MakeRule(false, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x2a), "BMS 正常终止充电");
         m[0x2B] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x2B), "BMS 异常终止充电");
         m[0x2C] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x2C), "充电桩判断BMS 其他异常终止");
         m[0x2D] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x2D), "预留");
@@ -391,9 +391,15 @@ namespace {
         m[0x3B] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x3B), "功率控制模块与充电模块通信超时");
         m[0x3C] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x3C), "功率控制器间通信超时（并机扩容场景）");
         m[0x3D] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x3D), "BMS通讯异常");
-        m[0x0102] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x0102), "平台通信故障");
+        
+        //补充自定义停机点位
+        m[0x80] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x80), "小电流停机");
+        m[0x81] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x81), "控制导引断开");
+        
         m[0xFF] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0xFF), "充电桩其他故障");
-        m[0x0101] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x0101), "电表通信故障");
+        m[0x0102] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x0102), "平台通信故障");
+
+        m[0x0101] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x0101), "电能计量异常");
         m[0x0104] = MakeRule(true, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x0104), "主控通信故障");
         m[0x0105] = MakeRule(false, FaultTypeDef::CHARGING_FAIL, makeReason(FaultTypeDef::CHARGING_FAIL, 0x0105), "刷卡停止");
         return m;

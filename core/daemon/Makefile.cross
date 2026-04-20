@@ -4,7 +4,19 @@
 # 交叉编译配置（从环境变量获取）
 CXX = $(CROSS_COMPILE)g++
 CXXFLAGS = -pipe -std=c++0x -O2 -D_REENTRANT -w
+# BY ZF: 仅 jzq 默认静态链接 libstdc++/libgcc，其他平台默认动态链接以控制体积。
+DEFAULT_STATIC_STDCPP = 0
+ifeq ($(PLATFORM),jzq)
+	DEFAULT_STATIC_STDCPP = 1
+else ifeq ($(CROSS_COMPILE),arm-none-linux-gnueabi-)
+	DEFAULT_STATIC_STDCPP = 1
+endif
+STATIC_STDCPP ?= $(DEFAULT_STATIC_STDCPP)
 LIBS = -lpthread
+ifeq ($(STATIC_STDCPP),1)
+	LIBS += -static-libstdc++ -static-libgcc
+	CXXFLAGS += -static-libstdc++ -static-libgcc
+endif
 
 # 包含路径
 INCLUDES = -I../base -I../interfaces -I../../libv2gshm/libcshm
@@ -59,5 +71,6 @@ info:
 	@echo "Includes: $(INCLUDES)"
 	@echo "Libraries: $(LIBS)"
 	@echo "CROSS_COMPILE: $(CROSS_COMPILE)"
+	@echo "STATIC_STDCPP: $(STATIC_STDCPP)"
 
 .PHONY: all clean install cross-compile info

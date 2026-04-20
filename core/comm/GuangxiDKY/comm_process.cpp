@@ -151,6 +151,7 @@ bool CommProcess::loadConfig()
     m_cfg.mqttKeepalive = cfg.getInt(section, "mqtt_keepalive", 60);
     m_cfg.mqttClientId = cfg.getString(section, "mqtt_client_id", "tcu_comm");
     m_cfg.mqttTopicPrefix = cfg.getString(section, "mqtt_topic_prefix", "tcu");
+    m_cfg.biasNo = cfg.getInt(section, "bias_no", 0);
     m_cfg.mqttUsername = cfg.getString(section, "mqtt_username", "");
     m_cfg.mqttPassword = cfg.getString(section, "mqtt_password", "");
 
@@ -657,7 +658,7 @@ bool CommProcess::publishPowerLimitCommand(uint16_t deciKw)
     bool ok = false;
     if (out) {
         std::ostringstream topic;
-        topic << m_cfg.mqttTopicPrefix << "/plat/" << static_cast<int>(gun) << "/cmd";
+        topic << m_cfg.mqttTopicPrefix << "/plat/" << (static_cast<int>(gun) + m_cfg.biasNo) << "/cmd";
         ok = m_mqtt.publish(topic.str(), out, 1, false);
         free(out);
     }
@@ -706,7 +707,7 @@ bool CommProcess::publishStartStopCommand(uint16_t value)
     bool ok = false;
     if (out) {
         std::ostringstream topic;
-        topic << m_cfg.mqttTopicPrefix << "/plat/" << static_cast<int>(gun) << "/cmd";
+        topic << m_cfg.mqttTopicPrefix << "/plat/" << (static_cast<int>(gun) + m_cfg.biasNo) << "/cmd";
         ok = m_mqtt.publish(topic.str(), out, 1, false);
         free(out);
     }
