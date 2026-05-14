@@ -42,6 +42,7 @@ struct CommConfig {
     std::string factoryCreditCode;    // 企业信用代码
     std::vector<std::string> gunQrCodeList; // 每枪二维码配置
     std::string sm2PublicKey;         // 平台提供的初始SM2公钥（HEX/ASCII）
+    std::string feeDbPath;            // 计费模型数据库路径
     uint8_t chargerType;              // 桩类型（固定0x01：直流）
     std::vector<uint32_t> gunIdList;  // 枪ID列表（每枪4字节）
     std::vector<uint8_t> gunTypeList; // 枪类型列表（固定0x01：直流枪）
@@ -59,6 +60,7 @@ struct CommConfig {
         , biasNo(0)
         , masterPort(9000)
         , tcpReconnectSec(3)
+        , feeDbPath("/mnt/nandflash/data/feemodel.db")
         , chargerType(0x01)
         , tcpHeartbeatSec(30)
         , loginRetrySec(10)
@@ -347,6 +349,7 @@ private:
     std::vector<uint8_t> buildRemoteMergeStartAckBody(uint8_t gun, uint8_t result, uint8_t failReason, const std::string& mergeSeq) const;
     std::vector<uint8_t> buildRemoteStartAckBody(uint8_t gun, uint8_t result) const; // 0xA7 远程启动应答体
     std::vector<uint8_t> buildQrCodeSetAckBody(uint8_t gunNoBcd, uint8_t result) const; // 0x5B 二维码设置应答体
+    std::vector<uint8_t> buildFeeModelSetAckBody(uint8_t gunNoBcd, uint8_t result) const; // 0x57 计费模型设置应答体
     void reportChargeInfoPeriodic();
 
     // BY ZF: 平台来包解析
@@ -385,6 +388,8 @@ private:
     bool buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data, std::vector<uint8_t>& body);
     uint16_t mapTradeStopReasonToPlatform(int mqttReason) const;
     std::string buildGunQrCode(uint8_t gun) const;
+    bool loadFeeModelFromDbFile(const std::string& feeModelId, FeeModel& feeModel);
+    void refreshTradeRecordFeeModelCache(uint8_t gun, cJSON* data);
 
     // BY ZF: 平台命令发布
     bool publishPlatCommand(uint8_t gun, const char* cmd, cJSON* dataObj);
@@ -420,6 +425,7 @@ private:
     std::vector<uint8_t> m_tcpRxCache;                // TCP 粘包缓存
     std::vector<GunRuntimeData> m_gunRuntimeData;     // 来自 pile/logic 的实时业务数据缓存
     std::vector<FeeModel> m_feeModelByGun;            // 按枪保存的当前计费模型
+    std::vector<FeeModel> m_tradeRecordFeeModelByGun; // 按枪保存的充电记录上送专用计费模型
     uint8_t m_heartbeatCounter;                       // 心跳计数
 
     std::array<uint8_t, 16> m_sm4SessionKey;         // 登录后会话SM4密钥A（16字节）

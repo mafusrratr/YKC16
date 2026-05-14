@@ -82,65 +82,6 @@ public:
     void doCleanup() override;
 
 private:
-    // BY ZF: 启动完成(start_complete)缓存，供0x2D/0x15组帧复用。
-    struct StartCompleteData {
-        uint8_t successFlag;
-        uint8_t failReason;
-        std::array<uint8_t, 3> pileBmsVersion;
-        uint8_t batteryType;
-        uint16_t ratedCapacity;
-        uint16_t ratedTotalVoltage;
-        uint16_t cellMaxChargeVoltage;
-        uint16_t bmsMaxChargeVoltage;
-        uint16_t maxAllowChargeCurrent;
-        uint16_t currentTotalVoltage;
-        uint8_t maxAllowTemp;
-        uint16_t pileMaxOutputVoltage;
-        uint16_t pileMinOutputVoltage;
-        uint16_t pileMaxOutputCurrent;
-        uint16_t pileMinOutputCurrent;
-        std::string batteryManufacturer;
-        std::array<uint8_t, 4> batterySerial;
-        uint8_t batteryPropertyFlag;
-        uint8_t batteryProdYear;
-        uint8_t batteryProdMonth;
-        uint8_t batteryProdDay;
-        std::array<uint8_t, 3> batteryChargeCount;
-        uint8_t nominalEnergy;
-        uint8_t soc;
-        std::string vin;
-        std::array<uint8_t, 8> bmsSoftwareVersion;
-        uint8_t insulationFault;
-
-        StartCompleteData()
-            : successFlag(1)
-            , failReason(0)
-            , pileBmsVersion{{0}}
-            , batteryType(0)
-            , ratedCapacity(0)
-            , ratedTotalVoltage(0)
-            , cellMaxChargeVoltage(0)
-            , bmsMaxChargeVoltage(0)
-            , maxAllowChargeCurrent(0)
-            , currentTotalVoltage(0)
-            , maxAllowTemp(0)
-            , pileMaxOutputVoltage(0)
-            , pileMinOutputVoltage(0)
-            , pileMaxOutputCurrent(0)
-            , pileMinOutputCurrent(0)
-            , batterySerial{{0}}
-            , batteryPropertyFlag(0)
-            , batteryProdYear(0)
-            , batteryProdMonth(0)
-            , batteryProdDay(0)
-            , batteryChargeCount{{0}}
-            , nominalEnergy(0)
-            , soc(0)
-            , bmsSoftwareVersion{{0}}
-            , insulationFault(0)
-        {}
-    };
-
     // BY ZF: 分时段计费缓存项。
     struct FeeSegmentData {
         std::string startTs;
@@ -170,9 +111,7 @@ private:
         uint8_t remoteStartReason;
         uint8_t remoteStopCondition;
         double remoteStopData;
-        
-        StartCompleteData startCompleteData;
-        
+
         // 遥信数据
         uint8_t gunStatus;             // 枪工作状态 IDLE=02, PREPARE=02, STARTING=03, CHARGING=03, STOPPING=03, ERROR=01, STOPPED=04
         uint8_t yxWorkStatus;          // 遥信-工作状态
@@ -228,7 +167,11 @@ private:
         std::string feeModelId;
         int feeTimeNum;
         std::vector<FeeSegmentData> feeSegments;
-        std::string pendingRecordTradeNo;  // 最近一次0x3D上送记录的tradeNo
+        std::string pendingRecordTradeNo;  // 最近一次0x42上送记录的tradeNo
+        uint64_t pendingRecordStartTime;   // 最近一次0x42上送记录的开始时间(YYYYMMDDhhmmss)
+        uint32_t pendingRecordTotalElectRaw; // 最近一次0x42上送记录的总电量原始值(0.001kWh)
+        uint32_t pendingRecordTotalCostRaw;  // 最近一次0x42上送记录的总金额原始值(0.0001元)
+        std::string pendingRecordCardNumber; // 最近一次0x42上送记录的卡号
         std::string pendingVinAuthVin;     // 最近一次VIN鉴权请求缓存VIN
 
         GunRuntimeData()
@@ -286,6 +229,9 @@ private:
             , meterVoltage(0.0)
             , meterCurrent(0.0)
             , feeTimeNum(0)
+            , pendingRecordStartTime(0ULL)
+            , pendingRecordTotalElectRaw(0U)
+            , pendingRecordTotalCostRaw(0U)
         {}
     };
 
@@ -347,14 +293,6 @@ private:
     std::vector<uint8_t> buildAllTelesignalBody(uint8_t& pileCount) const; // NYC 0x12 全遥信
     std::vector<uint8_t> buildAlarmBody(uint8_t gun, uint16_t faultCode, bool faultActive, uint8_t& alarmCount) const; // NYC 0x18 突发告警
     std::vector<uint8_t> buildChangedTelesignalBody(uint8_t gun, uint8_t& changeCount) const; // NYC 0x17 变化遥信
-    std::vector<uint8_t> buildStartChargeResultBody(uint8_t gun) const; // 0x2D 启动完成结果体
-    std::vector<uint8_t> buildBrmBody(uint8_t gun) const; // 0x15 BRM上送体
-    std::vector<uint8_t> buildBcpBody(uint8_t gun) const; // 0x17 BCP参数配置上送体
-    std::vector<uint8_t> buildChargeEndStageBody(uint8_t gun, cJSON* stopCompleteData) const; // 0x19 结束阶段上送体
-    std::vector<uint8_t> buildBclBcsCcsBody(uint8_t gun) const; // 0x23 BCL/BCS/CCS上送体
-    std::vector<uint8_t> buildBstBody(uint8_t gun, cJSON* stopCompleteData) const; // 0x1D BST停止上送体
-    std::vector<uint8_t> buildCstBody(uint8_t gun) const; // 0x21 CST充电中止上送体
-    std::vector<uint8_t> buildBsmBody(uint8_t gun) const; // 0x25 BSM充电中止BMS信息体
     std::vector<uint8_t> buildPlugChargeAuthBody(uint8_t gun, cJSON* data);
     std::vector<uint8_t> buildRemoteStartAckBody(uint8_t remoteControlType, const std::string& message) const; // NYC 0x41 遥控启动应答体
     std::vector<uint8_t> buildRemoteStopAckBody(uint8_t stopNature, uint8_t stopReason, const std::string& message) const; // NYC 0x43 遥控停止应答体
@@ -392,7 +330,7 @@ private:
     bool parseRemoteStart(const uint8_t* body, size_t bodyLen, uint8_t chargerAddr, uint8_t& gun,
                           uint8_t& remoteControlType, cJSON** outData, FeeModel& feeModel,
                           uint8_t& rejectReason, std::string& rejectMessage);
-    bool parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData);
+    bool parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uint8_t transferReason, uint8_t& gun, cJSON** outData);
     bool parseFeeModel(const uint8_t* body, size_t bodyLen, FeeModel& feeModel); // NYC 0x73/0x74 计费模型信息体
     bool buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data, std::vector<uint8_t>& body);
     bool handleRemoteStopCommand(uint8_t chargerAddr, uint8_t stopReason);
@@ -421,10 +359,9 @@ private:
 
     std::chrono::steady_clock::time_point m_lastHeartbeatRecv;     // 最近心跳应答接受时间
 
-    std::chrono::steady_clock::time_point m_lastChargeInfoReport; // reportChargeInfoPeriodic调度节拍
+    std::chrono::steady_clock::time_point m_lastChargeInfoReport; // 0x12 全遥信调度节拍
     std::chrono::steady_clock::time_point m_lastTelemetryReport;  // 0x11 全遥测调度节拍
     std::chrono::steady_clock::time_point m_lastPeriodicSetConfigPublish; // 周期setConfig广播节拍
-    std::vector<std::chrono::steady_clock::time_point> m_lastChargeInfoReportByGun; // 每枪最近0x13上报时间
     std::vector<std::chrono::steady_clock::time_point> m_lastSetConfigPublishByGun;  // 每枪最近setConfig发布时间
     std::vector<std::string> m_lastSetConfigPayloadByGun;                              // 每枪最近setConfig内容
     std::vector<uint8_t> m_runtimeChangedByGun;      // 每枪运行态变化标记（1=有变化待立即上送）

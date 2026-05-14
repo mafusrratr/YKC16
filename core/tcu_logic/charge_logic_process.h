@@ -100,6 +100,7 @@ private:
         bool platformOfflineEventLatched;       // 平台离线事件是否已确认生效
         bool pileOfflineFaultActive;            // 主控心跳超时故障是否激活
         bool pileOfflineEventLatched;           // 主控离线事件是否已确认生效
+        bool hasPileYxTime;                     // 是否收到过 pile yx
         bool hasMeterValue;                     // 是否收到过电量
         double lastMeterValue;                  // 最近电量(kWh)
         bool hasMeterVoltage;                   // 是否收到过电压
@@ -171,6 +172,7 @@ private:
         bool offlineCardStopBySwipeTriggered;   // 是否已触发刷卡停机
         bool offlineCardSettlementPending;      // 是否待执行余额回写/解锁
         std::string offlineCardNoHex;           // 离线刷卡卡号
+        std::string offlineCardSettlementTradeNo; // 待确认的刷卡订单 tradeNo
         uint32_t offlineCardStartBalance;       // 起始余额(分)
         uint32_t offlineCardLatestBalance;      // 最近一次读卡余额(分)
         uint32_t offlineCardFinalBalance;       // 结算回写余额(分)
@@ -189,6 +191,7 @@ private:
         std::chrono::steady_clock::time_point meterOfflinePendingTime;    // 电表离线待确认开始时间
         std::chrono::steady_clock::time_point platformOfflinePendingTime; // 平台离线待确认开始时间
         std::chrono::steady_clock::time_point pileOfflinePendingTime;     // 主控离线待确认开始时间
+        std::chrono::steady_clock::time_point lastPileYxTime;             // 最近一次收到 pile yx 时间
         GunState()
             : state(STATE_IDLE)
             , lastWorkStatus(0)
@@ -204,6 +207,7 @@ private:
             , platformOfflineEventLatched(false)
             , pileOfflineFaultActive(true)
             , pileOfflineEventLatched(false)
+            , hasPileYxTime(false)
             , hasMeterValue(false)
             , lastMeterValue(0.0)
             , hasMeterVoltage(false)
@@ -340,6 +344,7 @@ private:
     bool maybeConfirmMeterOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     bool maybeConfirmPlatformOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     bool maybeConfirmPileOfflineFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
+    bool maybeConfirmPileYxTimeoutFault(uint8_t gun, const std::chrono::steady_clock::time_point& now);
     void handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data);
     void handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data, const char* resultSource);
     // BY ZF: 状态机入口与迁移
@@ -354,6 +359,7 @@ private:
     void prepareOfflineCardSettlement(uint8_t gun);
     void beginOfflineCardSettlement(uint8_t gun);
     void finishOfflineCardSettlement(uint8_t gun, bool closeRfCompleted);
+    bool tryResumeOfflineCardSettlement(const std::string& cardNo, int cardBalance);
     void maybeStartPendingOfflineCardSettlement();
     bool hasOfflineCardChargingSession() const;
     bool hasPendingCardSettlement() const;

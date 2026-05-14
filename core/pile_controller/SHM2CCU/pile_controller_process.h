@@ -10,7 +10,6 @@
 #include "../../base/process/base_process.h"
 #include "../../base/common/config_manager_lite.h"
 #include "../../base/common/message_queue.h"
-#include "../../base/logger/log_sender.h"
 #include "../../base/mqtt/mqtt_client.h"
 #include "ipile_controller.h"
 #include "tcu2ccu_data.h"
@@ -77,12 +76,17 @@ private:
     bool initMqtt();
     void publishData(uint8_t gunNo, const std::string& type, const std::string& payload, bool retain = true);
     void publishCmdUpset(uint8_t gunNo, const std::string& payload, bool retain = false);
+    void publishLogicCmd(uint8_t gunNo, const std::string& payload, bool retain = false);
     void onMqttMessage(const std::string& topic, const std::string& payload);
     bool handleFeeDataMessage(int gun, struct cJSON* data);
     bool handleLogicEventMessage(int gun, struct cJSON* root, struct cJSON* data);
+    bool handlePlatEventMessage(int gun, struct cJSON* root, struct cJSON* data);
     std::string buildDataPayload(uint8_t gunNo,
                                  const std::string& type,
                                  const std::function<void(struct cJSON*)>& fillData);
+    std::string buildCmdPayload(uint8_t gunNo,
+                                const std::string& cmd,
+                                const std::function<void(struct cJSON*)>& fillData);
     bool parseGunFromTopic(const std::string& topic, int& outGun) const;
 
 private:
@@ -111,16 +115,35 @@ private:
         {}
     };
 
+    struct PlugAndChargeCache {
+        bool lastVinReq;
+        bool vinReqPublished;
+        bool vehicleIdPublished;
+        bool vehicleIdConfirmed;
+        bool authHandled;
+        bool localStartIssued;
+        std::string vin;
+        PlugAndChargeCache()
+            : lastVinReq(false)
+            , vinReqPublished(false)
+            , vehicleIdPublished(false)
+            , vehicleIdConfirmed(false)
+            , authHandled(false)
+            , localStartIssued(false)
+        {}
+    };
+
     PileControllerConfig m_config;
     std::vector<std::unique_ptr<IPileController> > m_controllers;
     MessageQueue* m_cmdQueue;
-    LogSender* m_logger;
     std::thread m_mainThread;
     std::atomic<bool> m_running;
     MqttClient m_mqtt;
     std::atomic<uint64_t> m_mqttSeq;
     std::vector<EventCache> m_eventCaches;
+    std::vector<PlugAndChargeCache> m_plugAndChargeCaches;
     std::vector<DataCache> m_dataCaches;
+    std::vector<std::chrono::steady_clock::time_point> m_lastVinDebugPrint;
     std::chrono::steady_clock::time_point m_lastPublish;
 };
 

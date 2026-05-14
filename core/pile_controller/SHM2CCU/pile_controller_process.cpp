@@ -12,7 +12,16 @@
 #include <cstdio>
 #include <cjson/cJSON.h>
 
+// 是否支持即插即充功能
+#define SHM2CCU_PLATFORM_ONLINE_PNC 1
+
 namespace {
+
+#if SHM2CCU_PLATFORM_ONLINE_PNC 
+static const unsigned int kPlatformOnlineYc32Value = 2U;
+#else
+static const unsigned int kPlatformOnlineYc32Value = 1U;
+#endif
 
 static uint16_t roundToUint16(double value)
 {
@@ -55,12 +64,49 @@ static void printPileCmdRawTrace(int gun, const std::string& topic, const std::s
               << std::endl;
 }
 
+static void printPlatEventRawTrace(int gun, const std::string& topic, const std::string& payload)
+{
+    std::cout << "[SHM2CCU] plat event raw message, gun=" << gun
+              << ", topic=" << topic
+              << ", payload=" << payload
+              << std::endl;
+}
+
+static std::string sanitizeVinString(const char* vin)
+{
+    std::string out;
+    if (vin == nullptr) {
+        return out;
+    }
+    out.reserve(17);
+    for (int i = 0; i < 17 && vin[i] != '\0'; ++i) {
+        unsigned char ch = static_cast<unsigned char>(vin[i]);
+        if (ch >= 'a' && ch <= 'z') {
+            ch = static_cast<unsigned char>(ch - 'a' + 'A');
+        }
+        out.push_back(static_cast<char>(ch));
+    }
+    return out;
+}
+
+static std::string fixedAsciiToString(const char* bytes, size_t len)
+{
+    std::string out;
+    if (bytes == nullptr || len == 0) {
+        return out;
+    }
+    out.reserve(len);
+    for (size_t i = 0; i < len && bytes[i] != '\0'; ++i) {
+        out.push_back(bytes[i]);
+    }
+    return out;
+}
+
 }
 
 PileControllerProcess::PileControllerProcess()
     : BaseProcess(PROC_PILE_CONTROLLER, "SHM2CCUProcess")
     , m_cmdQueue(nullptr)
-    , m_logger(nullptr)
     , m_running(false)
     , m_mqttSeq(0)
 {
@@ -73,8 +119,6 @@ PileControllerProcess::~PileControllerProcess()
 
 bool PileControllerProcess::doInitialize()
 {
-    m_logger = new LogSender("SHM2CCU");
-
     if (!loadGunConfigs()) {
         std::cerr << "[SHM2CCU] Failed to load gun configs" << std::endl;
         return false;
@@ -92,7 +136,9 @@ bool PileControllerProcess::doInitialize()
     }
 
     m_eventCaches.resize(m_config.gunCount);
+    m_plugAndChargeCaches.resize(m_config.gunCount);
     m_dataCaches.resize(m_config.gunCount);
+    m_lastVinDebugPrint.resize(m_config.gunCount, std::chrono::steady_clock::now() - std::chrono::seconds(5));
     m_lastPublish = std::chrono::steady_clock::now();
 
     if (!initMqtt()) {
@@ -183,10 +229,6 @@ void PileControllerProcess::doCleanup()
         delete m_cmdQueue;
         m_cmdQueue = nullptr;
     }
-    if (m_logger != nullptr) {
-        delete m_logger;
-        m_logger = nullptr;
-    }
 
     m_mqtt.loopStop(true);
     m_mqtt.disconnect();
@@ -239,6 +281,19 @@ void PileControllerProcess::updateStatusFromController()
         DataCache& dataCache = m_dataCaches[i];
         EventCache& cache = m_eventCaches[i];
 
+        if ((now - m_lastVinDebugPrint[i]) >= std::chrono::seconds(5)) {
+            unsigned int vinPointValue = 0U;
+            std::string vinPointDesname;
+            if (shm->getVinPointDebug(vinPointValue, vinPointDesname)) {
+                // BY ZF: 联调时每 5 秒打印一次 YC130 原始值，便于确认 VIN 是否已经准备完成。
+                std::cout << "[SHM2CCU] YC130 debug, gun=" << static_cast<int>(gunNo)
+                          << ", value=" << vinPointValue
+                          << ", desname=" << vinPointDesname
+                          << std::endl;
+            }
+            m_lastVinDebugPrint[i] = now;
+        }
+
         if (!cache.onlinePublished) {
             cache.onlinePublished = true;
             std::string payload = buildDataPayload(gunNo, "pile_online", [](cJSON* data) {
@@ -264,6 +319,80 @@ void PileControllerProcess::updateStatusFromController()
         if (shm->getYX23Data(&yx23)) {
             dataCache.yx23 = yx23;
             dataCache.hasYx23 = true;
+        }
+
+        PlugAndChargeCache& pncCache = m_plugAndChargeCaches[i];
+        const bool vinReqActive = dataCache.hasYx23 && dataCache.yx23.vinReq != 0;
+        if (vinReqActive && !pncCache.lastVinReq) {
+            pncCache.vinReqPublished = false;
+            pncCache.vehicleIdPublished = false;
+            pncCache.vehicleIdConfirmed = false;
+            pncCache.authHandled = false;
+            pncCache.localStartIssued = false;
+            pncCache.vin.clear();
+
+            const uint64_t startTime = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+            const std::string payload = buildCmdPayload(gunNo, "vin_req", [startTime](cJSON* data) {
+                // BY ZF: SHM 模式无 HMI，检测到 CCU 即插即充请求后由 pile_controller 代发 vin_req 驱动 logic 流程。
+                cJSON_AddNumberToObject(data, "startTime", static_cast<double>(startTime));
+                cJSON_AddNumberToObject(data, "plugAndChargeFlag", 0x02);
+                cJSON_AddNumberToObject(data, "mergeChargeFlag", 0x00);
+                cJSON_AddNumberToObject(data, "loadControlSwitch", 0x02);
+                cJSON_AddNumberToObject(data, "auxPowerVoltage", 0x0C);
+                cJSON_AddNumberToObject(data, "v2g", 0x00);
+            });
+            publishLogicCmd(gunNo, payload);
+            pncCache.vinReqPublished = true;
+            shm->clearLocalPncStartRequest();
+
+            TCU2CCU_CmdStartChargeData startData;
+            memset(&startData, 0, sizeof(startData));
+            startData.loadControlSwitch = 0x02;
+            startData.plugAndChargeFlag = 0x02;
+            startData.auxPowerVoltage = 0x0C;
+            startData.mergeChargeFlag = 0x00;
+            startData.v2g = 0x00;
+            shm->setStartChargeData(&startData);
+            pncCache.localStartIssued = (shm->startCharge() == 0);
+
+            std::cout << "[SHM2CCU] plug-and-charge vin_req published, gun=" << static_cast<int>(gunNo)
+                      << ", yx_pnc_request=1" << std::endl;
+            std::cout << "[SHM2CCU] plug-and-charge local request consumed, gun=" << static_cast<int>(gunNo)
+                      << ", yx222_cleared=1"
+                      << ", yx175_sent=" << (pncCache.localStartIssued ? 1 : 0)
+                      << std::endl;
+        }
+        pncCache.lastVinReq = vinReqActive;
+
+        if (pncCache.vinReqPublished && !pncCache.vehicleIdPublished) {
+            TCU2CCU_StatusVehicleIdData vehicleIdData;
+            if (shm->getVehicleIdData(&vehicleIdData)) {
+                const std::string vin = sanitizeVinString(vehicleIdData.vin);
+                if (!vin.empty()) {
+                    std::string payload = buildDataPayload(gunNo, "vehicle_id", [&vehicleIdData, &vin](cJSON* data) {
+                        cJSON_AddStringToObject(data, "vin", vin.c_str());
+                        cJSON* chargeCount = cJSON_CreateArray();
+                        for (size_t idx = 0; idx < sizeof(vehicleIdData.batteryChargeCount); ++idx) {
+                            cJSON_AddItemToArray(chargeCount, cJSON_CreateNumber(vehicleIdData.batteryChargeCount[idx]));
+                        }
+                        cJSON_AddItemToObject(data, "batteryChargeCount", chargeCount);
+                        cJSON_AddNumberToObject(data, "soc", vehicleIdData.soc);
+                        cJSON_AddNumberToObject(data, "currentBatteryVoltage", vehicleIdData.currentBatteryVoltage);
+                    });
+                    publishCmdUpset(gunNo, payload);
+                    pncCache.vehicleIdPublished = true;
+                    pncCache.vin = vin;
+                    std::cout << "[SHM2CCU] plug-and-charge vehicle_id published, gun="
+                              << static_cast<int>(gunNo)
+                              << ", vin=" << vin
+                              << std::endl;
+                } else {
+                    std::cout << "[SHM2CCU] plug-and-charge vehicle_id skipped: empty vin, gun="
+                              << static_cast<int>(gunNo)
+                              << std::endl;
+                }
+            }
         }
 
         if (doPublish && dataCache.hasYc20) {
@@ -405,7 +534,11 @@ void PileControllerProcess::updateStatusFromController()
         if (shm->hasStartCompleteEvent()) {
             TCU2CCU_StatusStartCompleteData eventData;
             if (shm->getStartCompleteData(&eventData)) {
-                std::string payload = buildDataPayload(gunNo, "start_complete", [&eventData](cJSON* data) {
+                const std::string startCompleteVin = sanitizeVinString(eventData.vin);
+                const std::string batteryManufacturer = fixedAsciiToString(eventData.batteryManufacturer,
+                                                                          sizeof(eventData.batteryManufacturer));
+                std::string payload = buildDataPayload(gunNo, "start_complete",
+                                                       [&eventData, &startCompleteVin, &batteryManufacturer](cJSON* data) {
                     auto addByteArray = [](cJSON* obj, const char* key, const uint8_t* bytes, size_t len) {
                         cJSON* arr = cJSON_CreateArray();
                         for (size_t i = 0; i < len; ++i) {
@@ -441,8 +574,8 @@ void PileControllerProcess::updateStatusFromController()
                     cJSON_AddNumberToObject(data, "pileMinOutputVoltage", eventData.pileMinOutputVoltage);
                     cJSON_AddNumberToObject(data, "pileMaxOutputCurrent", eventData.pileMaxOutputCurrent);
                     cJSON_AddNumberToObject(data, "pileMinOutputCurrent", eventData.pileMinOutputCurrent);
-                    cJSON_AddStringToObject(data, "vin", eventData.vin);
-                    cJSON_AddStringToObject(data, "batteryManufacturer", eventData.batteryManufacturer);
+                    cJSON_AddStringToObject(data, "vin", startCompleteVin.c_str());
+                    cJSON_AddStringToObject(data, "batteryManufacturer", batteryManufacturer.c_str());
                     addByteArray(data, "batterySerial", eventData.batterySerial, sizeof(eventData.batterySerial));
                     cJSON_AddNumberToObject(data, "batteryProdYear", eventData.batteryProdYear);
                     cJSON_AddNumberToObject(data, "batteryProdMonth", eventData.batteryProdMonth);
@@ -507,6 +640,9 @@ bool PileControllerProcess::initMqtt()
             std::ostringstream logicEventTopic;
             logicEventTopic << m_config.mqttTopicPrefix << "/logic/" << (static_cast<int>(gunNo - 1) + m_config.biasNo) << "/event";
             m_mqtt.subscribe(logicEventTopic.str(), 2);
+            std::ostringstream platEventTopic;
+            platEventTopic << m_config.mqttTopicPrefix << "/plat/" << (static_cast<int>(gunNo - 1) + m_config.biasNo) << "/event";
+            m_mqtt.subscribe(platEventTopic.str(), 1);
         }
     });
     if (!m_mqtt.connect(m_config.mqttHost, m_config.mqttPort, m_config.mqttKeepalive)) {
@@ -535,17 +671,48 @@ void PileControllerProcess::publishCmdUpset(uint8_t gunNo, const std::string& pa
     m_mqtt.publish(t.str(), payload, 2, retain);
 }
 
+void PileControllerProcess::publishLogicCmd(uint8_t gunNo, const std::string& payload, bool retain)
+{
+    std::ostringstream t;
+    t << m_config.mqttTopicPrefix << "/logic/" << (static_cast<int>(gunNo) + m_config.biasNo) << "/cmd";
+    m_mqtt.publish(t.str(), payload, 1, retain);
+}
+
 void PileControllerProcess::onMqttMessage(const std::string& topic, const std::string& payload)
 {
+    const bool isPlatEventTopic = topic.find("/plat/") != std::string::npos
+                               && topic.find("/event") != std::string::npos;
     int gun = -1;
     if (!parseGunFromTopic(topic, gun)) {
+        if (isPlatEventTopic) {
+            std::cout << "[SHM2CCU] plat event ignored: parseGunFromTopic failed"
+                      << ", topic=" << topic
+                      << ", payload=" << payload
+                      << std::endl;
+        }
         return;
     }
+    if (isPlatEventTopic) {
+        // BY ZF: 平台在线离线调试入口，先打印原始报文，便于确认 MQTT 消息是否已经进入 SHM2CCU。
+        printPlatEventRawTrace(gun, topic, payload);
+    }
     if (gun < 0 || gun >= static_cast<int>(m_controllers.size())) {
+        if (isPlatEventTopic) {
+            std::cout << "[SHM2CCU] plat event ignored: gun out of range"
+                      << ", gun=" << gun
+                      << ", topic=" << topic
+                      << std::endl;
+        }
         return;
     }
     SHMPileController* shm = dynamic_cast<SHMPileController*>(m_controllers[gun].get());
     if (shm == nullptr) {
+        if (isPlatEventTopic) {
+            std::cout << "[SHM2CCU] plat event ignored: shm controller unavailable"
+                      << ", gun=" << gun
+                      << ", topic=" << topic
+                      << std::endl;
+        }
         return;
     }
 
@@ -563,12 +730,26 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
                       << ", topic=" << topic
                       << std::endl;
         }
+        if (isPlatEventTopic) {
+            std::cout << "[SHM2CCU] plat event json parse failed, gun=" << gun
+                      << ", topic=" << topic
+                      << std::endl;
+        }
         return;
     }
     cJSON* cmd = cJSON_GetObjectItem(root, "cmd");
     cJSON* data = cJSON_GetObjectItem(root, "data");
     if (topic.find("/feeData") != std::string::npos) {
         handleFeeDataMessage(gun, data);
+        cJSON_Delete(root);
+        return;
+    }
+    if (isPlatEventTopic) {
+        if (!handlePlatEventMessage(gun, root, data)) {
+            std::cout << "[SHM2CCU] plat event ignored after parse, gun=" << gun
+                      << ", topic=" << topic
+                      << std::endl;
+        }
         cJSON_Delete(root);
         return;
     }
@@ -591,6 +772,7 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
     if (cmdStr == "start_charge") {
         // BY ZF: 启动命令收包打印入口，方便联调时确认 pile cmd 已进入 SHM2CCU。
         printPileCmdTrace(gun, "start_charge", topic, payload);
+        PlugAndChargeCache& pncCache = m_plugAndChargeCaches[gun];
         TCU2CCU_CmdStartChargeData startData;
         memset(&startData, 0, sizeof(startData));
         startData.loadControlSwitch = 0x02;
@@ -610,6 +792,23 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
             item = cJSON_GetObjectItem(data, "v2g");
             if (cJSON_IsNumber(item) && item->valueint != 0) startData.v2g = 0x01;
         }
+
+        if (startData.plugAndChargeFlag == 0x02 && pncCache.localStartIssued) {
+            // BY ZF: SHM 本地即插即充在 YX222 触发时已立即写过一次 YX175，这里忽略 logic 的重复启动指令。
+            std::cout << "[SHM2CCU] plug-and-charge start_charge ignored, gun=" << gun
+                      << ", reason=local_pnc_already_started"
+                      << std::endl;
+            std::string ack = buildDataPayload(static_cast<uint8_t>(gun), "start_response",
+                                               [&startData](cJSON* eventData) {
+                cJSON_AddNumberToObject(eventData, "confirmFlag", 0);
+                cJSON_AddStringToObject(eventData, "reason", "local_pnc_already_started");
+                cJSON_AddNumberToObject(eventData, "plugAndChargeFlag", startData.plugAndChargeFlag);
+                cJSON_AddNumberToObject(eventData, "auxPowerVoltage", startData.auxPowerVoltage);
+            });
+            publishCmdUpset(static_cast<uint8_t>(gun), ack);
+            return;
+        }
+
         shm->setStartChargeData(&startData);
         if (shm->startCharge() == 0) {
             std::string ack = buildDataPayload(static_cast<uint8_t>(gun), "start_response",
@@ -621,9 +820,62 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
             });
             publishCmdUpset(static_cast<uint8_t>(gun), ack);
         }
+    } else if (cmdStr == "vehicle_id_confirm") {
+        PlugAndChargeCache& pncCache = m_plugAndChargeCaches[gun];
+        uint8_t successFlag = 0x01;
+        uint8_t failReason = 0x00;
+        if (cJSON_IsObject(data)) {
+            cJSON* item = cJSON_GetObjectItem(data, "successFlag");
+            if (cJSON_IsNumber(item)) successFlag = static_cast<uint8_t>(item->valueint);
+            item = cJSON_GetObjectItem(data, "failReason");
+            if (cJSON_IsNumber(item)) failReason = static_cast<uint8_t>(item->valueint);
+        }
+        pncCache.vehicleIdConfirmed = (successFlag == 0x00);
+        std::cout << "[SHM2CCU] plug-and-charge vehicle_id_confirm received, gun=" << gun
+                  << ", successFlag=" << static_cast<int>(successFlag)
+                  << ", failReason=" << static_cast<int>(failReason)
+                  << ", vin=" << pncCache.vin
+                  << std::endl;
+    } else if (cmdStr == "vehicle_auth") {
+        PlugAndChargeCache& pncCache = m_plugAndChargeCaches[gun];
+        uint8_t successFlag = 0x01;
+        uint8_t failReason = 0x00;
+        std::string authVin = pncCache.vin;
+        if (cJSON_IsObject(data)) {
+            cJSON* item = cJSON_GetObjectItem(data, "successFlag");
+            if (cJSON_IsNumber(item)) successFlag = static_cast<uint8_t>(item->valueint);
+            item = cJSON_GetObjectItem(data, "failReason");
+            if (cJSON_IsNumber(item)) failReason = static_cast<uint8_t>(item->valueint);
+            item = cJSON_GetObjectItem(data, "vin");
+            if (!cJSON_IsString(item)) item = cJSON_GetObjectItem(data, "vinCode");
+            if (cJSON_IsString(item)) authVin = sanitizeVinString(item->valuestring);
+        }
+
+        // BY ZF: logic 的 successFlag 与 YX195.desname[0] 现统一为 0=成功、1=失败。
+        const uint8_t authResult = (successFlag == 0x00) ? 0x00 : 0x01;
+        shm->setPlugAndChargeAuthResult(authResult, failReason);
+        pncCache.authHandled = true;
+
+        std::cout << "[SHM2CCU] plug-and-charge vehicle_auth received, gun=" << gun
+                  << ", successFlag=" << static_cast<int>(successFlag)
+                  << ", failReason=" << static_cast<int>(failReason)
+                  << ", yx195_result=" << static_cast<int>(authResult)
+                  << ", vin=" << authVin
+                  << std::endl;
+
+        std::string ack = buildDataPayload(static_cast<uint8_t>(gun), "vehicle_auth_ack",
+                                           [successFlag, failReason, &authVin](cJSON* eventData) {
+            cJSON_AddNumberToObject(eventData, "successFlag", successFlag);
+            cJSON_AddNumberToObject(eventData, "failReason", failReason);
+            if (!authVin.empty()) {
+                cJSON_AddStringToObject(eventData, "vin", authVin.c_str());
+            }
+        });
+        publishCmdUpset(static_cast<uint8_t>(gun), ack);
     } else if (cmdStr == "stop_charge") {
         // BY ZF: 停机命令收包打印入口，方便联调时确认 pile cmd 已进入 SHM2CCU。
         printPileCmdTrace(gun, "stop_charge", topic, payload);
+        PlugAndChargeCache& pncCache = m_plugAndChargeCaches[gun];
         TCU2CCU_CmdStopChargeData stopData;
         memset(&stopData, 0, sizeof(stopData));
         stopData.stopReason = 0x01;
@@ -633,6 +885,7 @@ void PileControllerProcess::onMqttMessage(const std::string& topic, const std::s
         }
         shm->setStopChargeData(&stopData);
         if (shm->stopCharge() == 0) {
+            pncCache.localStartIssued = false;
             std::string ack = buildDataPayload(static_cast<uint8_t>(gun), "stop_response",
                                                [&stopData](cJSON* eventData) {
                 cJSON_AddNumberToObject(eventData, "confirmFlag", 0);
@@ -741,6 +994,58 @@ bool PileControllerProcess::handleLogicEventMessage(int gun, cJSON* root, cJSON*
     return true;
 }
 
+bool PileControllerProcess::handlePlatEventMessage(int gun, cJSON* root, cJSON* data)
+{
+    if (gun < 0 || gun >= static_cast<int>(m_controllers.size()) || root == nullptr) {
+        return false;
+    }
+
+    cJSON* event = cJSON_GetObjectItem(root, "event");
+    if (!cJSON_IsString(event)) {
+        std::cout << "[SHM2CCU] plat event ignored: missing string field `event`"
+                  << ", gun=" << gun
+                  << std::endl;
+        return false;
+    }
+
+    SHMPileController* shm = dynamic_cast<SHMPileController*>(m_controllers[gun].get());
+    if (shm == nullptr) {
+        return false;
+    }
+
+    const char* reason = "";
+    if (cJSON_IsObject(data)) {
+        cJSON* reasonItem = cJSON_GetObjectItem(data, "reason");
+        if (cJSON_IsString(reasonItem) && reasonItem->valuestring != nullptr) {
+            reason = reasonItem->valuestring;
+        }
+    }
+
+    if (std::strcmp(event->valuestring, "platform_online") == 0) {
+        shm->setSystemOnlineState(kPlatformOnlineYc32Value);
+        std::cout << "[SHM2CCU] plat event processed, gun=" << gun
+                  << ", event=platform_online"
+                  << ", yc32=" << kPlatformOnlineYc32Value
+                  << ", reason=" << reason
+                  << std::endl;
+        return true;
+    }
+    if (std::strcmp(event->valuestring, "platform_offline") == 0) {
+        shm->setSystemOnlineState(0U);
+        std::cout << "[SHM2CCU] plat event processed, gun=" << gun
+                  << ", event=platform_offline"
+                  << ", yc32=0"
+                  << ", reason=" << reason
+                  << std::endl;
+        return true;
+    }
+    std::cout << "[SHM2CCU] plat event ignored: unsupported event"
+              << ", gun=" << gun
+              << ", event=" << event->valuestring
+              << std::endl;
+    return false;
+}
+
 std::string PileControllerProcess::buildDataPayload(uint8_t gunNo,
                                                     const std::string& type,
                                                     const std::function<void(cJSON*)>& fillData)
@@ -766,10 +1071,36 @@ std::string PileControllerProcess::buildDataPayload(uint8_t gunNo,
     return payload;
 }
 
+std::string PileControllerProcess::buildCmdPayload(uint8_t gunNo,
+                                                   const std::string& cmd,
+                                                   const std::function<void(cJSON*)>& fillData)
+{
+    cJSON* root = cJSON_CreateObject();
+    cJSON* data = cJSON_CreateObject();
+    const uint64_t seq = ++m_mqttSeq;
+    const uint64_t ts = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    cJSON_AddNumberToObject(root, "ts", static_cast<double>(ts));
+    cJSON_AddNumberToObject(root, "seq", static_cast<double>(seq));
+    cJSON_AddStringToObject(root, "source", "pile_controller");
+    cJSON_AddNumberToObject(root, "gun", gunNo);
+    cJSON_AddStringToObject(root, "cmd", cmd.c_str());
+    fillData(data);
+    cJSON_AddItemToObject(root, "data", data);
+    char* text = cJSON_PrintUnformatted(root);
+    std::string payload = (text == nullptr) ? "" : text;
+    if (text != nullptr) {
+        free(text);
+    }
+    cJSON_Delete(root);
+    return payload;
+}
+
 bool PileControllerProcess::parseGunFromTopic(const std::string& topic, int& outGun) const
 {
     outGun = -1;
-    const char* markers[] = { "/pile/", "/logic/" };
+    // BY ZF: SHM2CCU 需要同时处理 pile/logic/plat 三类带枪号 topic。
+    const char* markers[] = { "/pile/", "/logic/", "/plat/" };
     for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); ++i) {
         const std::string marker = markers[i];
         const size_t pos = topic.find(marker);

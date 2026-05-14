@@ -16,7 +16,6 @@ SOURCES = main.cpp pile_controller_process.cpp shm_pile_controller.cpp \
           libv2gshm/cshm/cshm.cpp ../../base/mqtt/mqtt_client.cpp
 BASE_SOURCES = ../../base/common/config_manager_lite.cpp \
                ../../base/common/message_queue.cpp \
-               ../../base/logger/log_sender.cpp \
                ../../base/process/base_process.cpp
 
 OBJECTS = $(OBJ_DIR)/main.o \
@@ -54,9 +53,6 @@ $(OBJ_DIR)/mqtt/%.o: ../../base/mqtt/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 $(OBJ_DIR)/%.o: ../../base/common/%.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
-
-$(OBJ_DIR)/%.o: ../../base/logger/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 $(OBJ_DIR)/%.o: ../../base/process/%.cpp

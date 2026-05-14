@@ -18,8 +18,24 @@
 #include <cmath>
 #include <thread>
 #include <chrono>
+#include "../logger/sql/sqlite3.h"
 
 namespace {
+    static const char* kChargeRecordDbPath = "/mnt/nandflash/data/chargerecords.db";
+
+    struct PendingCardTradeRecord {
+        bool found;
+        int gunNo;
+        std::string tradeNo;
+        double totalCost;
+
+        PendingCardTradeRecord()
+            : found(false)
+            , gunNo(0)
+            , totalCost(0.0)
+        {}
+    };
+
     void feedDaemonWatchdog()
     {
         // BY ZF: 通过守护进程看门狗消息队列上报 tcu_logic 存活状态。
@@ -159,6 +175,50 @@ namespace {
 
     double roundTo5(double v) {
         return roundNearest(v * 100000.0) / 100000.0;
+    }
+
+    bool loadPendingCardTradeRecord(const std::string& cardNoHex, PendingCardTradeRecord& out)
+    {
+        out = PendingCardTradeRecord();
+        if (cardNoHex.empty()) {
+            return false;
+        }
+
+        sqlite3* db = NULL;
+        if (sqlite3_open(kChargeRecordDbPath, &db) != SQLITE_OK || db == NULL) {
+            if (db) {
+                sqlite3_close(db);
+            }
+            return false;
+        }
+
+        const char* sql =
+            "SELECT gun_no, trade_no, total_cost "
+            "FROM charge_trade_info "
+            "WHERE platform_confirm_flag=0 AND card_number=? "
+            "ORDER BY id DESC LIMIT 1";
+        sqlite3_stmt* stmt = NULL;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK || stmt == NULL) {
+            if (stmt) {
+                sqlite3_finalize(stmt);
+            }
+            sqlite3_close(db);
+            return false;
+        }
+
+        sqlite3_bind_text(stmt, 1, cardNoHex.c_str(), -1, SQLITE_TRANSIENT);
+        const int rc = sqlite3_step(stmt);
+        if (rc == SQLITE_ROW) {
+            out.found = true;
+            out.gunNo = sqlite3_column_int(stmt, 0);
+            const unsigned char* tradeNo = sqlite3_column_text(stmt, 1);
+            out.tradeNo = tradeNo ? reinterpret_cast<const char*>(tradeNo) : "";
+            out.totalCost = sqlite3_column_double(stmt, 2);
+        }
+
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return out.found;
     }
 
     // BY ZF: Unix 秒时间戳转 YYYYMMDDHHMMSS 数字，便于交易表直接检索
@@ -348,6 +408,9 @@ void ChargeLogicProcess::doRun()
             continue;
         }
         if (maybeConfirmPlatformOfflineFault(static_cast<uint8_t>(i), now)) {
+            continue;
+        }
+        if (maybeConfirmPileYxTimeoutFault(static_cast<uint8_t>(i), now)) {
             continue;
         }
         if (maybeConfirmPileOfflineFault(static_cast<uint8_t>(i), now)) {
@@ -929,6 +992,18 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
     GunState& gs = m_gunStates[gun];
 
     if (type == "yx") {
+        gs.hasPileYxTime = true;
+        gs.lastPileYxTime = std::chrono::steady_clock::now();
+        gs.pileOfflineFaultActive = false;
+        gs.pileOfflineEventLatched = false;
+        gs.pileOfflinePendingTime = std::chrono::steady_clock::time_point();
+        if (gs.state == STATE_ERROR && !gs.meterOfflineFaultActive && !gs.platformOfflineFaultActive) {
+            if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
+                transitionTo(gun, STATE_PREPARE, "pile_yx_recovered");
+            } else {
+                transitionTo(gun, STATE_IDLE, "pile_yx_recovered");
+            }
+        }
         cJSON* ws = cJSON_GetObjectItem(data, "workStatus");
         cJSON* vc = cJSON_GetObjectItem(data, "vehicleConnectStatus");
         cJSON* tf = cJSON_GetObjectItem(data, "totalFault");
@@ -1259,9 +1334,11 @@ void ChargeLogicProcess::beginOfflineCardCharge(uint8_t gun)
     }
 
     updateAuthBasis(gun, data, "card_offline");
+    gs.offlineCardSettlementTradeNo = gs.tradeNo;
     gs.pendingStart = true;
     gs.pendingStartData.clear();
-    cJSON* pileStartData = buildPileStartData(NULL);
+    // BY ZF: 刷卡启动也要继承 HMI 下发的 v2g/合并充/即插即充等启动参数，不能退回默认启动帧。
+    cJSON* pileStartData = buildPileStartData(data);
     if (pileStartData) {
         char* out = cJSON_PrintUnformatted(pileStartData);
         if (out) {
@@ -1373,6 +1450,55 @@ void ChargeLogicProcess::finishOfflineCardSettlement(uint8_t gun, bool closeRfCo
     maybeStartPendingOfflineCardSettlement();
 }
 
+bool ChargeLogicProcess::tryResumeOfflineCardSettlement(const std::string& cardNo, int cardBalance)
+{
+    if (cardNo.empty() || cardBalance < 0) {
+        return false;
+    }
+
+    PendingCardTradeRecord pendingRecord;
+    if (!loadPendingCardTradeRecord(cardNo, pendingRecord)) {
+        return false;
+    }
+
+    int targetGun = pendingRecord.gunNo;
+    if ((targetGun < 0 || static_cast<size_t>(targetGun) >= m_gunStates.size()) &&
+        pendingRecord.gunNo > 0 &&
+        static_cast<size_t>(pendingRecord.gunNo - 1) < m_gunStates.size()) {
+        // BY ZF: 兼容历史库中 gun_no 可能按 1-based 保存的情况。
+        targetGun = pendingRecord.gunNo - 1;
+    }
+    if (targetGun < 0 || static_cast<size_t>(targetGun) >= m_gunStates.size()) {
+        return false;
+    }
+
+    GunState& settleGs = m_gunStates[static_cast<size_t>(targetGun)];
+    settleGs.offlineCardNoHex = cardNo;
+    settleGs.offlineCardSettlementTradeNo = pendingRecord.tradeNo;
+    settleGs.offlineCardStartBalance = static_cast<uint32_t>(cardBalance);
+    settleGs.offlineCardLatestBalance = static_cast<uint32_t>(cardBalance);
+    const long long totalFeeCent = roundNearestLongLong(std::max(0.0, pendingRecord.totalCost) * 100.0);
+    const long long remain = static_cast<long long>(settleGs.offlineCardStartBalance) - totalFeeCent;
+    settleGs.offlineCardFinalBalance = static_cast<uint32_t>(remain > 0 ? remain : 0);
+    settleGs.offlineCardChargeActive = false;
+    settleGs.offlineCardStopBySwipeTriggered = false;
+    settleGs.offlineCardSettlementPending = true;
+    {
+        std::ostringstream oss;
+        oss << "gun=" << targetGun
+            << ",tradeNo=" << settleGs.offlineCardSettlementTradeNo
+            << ",cardNoHex=" << settleGs.offlineCardNoHex
+            << ",cardBalance=" << settleGs.offlineCardStartBalance
+            << ",totalFeeCent=" << totalFeeCent
+            << ",finalBalance=" << settleGs.offlineCardFinalBalance;
+        m_logSender.info("card_flow_resume_settlement", oss.str());
+    }
+
+    resetCardReaderState();
+    maybeStartPendingOfflineCardSettlement();
+    return true;
+}
+
 void ChargeLogicProcess::resetCardReaderState()
 {
     const bool rfOpened = m_cardReaderState.rfOpened;
@@ -1391,6 +1517,7 @@ void ChargeLogicProcess::resetGunOfflineCardState(uint8_t gun)
     gs.offlineCardStopBySwipeTriggered = false;
     gs.offlineCardSettlementPending = false;
     gs.offlineCardNoHex.clear();
+    gs.offlineCardSettlementTradeNo.clear();
     gs.offlineCardStartBalance = 0;
     gs.offlineCardLatestBalance = 0;
     gs.offlineCardFinalBalance = 0;
@@ -1474,6 +1601,10 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
             if (cardBalance >= 0) {
                 gs.offlineCardLatestBalance = static_cast<uint32_t>(cardBalance);
             }
+            // BY ZF: 若刷到的卡对应未确认订单，则优先进入补扣费/解锁流程，不走新的刷卡鉴权。
+            if (tryResumeOfflineCardSettlement(cardNo, cardBalance)) {
+                return;
+            }
             if (locked) {
                 {
                     std::ostringstream oss;
@@ -1535,7 +1666,14 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
                         break;
                     }
                 }
-                const bool needCloseRf = !hasOtherOfflineSession;
+                bool needCloseRf = !hasOtherOfflineSession;
+                const ChargeState gunState = m_gunStates[m_cardReaderState.gun].state;
+                // BY ZF: 处于 PREPARE 说明还需继续等待刷卡，不关闭射频；IDLE/STOPPED 允许关闭射频。
+                if (gunState == STATE_PREPARE) {
+                    needCloseRf = false;
+                } else if (gunState == STATE_IDLE || gunState == STATE_STOPPED) {
+                    needCloseRf = !hasOtherOfflineSession;
+                }
                 if (needCloseRf) {
                     m_cardReaderState.phase = CARD_PHASE_WAIT_RF_CLOSE;
                     publishCardCmd("close_rf", NULL, false, 0U);
@@ -1543,6 +1681,10 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
                     finishOfflineCardSettlement(m_cardReaderState.gun, false);
                 }
             }
+            return;
+        }
+
+        if (m_cardReaderState.phase == CARD_PHASE_IDLE && tryResumeOfflineCardSettlement(cardNo, cardBalance)) {
             return;
         }
 
@@ -1599,6 +1741,12 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
 
     if (event == "card_unlocked") {
         if (m_cardReaderState.phase == CARD_PHASE_WAIT_SETTLEMENT_UNLOCK) {
+            if (m_cardReaderState.gun < m_gunStates.size()) {
+                GunState& gs = m_gunStates[m_cardReaderState.gun];
+                if (!gs.offlineCardSettlementTradeNo.empty()) {
+                    m_logSender.confirmTradeRecord(gs.offlineCardSettlementTradeNo, 1);
+                }
+            }
             m_cardReaderState.phase = CARD_PHASE_WAIT_SETTLEMENT_VERIFY;
         }
         return;
@@ -1773,6 +1921,52 @@ bool ChargeLogicProcess::maybeConfirmPileOfflineFault(uint8_t gun, const std::ch
     publishSaveErrorEvent(gun, result, 0x0104U, "pile");
     if (gs.state != STATE_ERROR) {
         handleEvent(gun, EVT_DEVICE_ERR, "pile_offline_confirmed_30s");
+        return true;
+    }
+    return false;
+}
+
+bool ChargeLogicProcess::maybeConfirmPileYxTimeoutFault(uint8_t gun, const std::chrono::steady_clock::time_point& now)
+{
+    if (gun >= m_gunStates.size()) {
+        return false;
+    }
+
+    GunState& gs = m_gunStates[gun];
+    if (!gs.hasPileYxTime || gs.pileOfflineEventLatched ||
+        gs.lastPileYxTime.time_since_epoch().count() == 0 ||
+        now - gs.lastPileYxTime < std::chrono::minutes(2)) {
+        return false;
+    }
+
+    gs.pileOfflineFaultActive = true;
+    gs.pileOfflineEventLatched = true;
+    gs.pileOfflinePendingTime = std::chrono::steady_clock::time_point();
+
+    if (gs.state == STATE_STARTING) {
+        const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0x0104U));
+        if (result.valid) {
+            gs.stopReason = result.reason;
+        }
+        handleEvent(gun, EVT_DEVICE_ERR, "pile_yx_timeout_120s");
+        return true;
+    }
+    if (gs.state == STATE_CHARGING) {
+        const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(0x0104U));
+        if (result.valid) {
+            gs.stopReason = result.reason;
+        }
+        handleEvent(gun, EVT_DEVICE_ERR, "pile_yx_timeout_120s");
+        return true;
+    }
+    if (gs.state == STATE_STOPPING) {
+        return false;
+    }
+
+    const FaultJudgeResult result = JudgeStandbyFaultPoint(MakeStandbyPointKey(0x0104U));
+    publishSaveErrorEvent(gun, result, 0x0104U, "pile_yx_timeout");
+    if (gs.state != STATE_ERROR) {
+        handleEvent(gun, EVT_DEVICE_ERR, "pile_yx_timeout_120s");
         return true;
     }
     return false;
@@ -2169,7 +2363,8 @@ void ChargeLogicProcess::replayBufferedUnconfirmedRecords()
 
     std::lock_guard<std::mutex> lock(m_unconfirmedMutex);
     for (size_t i = 0; i < m_gunStates.size() && i < m_unconfirmedRecordBuffer.size(); ++i) {
-        if (m_gunStates[i].state != STATE_IDLE) {
+        if (m_gunStates[i].state == STATE_CHARGING ||
+            m_gunStates[i].state == STATE_STARTING) {
             continue;
         }
         if (m_unconfirmedRecordBuffer[i].empty()) {
@@ -3172,8 +3367,9 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
     switch (gs.state) {
     case STATE_IDLE:
         if (evt == EVT_VEHICLE_CONNECTED) {
-            // BY ZF: 电表离线故障是持续状态，未恢复在线前插枪应直接进入故障态，不能进入 PREPARE。
-            if (gs.meterOfflineFaultActive || gs.platformOfflineFaultActive || gs.pileOfflineFaultActive) {
+            // BY ZF: 电表、平台、主控离线故障是持续状态，未恢复在线前插枪应直接进入故障态，不能进入 PREPARE。
+            // if (gs.meterOfflineFaultActive || gs.platformOfflineFaultActive || gs.pileOfflineFaultActive) {
+                if (gs.meterOfflineFaultActive || gs.pileOfflineFaultActive) {
                 transitionTo(gun, STATE_ERROR, "link_fault_active");
             } else {
                 transitionTo(gun, STATE_PREPARE, reason);
@@ -3480,7 +3676,8 @@ void ChargeLogicProcess::logTradeRecordOnStopped(uint8_t gun, const char* reason
     rec.startPoint = 0;
     rec.crossPoints = 0;
     rec.pointsElect.clear();
-    rec.cardNumber = gs.chargeUserNo;
+    // BY ZF: 离线刷卡订单优先记录实际刷到的卡号，避免 userNo 未落到交易记录时丢失卡号。
+    rec.cardNumber = gs.offlineCardNoHex.empty() ? gs.chargeUserNo : gs.offlineCardNoHex;
 
     m_logSender.logTradeRecord(rec);
     publishUpdateRecordEvent(gun, rec);

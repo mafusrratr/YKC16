@@ -49,7 +49,7 @@ OBJECTS = $(OBJ_DIR)/main.o \
           $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
 
 LIBDIRS = -L$(PLATFORM_LIB_PATH) -L$(EXTRA_LIB_PATH)
-LIBS = -lpthread -lmosquitto -lcjson
+LIBS = -lpthread -lmosquitto -lcjson -lsqlite3 -ldl
 ifeq ($(STATIC_STDCPP),1)
 	LIBS += -static-libstdc++ -static-libgcc
 	CXXFLAGS += -static-libstdc++ -static-libgcc

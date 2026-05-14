@@ -30,6 +30,7 @@
 #include <openssl/rand.h>
 #include <openssl/err.h>
 #include <openssl/asn1.h>
+#include <sqlite3.h>
 
 #ifndef NID_sm2
 #ifdef NID_sm2p256v1
@@ -63,6 +64,8 @@ namespace {
     static const uint8_t kCmdTimeSyncReq = 0x0B;
     static const uint8_t kCmdTimeSyncAck = 0x0C;
     static const uint8_t kCmdGunFeeModelReq = 0x0D;
+    static const uint8_t kCmdFeeModelSetAck = 0x57;
+    static const uint8_t kCmdFeeModelSet = 0x58;
     static const uint8_t kCmdQrCodeSet = 0x5A;
     static const uint8_t kCmdQrCodeSetAck = 0x5B;
 
@@ -691,6 +694,8 @@ namespace {
         case 0xA8: return "remote_start_cmd";
         case 0x35: return "remote_stop_ack";
         case 0x36: return "remote_stop_cmd";
+        case 0x57: return "fee_model_set_ack";
+        case 0x58: return "fee_model_set";
         default: return "unknown";
         }
     }
@@ -705,10 +710,10 @@ CommProcess::CommProcess()
     , m_loginState(LOGIN_IDLE)
     , m_lastChargeInfoReport(std::chrono::steady_clock::now())
     , m_lastPeriodicSetConfigPublish(std::chrono::steady_clock::now())
+    , m_platformOfflineTimeoutReported(false)
     , m_heartbeatCounter(0)
     , m_sm4SessionKeyReady(false)
     , m_loginCryptoPrepared(false)
-    , m_platformOfflineTimeoutReported(false)
     , m_platformOnlineEventActive(false)
 {
     m_sm4SessionKey.fill(0);
@@ -793,6 +798,7 @@ bool CommProcess::loadConfig()
     m_config.macAddr = cfg.getString(section, "mac_addr", "");
     m_config.factoryCreditCode = cfg.getString(section, "factory_credit_code", "");
     m_config.sm2PublicKey = cfg.getString(section, "sm2_public_key", "");
+    m_config.feeDbPath = cfg.getString(section, "fee_db_path", "/mnt/nandflash/data/feemodel.db");
     m_config.tcpReconnectSec = cfg.getInt(section, "tcp_reconnect_sec", 3);
     // BY ZF: 按中石化2.0联调要求，心跳周期固定20秒。
     m_config.tcpHeartbeatSec = 20;
@@ -805,11 +811,13 @@ bool CommProcess::loadConfig()
     m_config.gunQrCodeList.clear();
     m_gunRuntimeData.clear();
     m_feeModelByGun.clear();
+    m_tradeRecordFeeModelByGun.clear();
     m_config.gunIdList.reserve(m_config.gunCount);
     m_config.gunTypeList.reserve(m_config.gunCount);
     m_config.gunQrCodeList.reserve(m_config.gunCount);
     m_gunRuntimeData.reserve(m_config.gunCount);
     m_feeModelByGun.reserve(m_config.gunCount);
+    m_tradeRecordFeeModelByGun.reserve(m_config.gunCount);
     m_config.chargerType = kFixedChargerType;
 
 
@@ -826,6 +834,7 @@ bool CommProcess::loadConfig()
         m_config.gunQrCodeList.push_back(cfg.getString(section, qrKey.str(), ""));
         m_gunRuntimeData.push_back(GunRuntimeData());
         m_feeModelByGun.push_back(FeeModel());
+        m_tradeRecordFeeModelByGun.push_back(FeeModel());
     }
 
     if (!m_config.macAddr.empty() && !isHexString(m_config.macAddr, 24)) {
@@ -984,6 +993,7 @@ bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& pa
             if (cJSON_IsString(evt) &&
                 std::strcmp(evt->valuestring, "update_record") == 0 &&
                 cJSON_IsObject(data)) {
+                refreshTradeRecordFeeModelCache(gun, data);
                 std::vector<uint8_t> body;
                 if (buildChargeRecordBodyFromUpdateRecord(gun, data, body) && !body.empty()) {
                     sendPlatformFrame(kCmdUploadTradeRecord, body);
@@ -1479,9 +1489,24 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
     if (periodCount > 48) periodCount = 48;
 
     const FeeModel* matchedFeeModel = nullptr;
+    const char* matchedFeeModelSource = "none";
+    if (gun < m_tradeRecordFeeModelByGun.size()) {
+        const FeeModel& recordFeeModel = m_tradeRecordFeeModelByGun[gun];
+        if (!feeModelIdFromRecord.empty() &&
+            !recordFeeModel.feeModelId.empty() &&
+            feeModelIdFromRecord == recordFeeModel.feeModelId &&
+            static_cast<int>(recordFeeModel.timeNum) == periodCount &&
+            recordFeeModel.timeSeg.size() >= static_cast<size_t>(periodCount) &&
+            recordFeeModel.chargeFee.size() >= static_cast<size_t>(periodCount) &&
+            recordFeeModel.serviceFee.size() >= static_cast<size_t>(periodCount)) {
+            matchedFeeModel = &recordFeeModel;
+            matchedFeeModelSource = "trade_record_cache";
+        }
+    }
     if (gun < m_feeModelByGun.size()) {
         const FeeModel& localFeeModel = m_feeModelByGun[gun];
-        if (!feeModelIdFromRecord.empty() &&
+        if (!matchedFeeModel &&
+            !feeModelIdFromRecord.empty() &&
             !localFeeModel.feeModelId.empty() &&
             feeModelIdFromRecord == localFeeModel.feeModelId &&
             static_cast<int>(localFeeModel.timeNum) == periodCount &&
@@ -1489,6 +1514,23 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
             localFeeModel.chargeFee.size() >= static_cast<size_t>(periodCount) &&
             localFeeModel.serviceFee.size() >= static_cast<size_t>(periodCount)) {
             matchedFeeModel = &localFeeModel;
+            matchedFeeModelSource = "runtime_cache";
+        }
+    }
+    if (!feeModelIdFromRecord.empty()) {
+        std::ostringstream oss;
+        oss << "gun=" << static_cast<int>(gun)
+            << ",req=" << feeModelIdFromRecord
+            << ",periodCount=" << periodCount
+            << ",source=" << matchedFeeModelSource;
+        if (matchedFeeModel) {
+            oss << ",hit=" << matchedFeeModel->feeModelId
+                << ",timeNum=" << static_cast<int>(matchedFeeModel->timeNum)
+                << ",timeSeg=" << matchedFeeModel->timeSeg.size();
+        }
+        m_logSender.info("trade_record_fee_model_match", oss.str());
+        if (m_config.debugTcp) {
+            std::cout << "[Comm][FEE][MATCH] " << oss.str() << std::endl;
         }
     }
 
@@ -1651,6 +1693,133 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
 
     (void)totalServCost;
     return true;
+}
+
+bool CommProcess::loadFeeModelFromDbFile(const std::string& feeModelId, FeeModel& feeModel)
+{
+    feeModel = FeeModel();
+    if (feeModelId.empty()) {
+        return false;
+    }
+
+    const std::string dbPath = m_config.feeDbPath.empty() ? "/mnt/nandflash/data/feemodel.db" : m_config.feeDbPath;
+    if (m_config.debugTcp) {
+        std::cout << "[Comm][FEE][DB_LOOKUP] feeModelId=" << feeModelId
+                  << " dbPath=" << dbPath << std::endl;
+    }
+    sqlite3* db = NULL;
+    if (sqlite3_open_v2(dbPath.c_str(), &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK || !db) {
+        m_logSender.warn("trade_record_fee_model_db_open_fail", feeModelId + "@" + dbPath);
+        if (db) {
+            sqlite3_close(db);
+        }
+        return false;
+    }
+
+    const char* sql =
+        "SELECT feeModelId, timeNum, timeSeg, segFlag, chargeFee, serviceFee "
+        "FROM tbFeeModel WHERE feeModelId=? ORDER BY id DESC LIMIT 1";
+    sqlite3_stmt* stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK || !stmt) {
+        m_logSender.warn("trade_record_fee_model_db_prepare_fail", feeModelId);
+        if (stmt) {
+            sqlite3_finalize(stmt);
+        }
+        sqlite3_close(db);
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, feeModelId.c_str(), -1, SQLITE_TRANSIENT);
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        auto parseUIntList = [](const char* text, std::vector<unsigned int>& out) {
+            out.clear();
+            if (!text) {
+                return;
+            }
+            std::istringstream iss(text);
+            std::string token;
+            while (std::getline(iss, token, ';')) {
+                if (!token.empty()) {
+                    out.push_back(static_cast<unsigned int>(std::strtoul(token.c_str(), NULL, 10)));
+                }
+            }
+        };
+        auto parseStrList = [](const char* text, std::vector<std::string>& out) {
+            out.clear();
+            if (!text) {
+                return;
+            }
+            std::istringstream iss(text);
+            std::string token;
+            while (std::getline(iss, token, ';')) {
+                if (!token.empty()) {
+                    while (token.size() < 4U) token.insert(token.begin(), '0');
+                    out.push_back(token.substr(0, 4U));
+                }
+            }
+        };
+
+        const char* modelIdText = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        feeModel.feeModelId = modelIdText ? modelIdText : feeModelId;
+        feeModel.timeNum = static_cast<unsigned char>(sqlite3_column_int(stmt, 1));
+        parseStrList(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)), feeModel.timeSeg);
+        parseUIntList(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)), feeModel.segFlag);
+        parseUIntList(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)), feeModel.chargeFee);
+        parseUIntList(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5)), feeModel.serviceFee);
+        found = (!feeModel.feeModelId.empty() &&
+                 feeModel.timeNum > 0 &&
+                 !feeModel.timeSeg.empty() &&
+                 feeModel.chargeFee.size() >= feeModel.timeSeg.size() &&
+                 feeModel.serviceFee.size() >= feeModel.timeSeg.size());
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    if (found) {
+        std::ostringstream oss;
+        oss << "req=" << feeModelId
+            << ",hit=" << feeModel.feeModelId
+            << ",timeNum=" << static_cast<int>(feeModel.timeNum)
+            << ",timeSeg=" << feeModel.timeSeg.size()
+            << ",chargeFee=" << feeModel.chargeFee.size()
+            << ",serviceFee=" << feeModel.serviceFee.size();
+        m_logSender.info("trade_record_fee_model_db_hit", oss.str());
+        if (m_config.debugTcp) {
+            std::cout << "[Comm][FEE][DB_HIT] " << oss.str() << std::endl;
+        }
+    } else {
+        m_logSender.warn("trade_record_fee_model_db_miss", feeModelId);
+        if (m_config.debugTcp) {
+            std::cout << "[Comm][FEE][DB_MISS] feeModelId=" << feeModelId << std::endl;
+        }
+    }
+    return found;
+}
+
+void CommProcess::refreshTradeRecordFeeModelCache(uint8_t gun, cJSON* data)
+{
+    if (!data || gun >= m_tradeRecordFeeModelByGun.size()) {
+        return;
+    }
+
+    const std::string feeModelId = jsonGetString(data, "feeModelId");
+    if (feeModelId.empty()) {
+        m_tradeRecordFeeModelByGun[gun] = FeeModel();
+        m_logSender.warn("trade_record_fee_model_empty", std::string("gun=") + std::to_string(static_cast<int>(gun)));
+        return;
+    }
+
+    FeeModel feeModel;
+    if (loadFeeModelFromDbFile(feeModelId, feeModel)) {
+        m_tradeRecordFeeModelByGun[gun] = feeModel;
+        m_logSender.info("trade_record_fee_model_cache_update",
+                         std::string("gun=") + std::to_string(static_cast<int>(gun)) +
+                         ",feeModelId=" + feeModel.feeModelId);
+    } else {
+        m_tradeRecordFeeModelByGun[gun] = FeeModel();
+        m_logSender.warn("trade_record_fee_model_load_fail", feeModelId);
+    }
 }
 
 uint16_t CommProcess::mapTradeStopReasonToPlatform(int mqttReason) const
@@ -1971,6 +2140,7 @@ void CommProcess::closePlatformTcp()
     m_platformConnected = false;
     m_loginState = LOGIN_IDLE;
     m_tcpRxCache.clear();
+    m_lastHeartbeatRecv = std::chrono::steady_clock::time_point();
     // BY ZF: 返回登录流程时增加 10 秒限流，避免链路异常时连续刷 0x01 登录请求。
     m_nextLoginAllowedTime = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     // BY ZF: TCP断开不直接判平台通信故障，统一由心跳接收超时触发 offline 事件。
@@ -2954,6 +3124,16 @@ std::vector<uint8_t> CommProcess::buildQrCodeSetAckBody(uint8_t gunNoBcd, uint8_
     return body;
 }
 
+std::vector<uint8_t> CommProcess::buildFeeModelSetAckBody(uint8_t gunNoBcd, uint8_t result) const
+{
+    std::vector<uint8_t> body;
+    // BY ZF: 0x57 计费模型设置应答：桩编号BCD7 + 枪号BCD1 + 设置结果BIN1。
+    appendPileCodeBcd7(body, m_config.cdzNo);
+    body.push_back(gunNoBcd);
+    body.push_back(result);
+    return body;
+}
+
 std::vector<uint8_t> CommProcess::buildChargeInfoBody(uint8_t gun)
 {
     std::vector<uint8_t> body;
@@ -3200,14 +3380,20 @@ void CommProcess::maintainPlatformTcp()
 {
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
     const int heartbeatTimeoutSec = std::max(m_config.tcpHeartbeatSec * 2, 20);
-    // BY ZF: 平台通信故障统一按心跳超时判定，不再要求先处于LOGIN_ONLINE；
-    // BY ZF: 只要命中心跳接收超时就上报一次offline，后续等待online恢复后再重新允许下一次offline。
+    if (!m_platformConnected.load()) {
+        if (m_lastTcpConnectTry.time_since_epoch().count() == 0 ||
+            now - m_lastTcpConnectTry >= std::chrono::seconds(m_config.tcpReconnectSec)) {
+            m_lastTcpConnectTry = now;
+            connectPlatformTcp();
+        }
+        return;
+    }
+
+    // BY ZF: 心跳超时只在已建立 TCP 连接时判定；未连接态应优先走重连，避免旧超时状态阻塞 0x01 登录。
     if (!m_config.offlineRunMode &&
         !m_platformOfflineTimeoutReported &&
+        m_lastHeartbeatRecv.time_since_epoch().count() != 0 &&
         now - m_lastHeartbeatRecv >= std::chrono::seconds(heartbeatTimeoutSec)) {
-        if (m_lastHeartbeatRecv.time_since_epoch().count() == 0) {
-            return;
-        }
         m_platformOfflineTimeoutReported = true;
         if (m_platformOnlineEventActive) {
             m_platformOnlineEventActive = false;
@@ -3215,15 +3401,6 @@ void CommProcess::maintainPlatformTcp()
         publishPlatformLinkEvent(false, "heartbeat_timeout");
         // BY ZF: 心跳超时视为当前平台会话失效，立即断链并走重连登录，避免旧连接残留卡死。
         closePlatformTcp();
-        return;
-    }
-
-    if (!m_platformConnected.load()) {
-        if (m_lastTcpConnectTry.time_since_epoch().count() == 0 ||
-            now - m_lastTcpConnectTry >= std::chrono::seconds(m_config.tcpReconnectSec)) {
-            m_lastTcpConnectTry = now;
-            connectPlatformTcp();
-        }
         return;
     }
 
@@ -3360,6 +3537,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     case kCmdRemoteStopCmd:
     case kCmdUploadTradeRecord:
     case kCmdRecordConfirm:
+    case kCmdFeeModelSet:
         {
             std::ostringstream oss;
             oss << "cmd=0x" << std::hex << std::uppercase << static_cast<int>(cmd);
@@ -3371,19 +3549,11 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     }
 
     if (cmd == kCmdFeeModelAck) {
-        // BY ZF: 仅在全枪均非充电中时更新计费模型，避免充电过程中切换费率。
+        bool anyCharging = false;
         for (size_t i = 0; i < m_gunRuntimeData.size(); ++i) {
             if (m_gunRuntimeData[i].gunStatus == 0x03) {
-                // BY ZF: 充电中又收到0x0A，说明平台侧在掉线重登；此时直接切到上线态，避免卡死在费率请求阶段。
-                m_loginState = LOGIN_ONLINE;
-                m_lastHeartbeat = std::chrono::steady_clock::now();
-                m_lastHeartbeatRecv = std::chrono::steady_clock::now();
-                if (!m_platformOnlineEventActive) {
-                    m_platformOnlineEventActive = true;
-                    publishPlatformLinkEvent(true, "relogin_fee_model_ignored_charging");
-                }
-                m_logSender.warn("platform_login_step", "fee_model_ack_ignored_charging");
-                return;
+                anyCharging = true;
+                break;
             }
         }
         FeeModel feeModel;
@@ -3397,6 +3567,19 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         }
         m_logSender.saveFeeModel(feeModel);
 
+        // BY ZF: 充电中掉线重登时，新计费模型独立生效，不对当前订单造成冲突；此时无需再发0x0B对时，直接恢复在线态。
+        if (anyCharging) {
+            m_loginState = LOGIN_ONLINE;
+            m_lastHeartbeat = std::chrono::steady_clock::now();
+            m_lastHeartbeatRecv = std::chrono::steady_clock::now();
+            if (!m_platformOnlineEventActive) {
+                m_platformOnlineEventActive = true;
+                publishPlatformLinkEvent(true, "relogin_fee_model_updated_charging");
+            }
+            m_logSender.info("platform_login_step", "fee_model_ack_ok_charging_skip_time_sync");
+            return;
+        }
+
         // BY ZF: 收到有效0x0A后，先进入对时请求阶段，等待0x0C后再切在线。
         if (sendPlatformFrame(kCmdTimeSyncReq, buildTimeSyncRequestBody(), rxSeq)) {
             m_loginState = LOGIN_REQ_TIME_SYNC;
@@ -3406,6 +3589,38 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             return;
         }
         m_logSender.info("platform_login_step", "fee_model_ack_ok");
+        return;
+    }
+
+    if (cmd == kCmdFeeModelSet) {
+        uint8_t ackResult = 0x00;
+        uint8_t gunNoBcd = (body && decBodyLen >= 8U) ? body[7] : 0x00;
+        FeeModel feeModel;
+        if (parseFeeModelAck00A(body, decBodyLen, feeModel)) {
+            if (gunNoBcd == 0x00) {
+                for (size_t i = 0; i < m_feeModelByGun.size(); ++i) {
+                    m_feeModelByGun[i] = feeModel;
+                }
+            } else {
+                const int gunNo = ((gunNoBcd >> 4) & 0x0F) * 10 + (gunNoBcd & 0x0F);
+                const int gunIndex = gunNo - 1;
+                if (gunIndex >= 0 && gunIndex < static_cast<int>(m_feeModelByGun.size())) {
+                    m_feeModelByGun[static_cast<size_t>(gunIndex)] = feeModel;
+                } else {
+                    m_logSender.warn("platform_fee_model_set", "invalid_gun_no");
+                }
+            }
+            m_logSender.saveFeeModel(feeModel);
+            ackResult = 0x01;
+            m_logSender.info("platform_fee_model_set", feeModel.feeModelId);
+        } else {
+            m_logSender.warn("platform_fee_model_set", "parse_fail");
+        }
+
+        const std::vector<uint8_t> ackBody = buildFeeModelSetAckBody(gunNoBcd, ackResult);
+        if (!ackBody.empty()) {
+            (void)sendPlatformFrame(kCmdFeeModelSetAck, ackBody, rxSeq);
+        }
         return;
     }
 
@@ -3758,7 +3973,18 @@ bool CommProcess::parseFeeModelAck00A(const uint8_t* body, size_t bodyLen, FeeMo
         slotMap[i] = body[pos + i];
     }
 
-    feeModel.feeModelId = modelNo.empty() ? "0000" : modelNo;
+    // BY ZF: 平台 modelNo 固定但内容可能变化，接收时按“yymmddhhmmss_modelNo”生成本地唯一计费模型编号。
+    const std::time_t nowSec = std::time(nullptr);
+    std::tm* tmv = std::localtime(&nowSec);
+    char tsBuf[32] = {0};
+    std::snprintf(tsBuf, sizeof(tsBuf), "%02d%02d%02d%02d%02d%02d",
+                  tmv ? ((tmv->tm_year + 1900) % 100) : 0,
+                  tmv ? (tmv->tm_mon + 1) : 1,
+                  tmv ? tmv->tm_mday : 1,
+                  tmv ? tmv->tm_hour : 0,
+                  tmv ? tmv->tm_min : 0,
+                  tmv ? tmv->tm_sec : 0);
+    feeModel.feeModelId = std::string(tsBuf) + "_" + (modelNo.empty() ? "0000" : modelNo);
     feeModel.timeSeg.clear();
     feeModel.segFlag.clear();
     feeModel.chargeFee.clear();
@@ -4314,14 +4540,15 @@ bool CommProcess::parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uin
     if (!body || !outData) {
         return false;
     }
-    // BY ZF: 0x40 最小长度：交易流水号BCD16 + 确认结果1
+    // BY ZF: 充电记录确认最小长度：交易流水号BCD16 + 传送原因1。
     if (bodyLen < 17) {
         return false;
     }
 
     const std::string tradeNo = bcdToDigitString(body, 16);
     const uint8_t feedbackResult = body[16];
-    const bool ackOk = (feedbackResult == 0x00);
+    // BY ZF: 现场联调口径下 0x00 表示确认成功；兼容历史实现中 0x04/0x10 也视为主站已处理到该条记录。
+    const bool confirmed = (feedbackResult == 0x00 || feedbackResult == 0x04 || feedbackResult == 0x10);
 
     // BY ZF: 协议无枪号，按 tradeNo 在待确认缓存中反查所属枪。
     int gunIndex = 0;
@@ -4339,17 +4566,16 @@ bool CommProcess::parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uin
 
     cJSON* data = cJSON_CreateObject();
     cJSON_AddStringToObject(data, "tradeNo", tradeNo.c_str());
-    cJSON_AddNumberToObject(data, "confirmFlag", ackOk ? 1 : 0);
+    cJSON_AddNumberToObject(data, "confirmFlag", confirmed ? 1 : 0);
     cJSON_AddNumberToObject(data, "result", feedbackResult);
     *outData = data;
 
-    // BY ZF: 直接完成交易记录确认（0x00=上传成功）。
-    if (ackOk && !tradeNo.empty()) {
+    if (confirmed && !tradeNo.empty()) {
         m_logSender.confirmTradeRecord(tradeNo, 1);
     }
 
-    // BY ZF: 成功应答后清理缓存，避免后续回包误关联旧记录。
-    if (ackOk && foundGun && gun < m_gunRuntimeData.size()) {
+    // BY ZF: 收到有效确认/否认后都清理待确认缓存，避免后续回包误关联旧记录。
+    if (confirmed && foundGun && gun < m_gunRuntimeData.size()) {
         m_gunRuntimeData[gun].pendingRecordTradeNo.clear();
     }
     return true;

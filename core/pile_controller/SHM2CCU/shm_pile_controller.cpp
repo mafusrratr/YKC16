@@ -242,6 +242,42 @@ void SHMPileController::setPlugAndChargeState(uint8_t value)
     }
 }
 
+void SHMPileController::clearLocalPncStartRequest()
+{
+    // BY ZF: SHM 本地即插即充请求按一次性触发处理，消费后立即清 YX222/YX478，避免重复触发。
+    clearYxPoint(SHM2CCU::YX_HMI_LOCAL_PNC_START);
+}
+
+void SHMPileController::setPlugAndChargeAuthResult(uint8_t result, uint8_t reason)
+{
+    if (m_shm == nullptr) {
+        return;
+    }
+    YX* point = getYxPoint(SHM2CCU::YX_PNC_AUTH_OK);
+    if (point == nullptr) {
+        return;
+    }
+
+    // BY ZF: 即插即充 VIN 鉴权结果通过 YX195/YX451 反馈给 CCU，
+    // desname[0]=result(0成功/1失败)，desname[1]=reason。
+    memset(point->desname, 0, sizeof(point->desname));
+    point->desname[0] = static_cast<char>(result);
+    point->desname[1] = static_cast<char>(reason);
+    point->value = true;
+}
+
+void SHMPileController::setSystemOnlineState(unsigned int value)
+{
+    if (m_shm == nullptr) {
+        return;
+    }
+    YC* point = m_shm->getYc(32);
+    if (point != nullptr) {
+        // BY ZF: YC32 为 Sys 模块设备在线状态，0=离线，1=在线，2=在线且可即插即充。
+        point->value = value;
+    }
+}
+
 bool SHMPileController::getYC20Data(TCU2CCU_DataYC20* data) const
 {
     if (data == nullptr || m_shm == nullptr) {
@@ -364,7 +400,8 @@ bool SHMPileController::getYX23Data(TCU2CCU_DataYX23* data) const
     data->bmsFaultByCtrl = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_BMS_FAULT_BY_CTRL));
     data->bmsSendFaultInfo = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_BMS_SEND_FAULT_INFO));
     data->moduleDischargeFault = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_MODULE_DISCHARGE_FAULT));
-    data->vinReq = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_PNC_START_REQUEST));
+    // BY ZF: SHM 即插即充启动入口按现场约定读取 YX222，本地右枪自动偏移到 478。
+    data->vinReq = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_HMI_LOCAL_PNC_START));
     data->acInputContactorStatus = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_AC_INPUT_CONTACTOR_STATUS));
     data->acContactorCtrlStatus = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_AC_CONTACTOR_CTRL_STATUS));
     data->portK1CtrlStatus = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_PORT_K1_CTRL_STATUS));
@@ -417,7 +454,8 @@ bool SHMPileController::getStartCompleteData(TCU2CCU_StatusStartCompleteData* da
         data->pileMaxOutputCurrent = static_cast<uint16_t>(info->nChargerMaxOutCurr);
         data->pileMinOutputCurrent = static_cast<uint16_t>(info->nChargerMinOutCurr);
     }
-    copyAsciiChars(data->vin, sizeof(data->vin), getYcDesname(SHM2CCU::YC_VIN));
+    // BY ZF: VIN 字段协议长度就是 17 字节，这里按满 17 字节拷贝，避免通用字符串接口截掉最后一位。
+    copyFixedAsciiChars(data->vin, sizeof(data->vin), getYcDesname(SHM2CCU::YC_VIN));
     copyAsciiChars(data->batteryManufacturer, sizeof(data->batteryManufacturer), getYcDesname(SHM2CCU::YC_BATTERY_MANUFACTURER));
     copyAsciiBytes(data->batterySerial, sizeof(data->batterySerial), getYcDesname(SHM2CCU::YC_BATTERY_CHARGE_COUNT));
     fillBatteryProdDate(data->batteryProdYear, data->batteryProdMonth, data->batteryProdDay);
@@ -448,6 +486,50 @@ bool SHMPileController::getStopCompleteData(TCU2CCU_StatusStopCompleteData* data
     data->cellMaxVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_CELL_MAX_VOLTAGE));
     data->batteryMinTemp = getYcMinus50TempValue(SHM2CCU::YC_BATTERY_MIN_TEMP);
     data->batteryMaxTemp = getYcMinus50TempValue(SHM2CCU::YC_BATTERY_MAX_TEMP);
+    return true;
+}
+
+bool SHMPileController::getVehicleIdData(TCU2CCU_StatusVehicleIdData* data)
+{
+    if (data == nullptr || m_shm == nullptr) {
+        return false;
+    }
+
+    zeroMemory(data, sizeof(*data));
+
+    // BY ZF: SHM 即插即充 VIN 当前仅按现场约定读取 YC130.desname，且仅在 YC130.value==1 时才认为 VIN 已准备完成。
+    if (getYcValue(SHM2CCU::YC_VIN) == 1U) {
+        // BY ZF: VIN 固定 17 字节，不能走通用 copyAsciiChars()，否则会被截成 16 位。
+        copyFixedAsciiChars(data->vin, sizeof(data->vin), getYcDesname(SHM2CCU::YC_VIN));
+        YC* vinPoint = getYcPoint(SHM2CCU::YC_VIN);
+        if (vinPoint != nullptr) {
+            // BY ZF: 读取完 YC130.desname 后立即清 value，避免同一份 VIN 被 SHM2CCU 重复消费。
+            vinPoint->value = 0U;
+        }
+    }
+
+    const unsigned int chargeCount = getYcValue(SHM2CCU::YC_BATTERY_CHARGE_COUNT);
+    for (int i = 0; i < 3; ++i) {
+        data->batteryChargeCount[i] = static_cast<uint8_t>(packChargeCount(chargeCount, i));
+    }
+    data->soc = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_START_COMPLETE_SOC));
+    data->currentBatteryVoltage = static_cast<uint16_t>(getYcValue(SHM2CCU::YC_CURRENT_TOTAL_VOLTAGE));
+    data->vinAuthResult = static_cast<uint8_t>(getYxValue(SHM2CCU::YX_PNC_AUTH_OK));
+    return data->vin[0] != '\0';
+}
+
+bool SHMPileController::getVinPointDebug(unsigned int& value, std::string& desname) const
+{
+    value = 0U;
+    desname.clear();
+    if (m_shm == nullptr) {
+        return false;
+    }
+    value = getYcValue(SHM2CCU::YC_VIN);
+    const char* raw = getYcDesname(SHM2CCU::YC_VIN);
+    if (raw != nullptr) {
+        desname = raw;
+    }
     return true;
 }
 
@@ -670,6 +752,20 @@ void SHMPileController::copyAsciiChars(char* dest, size_t len, const char* src) 
         return;
     }
     for (size_t i = 0; i + 1 < len && src[i] != '\0'; ++i) {
+        dest[i] = src[i];
+    }
+}
+
+void SHMPileController::copyFixedAsciiChars(char* dest, size_t len, const char* src) const
+{
+    if (dest == nullptr || len == 0) {
+        return;
+    }
+    memset(dest, 0, len);
+    if (src == nullptr) {
+        return;
+    }
+    for (size_t i = 0; i < len && src[i] != '\0'; ++i) {
         dest[i] = src[i];
     }
 }

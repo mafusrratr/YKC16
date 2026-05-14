@@ -68,6 +68,7 @@ private slots:
     void onAuthorizeCardClicked();
     void onAuthorizeMergeChargeClicked();
     void onAuthorizeVinClicked();
+    void onChargingStopClicked();
     void onConfigEditMaskClicked();
     void onConfigKeyboardButtonClicked();
     void onConfigGunCountChanged();
@@ -123,6 +124,7 @@ public:
         double chargedTime;
         int soc;
         bool cardOfflineActive;
+        bool vinChargeActive;
         std::string qrPayload;
         std::string stopReason;
         std::string lastFaultPointKey;
@@ -144,6 +146,9 @@ public:
         ModuleVersionInfo logic;
         ModuleVersionInfo meter;
         ModuleVersionInfo mon;
+        ModuleVersionInfo comm;
+        ModuleVersionInfo daemon;
+        ModuleVersionInfo hmi;
         int platformComm;
         int meterComm;
         int controllerComm;
@@ -241,6 +246,7 @@ private:
     QString selectedStoragePath() const;
     void openConfigKeyboard(QLineEdit *target, bool numericOnly);
     bool publishVinRequest(bool mergeCharge);
+    bool publishStopChargeRequest();
     void refreshConfigKeyboardLayout();
     void refreshIdlePage(const std::vector<GunUiData> &guns);
     void refreshAuthorizePage(const GunUiData &gun);
@@ -318,6 +324,7 @@ private:
     QLabel *m_configHintLabel;
     QWidget *m_configKeyboard;
     QWidget *m_configMeter2Row;
+    QWidget *m_configBaudRow;
     QPushButton *m_configKeyButtons[30];
     QPushButton *m_configShiftButton;
     QPushButton *m_configModeButton;
@@ -326,6 +333,9 @@ private:
     QPushButton *m_configConfirmButton;
     QRadioButton *m_configGunSingle;
     QRadioButton *m_configGunDual;
+    QRadioButton *m_configBaud2400;
+    QRadioButton *m_configBaud38400;
+    QPushButton *m_chargingStopButton;
     bool m_configKeyboardUppercase;
     bool m_configKeyboardNumberMode;
     bool m_configKeyboardNumericOnly;

@@ -8,7 +8,7 @@ CXXFLAGS = -Wall -O2 -std=c++11
 # BY ZF: 工具链库路径（用于必要时设置运行时搜索路径）。
 TOOLCHAIN_LIB_PATH ?= $(shell dirname $(shell which $(CXX) 2>/dev/null || echo /usr/bin/g++))/../lib
 # BY ZF: 增加 OpenSSL 头文件目录（本模块内置拷贝）。
-INCLUDES = -I../../base -I../../interfaces -I../../base/mqtt -I../../base/mqtt/include -I../../base/cjson/include -I./openssl/include
+INCLUDES = -I../../base -I../../interfaces -I../../base/mqtt -I../../base/mqtt/include -I../../base/cjson/include -I./openssl/include -I../../../extraLib/sql
 
 # BY ZF: 外部库路径允许按平台切换，如 extraLib/jzq、extraLib/imx6ul。
 EXTRA_LIB_PATH ?= ../../../extraLib
@@ -54,7 +54,8 @@ MOSQUITTO_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libmosquitto.so),-lmosquitt
 CJSON_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libcjson.so),-lcjson,$(if $(wildcard $(PLATFORM_LIB_PATH)/libcjson.so.1.7.17),-l:libcjson.so.1.7.17,$(if $(wildcard $(EXTRA_LIB_PATH)/libcjson.so),-lcjson,$(if $(wildcard $(EXTRA_LIB_PATH)/libcjson.so.1.7.17),-l:libcjson.so.1.7.17,-lcjson))))
 SSL_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libssl.so),-lssl,$(if $(wildcard $(PLATFORM_LIB_PATH)/libssl.so.1.1),-l:libssl.so.1.1,$(if $(wildcard $(EXTRA_LIB_PATH)/libssl.so),-lssl,$(if $(wildcard $(EXTRA_LIB_PATH)/libssl.so.1.1),-l:libssl.so.1.1,-lssl))))
 CRYPTO_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libcrypto.so),-lcrypto,$(if $(wildcard $(PLATFORM_LIB_PATH)/libcrypto.so.1.1),-l:libcrypto.so.1.1,$(if $(wildcard $(EXTRA_LIB_PATH)/libcrypto.so),-lcrypto,$(if $(wildcard $(EXTRA_LIB_PATH)/libcrypto.so.1.1),-l:libcrypto.so.1.1,-lcrypto))))
-LIBS = -lpthread $(MOSQUITTO_LIB) $(CJSON_LIB) $(SSL_LIB) $(CRYPTO_LIB)
+SQLITE_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libsqlite3.so),-lsqlite3,$(if $(wildcard $(PLATFORM_LIB_PATH)/libsqlite3.so.0),-l:libsqlite3.so.0,$(if $(wildcard $(EXTRA_LIB_PATH)/libsqlite3.so),-lsqlite3,$(if $(wildcard $(EXTRA_LIB_PATH)/libsqlite3.so.0),-l:libsqlite3.so.0,-lsqlite3))))
+LIBS = -lpthread $(MOSQUITTO_LIB) $(CJSON_LIB) $(SSL_LIB) $(CRYPTO_LIB) $(SQLITE_LIB)
 ifeq ($(STATIC_STDCPP),1)
 LIBS += -static-libstdc++ -static-libgcc
 CXXFLAGS += -static-libstdc++ -static-libgcc

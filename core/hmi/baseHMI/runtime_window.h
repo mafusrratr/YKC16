@@ -15,6 +15,7 @@
 class QLabel;
 class QAbstractButton;
 class QButtonGroup;
+class QCheckBox;
 class QLineEdit;
 class QListWidget;
 class QListWidgetItem;
@@ -101,6 +102,7 @@ public:
         bool enableVinEntry;
         bool enableQrEntry;
         bool enableCardEntry;
+        bool enableCardDischarge;
         bool cardOnlineAuth;
 
         HmiConfig();
@@ -233,6 +235,7 @@ private:
     void loadMeterConfigToUi();
     bool saveMeterConfigFromUi();
     void loadCommConfigToUi();
+    void loadHmiConfigToUi();
     bool saveCommConfigFromUi();
     bool saveHmiConfigFromUi();
     bool savePileConfigFromUi();
@@ -327,6 +330,9 @@ private:
     QPushButton *m_configConfirmButton;
     QRadioButton *m_configGunSingle;
     QRadioButton *m_configGunDual;
+    QCheckBox *m_configCardDischarge;
+    QRadioButton *m_cardChargeRadio;
+    QRadioButton *m_cardDischargeRadio;
     bool m_configKeyboardUppercase;
     bool m_configKeyboardNumberMode;
     bool m_configKeyboardNumericOnly;

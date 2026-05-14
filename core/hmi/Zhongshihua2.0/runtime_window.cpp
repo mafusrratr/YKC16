@@ -602,6 +602,53 @@ static QString hmiConfigPath()
     return fallbackPath;
 }
 
+static QString versionJsonPath()
+{
+    const QString targetPath = QString::fromUtf8("/usr/app/config/version.json");
+    const QString fallbackPath = QString::fromUtf8("/Users/seear/embedded_codes/99_ForCodexs/2510_RefactorProject/config/version.json");
+    if (QFileInfo(targetPath).exists()) {
+        return targetPath;
+    }
+    return fallbackPath;
+}
+
+static void readModuleVersionInfo(cJSON *root, const char *moduleName, RuntimeWindow::ModuleVersionInfo &info)
+{
+    if (!root || !moduleName) {
+        return;
+    }
+    cJSON *module = cJSON_GetObjectItem(root, moduleName);
+    if (!cJSON_IsObject(module)) {
+        return;
+    }
+    info.version = getString(module, "version", info.version);
+    info.buildDate = getString(module, "date", info.buildDate);
+}
+
+static void loadVersionJson(RuntimeWindow::MonStatusData &status)
+{
+    QFile file(versionJsonPath());
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return;
+    }
+
+    const QByteArray jsonText = file.readAll();
+    file.close();
+    cJSON *root = cJSON_Parse(jsonText.constData());
+    if (!root) {
+        return;
+    }
+
+    readModuleVersionInfo(root, "logic", status.logic);
+    readModuleVersionInfo(root, "meter", status.meter);
+    readModuleVersionInfo(root, "mon", status.mon);
+    readModuleVersionInfo(root, "comm", status.comm);
+    readModuleVersionInfo(root, "daemon", status.daemon);
+    readModuleVersionInfo(root, "hmi", status.hmi);
+
+    cJSON_Delete(root);
+}
+
 static bool replaceConfigValue(const QString &path, const QString &section, const QString &key, const QString &value)
 {
     QFile file(path);
@@ -691,6 +738,7 @@ RuntimeWindow::GunUiData::GunUiData()
     , chargedTime(0.0)
     , soc(-1)
     , cardOfflineActive(false)
+    , vinChargeActive(false)
     , stopReason("充电完成")
     , lastStateChangeMs(0)
 {
@@ -786,6 +834,7 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_configHintLabel(0)
     , m_configKeyboard(0)
     , m_configMeter2Row(0)
+    , m_configBaudRow(0)
     , m_configShiftButton(0)
     , m_configModeButton(0)
     , m_configBackspaceButton(0)
@@ -793,6 +842,9 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_configConfirmButton(0)
     , m_configGunSingle(0)
     , m_configGunDual(0)
+    , m_configBaud2400(0)
+    , m_configBaud38400(0)
+    , m_chargingStopButton(0)
     , m_configKeyboardUppercase(false)
     , m_configKeyboardNumberMode(false)
     , m_configKeyboardNumericOnly(false)
@@ -1053,6 +1105,16 @@ void RuntimeWindow::bindStaticUi()
         btnBackCharging->setFlat(true);
         connect(btnBackCharging, SIGNAL(clicked()), this, SLOT(returnToIdlePage()));
     }
+    if (!m_chargingStopButton) {
+        m_chargingStopButton = new QPushButton(QString::fromUtf8("停止充电"), m_chargingPage);
+        m_chargingStopButton->setObjectName("btnStopCharge");
+        m_chargingStopButton->setGeometry(620, 378, 164, 42);
+        m_chargingStopButton->setFocusPolicy(Qt::NoFocus);
+        m_chargingStopButton->setStyleSheet("QPushButton{background:rgba(40,118,190,150);border:1px solid rgba(255,255,255,150);border-radius:10px;color:white;font:22px 'MS Shell Dlg 2';font-weight:bold;}"
+                                            "QPushButton:pressed{background:rgba(28,96,166,180);padding-top:1px;}");
+        m_chargingStopButton->hide();
+        connect(m_chargingStopButton, SIGNAL(clicked()), this, SLOT(onChargingStopClicked()));
+    }
     if (btnBackStopping) {
         btnBackStopping->setVisible(true);
         btnBackStopping->setFlat(true);
@@ -1123,6 +1185,9 @@ void RuntimeWindow::bindStaticUi()
     QLabel *chargingTitle = m_chargingPage->findChild<QLabel *>("lblTitle");
     if (chargingBack) {
         chargingBack->raise();
+    }
+    if (m_chargingStopButton) {
+        m_chargingStopButton->raise();
     }
     if (btnAboutCharging) {
         btnAboutCharging->raise();
@@ -1280,6 +1345,7 @@ void RuntimeWindow::handleLogicEvent(uint8_t gun, const std::string &payload)
             m_guns[gun].lastStateChangeMs = nowMs();
             if (m_guns[gun].state == "IDLE" || m_guns[gun].state == "STOPPED" || m_guns[gun].state == "ERROR") {
                 m_guns[gun].cardOfflineActive = false;
+                m_guns[gun].vinChargeActive = false;
             }
             if (m_guns[gun].state != "PREPARE" && m_guns[gun].state != "STARTING") {
                 m_forceIdleView = false;
@@ -1305,6 +1371,10 @@ void RuntimeWindow::handleLogicEvent(uint8_t gun, const std::string &payload)
         if (eventName == "card_auth_reject" || cmdName == "request_card_start") {
             QMutexLocker locker(&m_dataMutex);
             m_guns[gun].cardOfflineActive = false;
+        }
+        if (cmdName == "vin_req") {
+            QMutexLocker locker(&m_dataMutex);
+            m_guns[gun].vinChargeActive = false;
         }
     } else if (eventName == "card_auth_ok") {
         QMutexLocker locker(&m_dataMutex);
@@ -2619,11 +2689,11 @@ void RuntimeWindow::setupConfigTab()
 
     configOverlay = new QWidget(configTab);
     configOverlay->setObjectName("configOverlay");
-    configOverlay->setGeometry(0, 0, 755, 345);
+    configOverlay->setGeometry(0, 0, 755, 360);
     configOverlay->setStyleSheet("background:transparent;");
 
-    QFrame *leftCard = static_cast<QFrame *>(makeInfoCard(configOverlay, QString::fromUtf8("参数配置"), QRect(12, 10, 300, 314)));
-    QFrame *rightCard = static_cast<QFrame *>(makeInfoCard(configOverlay, QString(), QRect(320, 10, 423, 314)));
+    QFrame *leftCard = static_cast<QFrame *>(makeInfoCard(configOverlay, QString::fromUtf8("参数配置"), QRect(12, 10, 300, 330)));
+    QFrame *rightCard = static_cast<QFrame *>(makeInfoCard(configOverlay, QString(), QRect(320, 10, 423, 330)));
 
     QLabel *labelPileNo = new QLabel(QString::fromUtf8("充电桩号"), leftCard);
     labelPileNo->setGeometry(20, 48, 96, 28);
@@ -2700,7 +2770,7 @@ void RuntimeWindow::setupConfigTab()
 
     m_configMeter2Row = new QWidget(leftCard);
     m_configMeter2Row->setObjectName("configMeter2Row");
-    m_configMeter2Row->setGeometry(0, 226, 300, 44);
+    m_configMeter2Row->setGeometry(0, 226, 300, 42);
     m_configMeter2Row->setStyleSheet("background:transparent;");
 
     QLabel *labelAddr2 = new QLabel(QString::fromUtf8("电表地址2"), m_configMeter2Row);
@@ -2720,18 +2790,38 @@ void RuntimeWindow::setupConfigTab()
     addr2Mask->setStyleSheet("QPushButton{background:transparent;border:none;}");
     connect(addr2Mask, SIGNAL(clicked()), this, SLOT(onConfigEditMaskClicked()));
 
+    m_configBaudRow = new QWidget(leftCard);
+    m_configBaudRow->setObjectName("configBaudRow");
+    m_configBaudRow->setGeometry(0, 266, 300, 34);
+    m_configBaudRow->setStyleSheet("background:transparent;");
+
+    QLabel *labelBaud = new QLabel(QString::fromUtf8("电表波特率"), m_configBaudRow);
+    labelBaud->setGeometry(20, 3, 96, 28);
+    labelBaud->setStyleSheet(labelPileNo->styleSheet());
+
+    m_configBaud2400 = new QRadioButton(QString::fromUtf8("2400"), m_configBaudRow);
+    m_configBaud2400->setObjectName("radioConfigBaud2400");
+    m_configBaud2400->setGeometry(114, 3, 68, 28);
+    m_configBaud2400->setStyleSheet(m_configGunSingle->styleSheet());
+
+    m_configBaud38400 = new QRadioButton(QString::fromUtf8("38400"), m_configBaudRow);
+    m_configBaud38400->setObjectName("radioConfigBaud38400");
+    m_configBaud38400->setGeometry(186, 3, 88, 28);
+    m_configBaud38400->setStyleSheet(m_configGunSingle->styleSheet());
+    m_configBaud2400->setChecked(true);
+
     QPushButton *btnReset = new QPushButton(QString::fromUtf8("重置"), leftCard);
-    btnReset->setGeometry(18, 274, 116, 28);
+    btnReset->setGeometry(18, 296, 116, 28);
     btnReset->setStyleSheet("QPushButton{background:rgb(232,234,236);border:1px solid rgb(150,150,150);border-radius:8px;color:rgb(38,45,52);font:14px 'MS Shell Dlg 2';font-weight:bold;}");
     connect(btnReset, SIGNAL(clicked()), this, SLOT(onConfigResetClicked()));
 
     QPushButton *btnSubmit = new QPushButton(QString::fromUtf8("确认"), leftCard);
-    btnSubmit->setGeometry(168, 274, 116, 28);
+    btnSubmit->setGeometry(168, 296, 116, 28);
     btnSubmit->setStyleSheet("QPushButton{background:rgb(72,148,196);border:1px solid rgb(110,110,110);border-radius:8px;color:white;font:14px 'MS Shell Dlg 2';font-weight:bold;}");
     connect(btnSubmit, SIGNAL(clicked()), this, SLOT(onConfigSubmitClicked()));
 
     m_configHintLabel = new QLabel(QString(), leftCard);
-    m_configHintLabel->setGeometry(112, 230, 172, 22);
+    m_configHintLabel->setGeometry(112, 236, 172, 22);
     m_configHintLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     m_configHintLabel->setStyleSheet("QLabel{color:rgb(160,100,40);background:transparent;font:13px 'MS Shell Dlg 2';font-weight:bold;}");
     m_configHintLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
@@ -3342,7 +3432,65 @@ bool RuntimeWindow::publishVinRequest(bool mergeCharge)
         return false;
     }
 
+    {
+        QMutexLocker locker(&m_dataMutex);
+        m_guns[gun].vinChargeActive = !mergeCharge;
+        m_guns[gun].cardOfflineActive = false;
+    }
+
     std::cerr << "[HMI] publish vin_req topic=" << topic
+              << " payload=" << payload.toStdString() << std::endl;
+    return true;
+}
+
+void RuntimeWindow::onChargingStopClicked()
+{
+    markScreenActivity();
+    publishStopChargeRequest();
+}
+
+bool RuntimeWindow::publishStopChargeRequest()
+{
+    if (!m_mqttReady) {
+        std::cerr << "[HMI] publish stop_charge skipped: mqtt not ready" << std::endl;
+        return false;
+    }
+
+    int gun = 0;
+    {
+        QMutexLocker locker(&m_dataMutex);
+        gun = m_focusGun;
+        if (gun < 0 || gun >= static_cast<int>(m_guns.size())) {
+            gun = 0;
+        }
+    }
+
+    const uint64_t ts = nowMs();
+    const uint64_t seq = ++m_uiSeq;
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "ts", static_cast<double>(ts));
+    cJSON_AddNumberToObject(root, "seq", static_cast<double>(seq));
+    cJSON_AddStringToObject(root, "source", "hmi");
+    cJSON_AddNumberToObject(root, "gun", gun);
+    cJSON_AddStringToObject(root, "cmd", "stop_charge");
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "data", data);
+
+    char *payloadRaw = cJSON_PrintUnformatted(root);
+    const QString payload = payloadRaw ? QString::fromUtf8(payloadRaw) : QString();
+    if (payloadRaw) {
+        cJSON_free(payloadRaw);
+    }
+    cJSON_Delete(root);
+
+    const std::string topic = m_config.mqttTopicPrefix + "/logic/" + std::to_string(gun + m_config.biasNo) + "/cmd";
+    if (!m_mqtt.publish(topic, payload.toStdString(), 1, false)) {
+        std::cerr << "[HMI] publish stop_charge failed topic=" << topic
+                  << " payload=" << payload.toStdString() << std::endl;
+        return false;
+    }
+
+    std::cerr << "[HMI] publish stop_charge topic=" << topic
               << " payload=" << payload.toStdString() << std::endl;
     return true;
 }
@@ -3546,7 +3694,8 @@ void RuntimeWindow::onConfigGunCountChanged()
 
 void RuntimeWindow::loadMeterConfigToUi()
 {
-    if (!m_configGunSingle || !m_configGunDual || !m_configMeterAddr1Edit || !m_configMeterAddr2Edit) {
+    if (!m_configGunSingle || !m_configGunDual || !m_configMeterAddr1Edit || !m_configMeterAddr2Edit
+        || !m_configBaud2400 || !m_configBaud38400) {
         return;
     }
 
@@ -3554,10 +3703,12 @@ void RuntimeWindow::loadMeterConfigToUi()
     int gunCount = 1;
     QString meterAddr1;
     QString meterAddr2;
+    int baudrate = 2400;
     if (cfg.loadConfig(meterConfigPath().toStdString())) {
         gunCount = cfg.getInt("Meter", "gun_count", 1);
         meterAddr1 = QString::fromStdString(cfg.getString("Meter", "gun1_meter_addr", ""));
         meterAddr2 = QString::fromStdString(cfg.getString("Meter", "gun2_meter_addr", ""));
+        baudrate = cfg.getInt("Meter", "gun1_serial_baudrate", 2400);
     }
 
     if (gunCount <= 1) {
@@ -3567,6 +3718,11 @@ void RuntimeWindow::loadMeterConfigToUi()
     }
     m_configMeterAddr1Edit->setText(meterAddr1);
     m_configMeterAddr2Edit->setText(meterAddr2);
+    if (baudrate == 38400) {
+        m_configBaud38400->setChecked(true);
+    } else {
+        m_configBaud2400->setChecked(true);
+    }
     onConfigGunCountChanged();
 }
 
@@ -3590,13 +3746,17 @@ void RuntimeWindow::loadCommConfigToUi()
 
 bool RuntimeWindow::saveMeterConfigFromUi()
 {
-    if (!m_configGunSingle || !m_configGunDual || !m_configMeterAddr1Edit || !m_configMeterAddr2Edit) {
+    if (!m_configGunSingle || !m_configGunDual || !m_configMeterAddr1Edit || !m_configMeterAddr2Edit
+        || !m_configBaud2400 || !m_configBaud38400) {
         return false;
     }
 
     const QString meterAddr1 = m_configMeterAddr1Edit->text().trimmed();
     const QString meterAddr2 = m_configMeterAddr2Edit->text().trimmed();
     const int gunCount = (m_configGunDual && m_configGunDual->isChecked()) ? 2 : 1;
+    const QString baudrate = (m_configBaud38400 && m_configBaud38400->isChecked())
+        ? QString::fromUtf8("38400")
+        : QString::fromUtf8("2400");
     if (meterAddr1.isEmpty()) {
         QMessageBox::warning(this, QString::fromUtf8("提示"), QString::fromUtf8("请填写电表地址1"));
         return false;
@@ -3614,6 +3774,12 @@ bool RuntimeWindow::saveMeterConfigFromUi()
         return false;
     }
     if (!replaceConfigValue(cfgPath, QString::fromUtf8("Meter"), QString::fromUtf8("gun2_meter_addr"), gunCount > 1 ? meterAddr2 : QString())) {
+        return false;
+    }
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("Meter"), QString::fromUtf8("gun1_serial_baudrate"), baudrate)) {
+        return false;
+    }
+    if (!replaceConfigValue(cfgPath, QString::fromUtf8("Meter"), QString::fromUtf8("gun2_serial_baudrate"), baudrate)) {
         return false;
     }
     return true;
@@ -4244,6 +4410,14 @@ void RuntimeWindow::refreshChargingPage(const GunUiData &gun)
                  gun.cardOfflineActive
                     ? QString::fromUtf8("再次刷卡停止充电，请等待停止完成后取卡")
                     : QString::fromUtf8("请操作手机停止充电"));
+    if (m_chargingStopButton) {
+        if (gun.vinChargeActive && !gun.cardOfflineActive) {
+            m_chargingStopButton->show();
+            m_chargingStopButton->raise();
+        } else {
+            m_chargingStopButton->hide();
+        }
+    }
 }
 
 void RuntimeWindow::refreshStoppingPage(const GunUiData &gun)
@@ -4269,6 +4443,7 @@ void RuntimeWindow::refreshCheckoutPage(const GunUiData &gun)
 
 void RuntimeWindow::refreshAboutPage()
 {
+    loadVersionJson(m_monStatus);
     refreshFeeModelCache(false);
     refreshFaultRecordCache(false);
     refreshFaultRecordTable();
@@ -4286,20 +4461,29 @@ void RuntimeWindow::refreshAboutPage()
     setLabelText(m_aboutPage, "lblJzqAddr", QString::fromStdString(m_macAddr));
 
     setLabelText(m_aboutPage, "lblVersionLogic",
-                 QString("logic    %1    %2")
+                 QString("%1    %2")
                     .arg(QString::fromStdString(m_monStatus.logic.version.empty() ? "--" : m_monStatus.logic.version))
                     .arg(QString::fromStdString(m_monStatus.logic.buildDate.empty() ? "--" : m_monStatus.logic.buildDate)));
     setLabelText(m_aboutPage, "lblVersionMeter",
-                 QString("meter    %1    %2")
+                 QString("%1    %2")
                     .arg(QString::fromStdString(m_monStatus.meter.version.empty() ? "--" : m_monStatus.meter.version))
                     .arg(QString::fromStdString(m_monStatus.meter.buildDate.empty() ? "--" : m_monStatus.meter.buildDate)));
     setLabelText(m_aboutPage, "lblVersionMon",
-                 QString("mon      %1    %2")
+                 QString("%1    %2")
                     .arg(QString::fromStdString(m_monStatus.mon.version.empty() ? "--" : m_monStatus.mon.version))
                     .arg(QString::fromStdString(m_monStatus.mon.buildDate.empty() ? "--" : m_monStatus.mon.buildDate)));
-    setLabelText(m_aboutPage, "lblVersionComm", QString("comm     --    --"));
-    setLabelText(m_aboutPage, "lblVersionDaemon", QString("daemon   --    --"));
-    setLabelText(m_aboutPage, "lblVersionHmi", QString("hmi      Zhongshihua2.0    MQTT Runtime"));
+    setLabelText(m_aboutPage, "lblVersionComm",
+                 QString("%1    %2")
+                    .arg(QString::fromStdString(m_monStatus.comm.version.empty() ? "--" : m_monStatus.comm.version))
+                    .arg(QString::fromStdString(m_monStatus.comm.buildDate.empty() ? "--" : m_monStatus.comm.buildDate)));
+    setLabelText(m_aboutPage, "lblVersionDaemon",
+                 QString("%1    %2")
+                    .arg(QString::fromStdString(m_monStatus.daemon.version.empty() ? "--" : m_monStatus.daemon.version))
+                    .arg(QString::fromStdString(m_monStatus.daemon.buildDate.empty() ? "--" : m_monStatus.daemon.buildDate)));
+    setLabelText(m_aboutPage, "lblVersionHmi",
+                 QString("%1    %2")
+                    .arg(QString::fromStdString(m_monStatus.hmi.version.empty() ? "--" : m_monStatus.hmi.version))
+                    .arg(QString::fromStdString(m_monStatus.hmi.buildDate.empty() ? "--" : m_monStatus.hmi.buildDate)));
 
     setLabelText(m_aboutPage, "lblCommPlatform", QString::number(m_monStatus.platformComm));
     setLabelText(m_aboutPage, "lblCommMeter", QString::number(m_monStatus.meterComm));

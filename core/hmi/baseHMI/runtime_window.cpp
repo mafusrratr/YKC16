@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QAbstractButton>
 #include <QBrush>
+#include <QCheckBox>
 #include <QDateTime>
 #include <QDir>
 #include <QEvent>
@@ -703,6 +704,7 @@ RuntimeWindow::HmiConfig::HmiConfig()
     , enableVinEntry(false)
     , enableQrEntry(false)
     , enableCardEntry(false)
+    , enableCardDischarge(false)
     , cardOnlineAuth(false)
 {
 }
@@ -826,6 +828,9 @@ RuntimeWindow::RuntimeWindow(QWidget *parent)
     , m_configConfirmButton(0)
     , m_configGunSingle(0)
     , m_configGunDual(0)
+    , m_configCardDischarge(0)
+    , m_cardChargeRadio(0)
+    , m_cardDischargeRadio(0)
     , m_configKeyboardUppercase(false)
     , m_configKeyboardNumberMode(false)
     , m_configKeyboardNumericOnly(false)
@@ -933,6 +938,7 @@ bool RuntimeWindow::loadConfig()
     m_config.enableVinEntry = cfg.getBool(section, "enable_vin_entry", false);
     m_config.enableQrEntry = cfg.getBool(section, "enable_qr_entry", false);
     m_config.enableCardEntry = cfg.getBool(section, "enable_card_entry", false);
+    m_config.enableCardDischarge = cfg.getBool(section, "enable_card_discharge", false);
     m_config.cardOnlineAuth = cfg.getBool(section, "card_online_auth", false);
 
     m_gunCount = cfg.getInt(section, "gun_count", 1);
@@ -1126,6 +1132,17 @@ void RuntimeWindow::bindStaticUi()
         btnCard->setVisible(m_config.enableCardEntry);
         connect(btnCard, SIGNAL(clicked()), this, SLOT(onAuthorizeCardClicked()));
     }
+    m_cardChargeRadio = new QRadioButton(QString::fromUtf8("充电"), m_authorizePage);
+    m_cardChargeRadio->setObjectName("radioCardCharge");
+    m_cardChargeRadio->setStyleSheet("QRadioButton{color:white;font:20px 'MS Shell Dlg 2';font-weight:bold;background:transparent;}");
+    m_cardChargeRadio->setChecked(true);
+    m_cardChargeRadio->hide();
+
+    m_cardDischargeRadio = new QRadioButton(QString::fromUtf8("放电"), m_authorizePage);
+    m_cardDischargeRadio->setObjectName("radioCardDischarge");
+    m_cardDischargeRadio->setStyleSheet(m_cardChargeRadio->styleSheet());
+    m_cardDischargeRadio->hide();
+
     QLabel *idleId = m_idlePage->findChild<QLabel *>("label_id");
     if (idleId) {
         idleId->raise();
@@ -2604,6 +2621,7 @@ void RuntimeWindow::handleAboutTabChanged(int index)
         if (tabName == QString::fromUtf8("tab_4")) {
             loadMeterConfigToUi();
             loadCommConfigToUi();
+            loadHmiConfigToUi();
         }
         if (tabName != QString::fromUtf8("tab_4") && m_configKeyboard) {
             m_configKeyboard->hide();
@@ -2773,9 +2791,15 @@ void RuntimeWindow::setupConfigTab()
         m_configMeter2Row->raise();
     }
 
+    m_configCardDischarge = new QCheckBox(QString::fromUtf8("刷卡放电使能"), rightCard);
+    m_configCardDischarge->setObjectName("checkConfigCardDischarge");
+    m_configCardDischarge->setGeometry(18, 8, 180, 28);
+    m_configCardDischarge->setStyleSheet("QCheckBox{color:rgb(38,45,52);font:15px 'MS Shell Dlg 2';font-weight:bold;background:transparent;}");
+    m_configCardDischarge->setChecked(m_config.enableCardDischarge);
+
     m_configKeyboard = new QFrame(rightCard);
     m_configKeyboard->setObjectName("configKeyboard");
-    m_configKeyboard->setGeometry(10, 16, 403, 286);
+    m_configKeyboard->setGeometry(10, 42, 403, 260);
     m_configKeyboard->setStyleSheet("QFrame{background:rgb(236,238,239);border:1px solid rgb(160,160,160);border-radius:10px;}");
 
     for (i = 0; i < 30; ++i) {
@@ -3234,6 +3258,10 @@ void RuntimeWindow::onAuthorizeCardClicked()
     const uint64_t ts = nowMs();
     const uint64_t seq = ++m_uiSeq;
     const QString mode = m_config.cardOnlineAuth ? QString::fromUtf8("online") : QString::fromUtf8("offline");
+    const bool cardDischargeMode = (m_config.enableCardDischarge &&
+                                    m_cardDischargeRadio &&
+                                    m_cardDischargeRadio->isVisible() &&
+                                    m_cardDischargeRadio->isChecked());
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "ts", static_cast<double>(ts));
     cJSON_AddNumberToObject(root, "seq", static_cast<double>(seq));
@@ -3243,6 +3271,7 @@ void RuntimeWindow::onAuthorizeCardClicked()
 
     cJSON *data = cJSON_CreateObject();
     cJSON_AddStringToObject(data, "mode", mode.toUtf8().constData());
+    cJSON_AddNumberToObject(data, "v2g", cardDischargeMode ? 1 : 0);
 
     if (!m_config.cardOnlineAuth) {
         // BY ZF: 离线刷卡启动时显式携带当前计费模型，logic 若未收到则才回退本地缓存。
@@ -3282,6 +3311,7 @@ void RuntimeWindow::onAuthorizeCardClicked()
     {
         QMutexLocker locker(&m_dataMutex);
         m_guns[gun].cardOfflineActive = !m_config.cardOnlineAuth;
+        m_guns[gun].v2gMode = cardDischargeMode; // BY ZF: 刷卡启动后立即按用户选择刷新充/放电文案，后续以上游 v2g 回包校正。
     }
 
     std::cerr << "[HMI] publish request_card_start topic=" << topic
@@ -3622,6 +3652,20 @@ void RuntimeWindow::loadCommConfigToUi()
     m_configSecretEdit->setText(loginId);
 }
 
+void RuntimeWindow::loadHmiConfigToUi()
+{
+    if (!m_configCardDischarge) {
+        return;
+    }
+
+    ConfigManagerLite &cfg = ConfigManagerLite::getInstance();
+    bool enableCardDischarge = m_config.enableCardDischarge;
+    if (cfg.loadConfig(hmiConfigPath().toStdString())) {
+        enableCardDischarge = cfg.getBool("Hmi", "enable_card_discharge", enableCardDischarge);
+    }
+    m_configCardDischarge->setChecked(enableCardDischarge);
+}
+
 bool RuntimeWindow::saveMeterConfigFromUi()
 {
     if (!m_configGunSingle || !m_configGunDual || !m_configMeterAddr1Edit || !m_configMeterAddr2Edit) {
@@ -3686,13 +3730,19 @@ bool RuntimeWindow::saveCommConfigFromUi()
 
 bool RuntimeWindow::saveHmiConfigFromUi()
 {
-    if (!m_configGunSingle || !m_configGunDual) {
+    if (!m_configGunSingle || !m_configGunDual || !m_configCardDischarge) {
         return false;
     }
 
     const int gunCount = (m_configGunDual && m_configGunDual->isChecked()) ? 2 : 1;
     const QString cfgPath = hmiConfigPath();
     if (!replaceConfigValue(cfgPath, QString::fromUtf8("Hmi"), QString::fromUtf8("gun_count"), QString::number(gunCount))) {
+        return false;
+    }
+    if (!replaceConfigValue(cfgPath,
+                            QString::fromUtf8("Hmi"),
+                            QString::fromUtf8("enable_card_discharge"),
+                            m_configCardDischarge->isChecked() ? QString::fromUtf8("1") : QString::fromUtf8("0"))) {
         return false;
     }
     return replaceConfigValue(cfgPath,
@@ -3757,6 +3807,7 @@ void RuntimeWindow::onConfigResetClicked()
     markScreenActivity();
     loadMeterConfigToUi();
     loadCommConfigToUi();
+    loadHmiConfigToUi();
     if (m_configKeyboard) {
         m_configKeyboard->hide();
     }
@@ -4080,6 +4131,7 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
     QPushButton *btnMergeCharge = m_authorizePage->findChild<QPushButton *>("bbms");
     QPushButton *btnVin = m_authorizePage->findChild<QPushButton *>("vin");
     QPushButton *btnCard = m_authorizePage->findChild<QPushButton *>("card");
+    const bool showCardModeOptions = inserted && m_config.enableCardEntry && m_config.enableCardDischarge;
 
     QRWidget *qr = m_authorizePage->findChild<QRWidget *>("qrMain");
     QLabel *qcq = m_authorizePage->findChild<QLabel *>("qcq");
@@ -4135,6 +4187,24 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
             entryButtons.push_back(btnCard);
         } else {
             btnCard->hide();
+        }
+    }
+    if (m_cardChargeRadio) {
+        if (showCardModeOptions) {
+            if (!m_cardDischargeRadio || !m_cardDischargeRadio->isChecked()) {
+                m_cardChargeRadio->setChecked(true);
+            }
+            m_cardChargeRadio->show();
+        } else {
+            m_cardChargeRadio->setChecked(true);
+            m_cardChargeRadio->hide();
+        }
+    }
+    if (m_cardDischargeRadio) {
+        if (showCardModeOptions) {
+            m_cardDischargeRadio->show();
+        } else {
+            m_cardDischargeRadio->hide();
         }
     }
 
@@ -4197,6 +4267,15 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
                 entryButtons[idx]->setGeometry(slotCenterX - btnSize / 2, centerY - btnSize / 2, btnSize, btnSize);
             }
         }
+    }
+    if (showCardModeOptions && btnCard && m_cardChargeRadio && m_cardDischargeRadio) {
+        // BY ZF: 刷卡放电投入后，在刷卡入口下方补充充/放电互斥选择，默认充电。
+        const QRect cardRect = btnCard->geometry();
+        const int radioY = cardRect.bottom() + 10;
+        m_cardChargeRadio->setGeometry(cardRect.left() - 4, radioY, 76, 30);
+        m_cardDischargeRadio->setGeometry(cardRect.left() + 84, radioY, 76, 30);
+        m_cardChargeRadio->raise();
+        m_cardDischargeRadio->raise();
     }
     if (tips) {
         if (isError) {

@@ -425,7 +425,7 @@ static const MqttFieldBinding kMqttYxBindings[] = {
     { "totalAlarm", SHM_SOURCE_YX, YX_TOTAL_ALARM, 1.0 },
     { "emergencyStopFault", SHM_SOURCE_YX, YX_EMERGENCY_STOP_FAULT, 1.0 },
     { "vehicleConnectStatus", SHM_SOURCE_YX, YX_VEHICLE_CONNECT_STATUS, 1.0 },
-    { "vinReq", SHM_SOURCE_YX, YX_PNC_START_REQUEST, 1.0 },
+    { "vinReq", SHM_SOURCE_YX, YX_HMI_LOCAL_PNC_START, 1.0 },
     { "gunSeatStatus", SHM_SOURCE_YX, YX_GUN_SEAT_STATUS, 1.0 },
     { "electronicLockStatus", SHM_SOURCE_YX, YX_ELECTRONIC_LOCK_STATUS, 1.0 },
     { "dcContactorStatus", SHM_SOURCE_YX, YX_DC_CONTACTOR_STATUS, 1.0 },
@@ -595,7 +595,7 @@ static const StructFieldCoverage kDataYX22Coverage[] = {
 
 static const StructFieldCoverage kDataYX23Coverage[] = {
     { "faultBits138to165", SHM_COVER_DIRECT, SHM_SOURCE_YX, YX_PILE_DOOR_FAULT, "direct one-to-one mapping through YX165" },
-    { "vinReq", SHM_COVER_COMPOSED, SHM_SOURCE_YX, YX_PNC_START_REQUEST, "mapped to YX196 request plug-and-charge start" },
+    { "vinReq", SHM_COVER_COMPOSED, SHM_SOURCE_YX, YX_HMI_LOCAL_PNC_START, "mapped to YX222 local plug-and-charge start request" },
     { "statusBits197to217", SHM_COVER_DIRECT, SHM_SOURCE_YX, YX_AC_INPUT_CONTACTOR_STATUS, "direct one-to-one mapping through YX217" }
 };
 

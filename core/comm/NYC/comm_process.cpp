@@ -68,12 +68,6 @@ namespace {
     static const uint8_t kCmdChangeTelemetry = 0x17;
     static const uint8_t kCmdAlarm = 0x18;
 
-    // BY ZF: 高级应用管理。
-    static const uint8_t kCmdBmsInfo = 0x21;
-    static const uint8_t kCmdChargeStageEvent = 0x22;
-    static const uint8_t kCmdRawMessagePassThrough = 0x23;
-    static const uint8_t kCmdChargeCurveCall = 0x24;
-
     // BY ZF: 充电过程控制。
     static const uint8_t kCmdRemoteStartCmd = 0x41;
     static const uint8_t kCmdUploadTradeRecord = 0x42;
@@ -117,28 +111,6 @@ namespace {
             text.insert(text.begin(), 8 - text.size(), '0');
         }
         return text;
-    }
-
-    // BY ZF: 桩编码 -> 7字节BCD，不足7字节补0（取数字字符）。
-    static void appendPileCodeBcd7(std::vector<uint8_t>& out, const std::string& cdzNo)
-    {
-        std::string digits;
-        for (size_t i = 0; i < cdzNo.size(); ++i) {
-            if (cdzNo[i] >= '0' && cdzNo[i] <= '9') {
-                digits.push_back(cdzNo[i]);
-            }
-        }
-        if (digits.size() > 14) {
-            digits = digits.substr(digits.size() - 14);
-        }
-        if (digits.size() < 14) {
-            digits.insert(digits.begin(), 14 - digits.size(), '0');
-        }
-        for (size_t i = 0; i < 14; i += 2) {
-            const uint8_t hi = static_cast<uint8_t>(digits[i] - '0');
-            const uint8_t lo = static_cast<uint8_t>(digits[i + 1] - '0');
-            out.push_back(static_cast<uint8_t>((hi << 4) | lo));
-        }
     }
 
     // BY ZF: Base64编码（无换行）。
@@ -706,30 +678,6 @@ namespace {
         return out;
     }
 
-    // BY ZF: 任意位数字字符串按固定BCD字节长度写入（左侧补0，超长截断高位）。
-    static void appendBcdFixed(std::vector<uint8_t>& out, const std::string& text, size_t bcdBytes)
-    {
-        std::string digits;
-        digits.reserve(text.size());
-        for (size_t i = 0; i < text.size(); ++i) {
-            if (text[i] >= '0' && text[i] <= '9') {
-                digits.push_back(text[i]);
-            }
-        }
-        const size_t needDigits = bcdBytes * 2U;
-        if (digits.size() > needDigits) {
-            digits = digits.substr(digits.size() - needDigits);
-        }
-        if (digits.size() < needDigits) {
-            digits.insert(digits.begin(), needDigits - digits.size(), '0');
-        }
-        for (size_t i = 0; i < needDigits; i += 2) {
-            const uint8_t hi = static_cast<uint8_t>(digits[i] - '0');
-            const uint8_t lo = static_cast<uint8_t>(digits[i + 1] - '0');
-            out.push_back(static_cast<uint8_t>((hi << 4) | lo));
-        }
-    }
-
     // BY ZF: JSON 字段读取工具。
     static bool jsonGetNumber(cJSON* obj, const char* key, double& out)
     {
@@ -794,13 +742,6 @@ namespace {
         return static_cast<uint32_t>(v * scale + 0.5);
     }
 
-    // BY ZF: 小端序追加工具（中石化BIN字段按小端组织）。
-    static void appendU16LE(std::vector<uint8_t>& out, uint16_t v)
-    {
-        out.push_back(static_cast<uint8_t>(v & 0xFF));
-        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-    }
-
     static void appendU32LE(std::vector<uint8_t>& out, uint32_t v)
     {
         out.push_back(static_cast<uint8_t>(v & 0xFF));
@@ -834,10 +775,6 @@ namespace {
         case kCmdChangeTelesignal: return "change_telesignal";
         case kCmdChangeTelemetry: return "change_telemetry";
         case kCmdAlarm: return "alarm";
-        case kCmdBmsInfo: return "bms_info";
-        case kCmdChargeStageEvent: return "charge_stage_event";
-        case kCmdRawMessagePassThrough: return "raw_message_pass_through";
-        case kCmdChargeCurveCall: return "charge_curve_call";
         case kCmdRemoteStartCmd: return "remote_start_cmd";
         case kCmdUploadTradeRecord: return "upload_trade_record";
         case kCmdRemoteStopCmd: return "remote_stop_cmd";
@@ -891,7 +828,6 @@ bool CommProcess::doInitialize()
     m_lastSetConfigPublishByGun.assign(static_cast<size_t>(m_config.gunCount),
                                        std::chrono::steady_clock::now() - std::chrono::seconds(3600));
     m_lastSetConfigPayloadByGun.assign(static_cast<size_t>(m_config.gunCount), std::string());
-    m_lastChargeInfoReportByGun.assign(static_cast<size_t>(m_config.gunCount), std::chrono::steady_clock::now());
     m_runtimeChangedByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
     m_lastTelesignalValuesByGun.assign(static_cast<size_t>(m_config.gunCount), std::array<uint8_t, 6>{{0}});
     m_lastTelesignalValidByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
@@ -914,7 +850,7 @@ void CommProcess::doRun()
             feedDaemonWatchdog();
             lastFeedTime = now;
         }
-        // BY ZF: 运行期间每30秒补发一次每枪 setConfig（retain），便于订阅端周期获取最新配置。
+        // BY ZF: 运行期间每30秒补发一次每枪 setConfig，便于订阅端周期获取最新配置。
         if (now - m_lastPeriodicSetConfigPublish >= std::chrono::seconds(30)) {
             publishInitialSetConfig();
             m_lastPeriodicSetConfigPublish = now;
@@ -1059,11 +995,11 @@ void CommProcess::onMqttConnected(int rc)
     m_mqtt.subscribe(p + "/pile/+/data", 0);
     m_mqtt.subscribe(p + "/pile/+/event", 1);
     m_mqtt.subscribe(p + "/meter/+/data", 0);
-    // BY ZF: MQTT重连后主动发布一次每枪setConfig（retain）。
+    // BY ZF: MQTT重连后主动发布一次每枪 setConfig。
     publishInitialSetConfig();
-    // BY ZF: 仅在已确认平台在线时补发在线事件，避免把“尚未完成登录”误判成平台离线。
+    // BY ZF: 仅在已确认平台在线时补发保留态，在线状态统一由心跳有效性维护。
     if (m_platformOnlineEventActive || m_config.offlineRunMode) {
-        publishPlatformLinkEvent(true, m_config.offlineRunMode ? "offline_mode" : "login_ready");
+        publishPlatformLinkEvent(true, m_config.offlineRunMode ? "offline_mode" : "heartbeat_ok");
     }
 }
 
@@ -1448,115 +1384,10 @@ bool CommProcess::handlePileEventForPlatform(uint8_t gun, const std::string& pay
     cJSON* type = cJSON_GetObjectItem(root, "type");
     cJSON* data = cJSON_GetObjectItem(root, "data");
     if (cJSON_IsString(type) && type->valuestring &&
-        std::strcmp(type->valuestring, "start_complete") == 0 &&
+        ((std::strcmp(type->valuestring, "start_complete") == 0) ||
+         (std::strcmp(type->valuestring, "stop_complete") == 0)) &&
         cJSON_IsObject(data)) {
-        GunRuntimeData& rd = m_gunRuntimeData[gun];
-        auto getU8 = [data](const char* key, uint8_t defVal) -> uint8_t {
-            cJSON* n = cJSON_GetObjectItem(data, key);
-            if (!n || !cJSON_IsNumber(n)) {
-                return defVal;
-            }
-            int v = n->valueint;
-            if (v < 0) v = 0;
-            if (v > 255) v = 255;
-            return static_cast<uint8_t>(v);
-        };
-        auto getU16 = [data](const char* key, uint16_t defVal) -> uint16_t {
-            cJSON* n = cJSON_GetObjectItem(data, key);
-            if (!n || !cJSON_IsNumber(n)) {
-                return defVal;
-            }
-            int v = n->valueint;
-            if (v < 0) v = 0;
-            if (v > 0xFFFF) v = 0xFFFF;
-            return static_cast<uint16_t>(v);
-        };
-        auto getAscii = [data](const char* key) -> std::string {
-            cJSON* s = cJSON_GetObjectItem(data, key);
-            if (s && cJSON_IsString(s) && s->valuestring) {
-                return std::string(s->valuestring);
-            }
-            return std::string();
-        };
-        auto getBytes = [data](const char* key, uint8_t* outBytes, size_t len) {
-            std::memset(outBytes, 0, len);
-            cJSON* arr = cJSON_GetObjectItem(data, key);
-            if (!arr || !cJSON_IsArray(arr)) {
-                return;
-            }
-            const int n = cJSON_GetArraySize(arr);
-            for (size_t i = 0; i < len && static_cast<int>(i) < n; ++i) {
-                cJSON* it = cJSON_GetArrayItem(arr, static_cast<int>(i));
-                if (!it || !cJSON_IsNumber(it)) {
-                    continue;
-                }
-                int v = it->valueint;
-                if (v < 0) v = 0;
-                if (v > 255) v = 255;
-                outBytes[i] = static_cast<uint8_t>(v);
-            }
-        };
-
-        rd.startCompleteData.successFlag = getU8("successFlag", 1);
-        rd.startCompleteData.failReason = getU8("chargeFailReason", 0);
-        getBytes("pileBmsVersion", rd.startCompleteData.pileBmsVersion.data(), rd.startCompleteData.pileBmsVersion.size());
-        rd.startCompleteData.batteryType = getU8("batteryType", 0);
-        rd.startCompleteData.ratedCapacity = getU16("ratedCapacity", 0);
-        rd.startCompleteData.ratedTotalVoltage = getU16("ratedTotalVoltage", 0);
-        rd.startCompleteData.cellMaxChargeVoltage = getU16("cellMaxChargeVoltage", 0);
-        rd.startCompleteData.bmsMaxChargeVoltage = getU16("bmsMaxChargeVoltage", 0);
-        rd.startCompleteData.maxAllowChargeCurrent = getU16("maxAllowChargeCurrent", 0);
-        rd.startCompleteData.currentTotalVoltage = getU16("currentTotalVoltage", 0);
-        rd.startCompleteData.maxAllowTemp = getU8("maxAllowTemp", 0);
-        rd.startCompleteData.pileMaxOutputVoltage = getU16("pileMaxOutputVoltage", 0);
-        rd.startCompleteData.pileMinOutputVoltage = getU16("pileMinOutputVoltage", 0);
-        rd.startCompleteData.pileMaxOutputCurrent = getU16("pileMaxOutputCurrent", 0);
-        rd.startCompleteData.pileMinOutputCurrent = getU16("pileMinOutputCurrent", 0);
-        rd.startCompleteData.batteryManufacturer = getAscii("batteryManufacturer");
-        getBytes("batterySerial", rd.startCompleteData.batterySerial.data(), rd.startCompleteData.batterySerial.size());
-        rd.startCompleteData.batteryPropertyFlag = getU8("batteryPropertyFlag", 0);
-        rd.startCompleteData.batteryProdYear = getU8("batteryProdYear", 0);
-        rd.startCompleteData.batteryProdMonth = getU8("batteryProdMonth", 0);
-        rd.startCompleteData.batteryProdDay = getU8("batteryProdDay", 0);
-        getBytes("batteryChargeCount", rd.startCompleteData.batteryChargeCount.data(), rd.startCompleteData.batteryChargeCount.size());
-        rd.startCompleteData.nominalEnergy = getU8("nominalEnergy", 0);
-        rd.startCompleteData.soc = getU8("soc", 0);
-        rd.startCompleteData.vin = getAscii("vin");
-        getBytes("bmsSoftwareVersion", rd.startCompleteData.bmsSoftwareVersion.data(), rd.startCompleteData.bmsSoftwareVersion.size());
-        rd.startCompleteData.insulationFault = getU8("insulationMonitorFault", 0);
-
-        const std::vector<uint8_t> body = buildStartChargeResultBody(gun);
-        if (!body.empty()) {
-            (void)sendPlatformFrame(kCmdChargeStageEvent, body);
-        }
-        // BY ZF: 启动完成事件到达后，任何结果都上送 0x15 BRM（字段来自运行态缓存）。
-        const std::vector<uint8_t> brmBody = buildBrmBody(gun);
-        if (!brmBody.empty()) {
-            (void)sendPlatformFrame(kCmdBmsInfo, brmBody);
-        }
-        // BY ZF: 与0x15同位置，上送0x17 BCP参数配置报文。
-        const std::vector<uint8_t> bcpBody = buildBcpBody(gun);
-        if (!bcpBody.empty()) {
-            (void)sendPlatformFrame(kCmdChangeTelemetry, bcpBody);
-        }
-    } else if (cJSON_IsString(type) && type->valuestring &&
-               std::strcmp(type->valuestring, "stop_complete") == 0 &&
-               cJSON_IsObject(data)) {
-        // BY ZF: 停止完成后补送0x19结束阶段报文（BSD/CSD汇总）。
-        const std::vector<uint8_t> endStageBody = buildChargeEndStageBody(gun, data);
-        if (!endStageBody.empty()) {
-            (void)sendPlatformFrame(kCmdChargeStageEvent, endStageBody);
-        }
-        // BY ZF: 停止完成后上送0x1D BST报文。
-        const std::vector<uint8_t> bstBody = buildBstBody(gun, data);
-        if (!bstBody.empty()) {
-            (void)sendPlatformFrame(kCmdChargeStageEvent, bstBody);
-        }
-        // BY ZF: 停止完成后上送0x21 CST报文（当前中止原因字段固定0x00）。
-        const std::vector<uint8_t> cstBody = buildCstBody(gun);
-        if (!cstBody.empty()) {
-            (void)sendPlatformFrame(kCmdBmsInfo, cstBody);
-        }
+        // BY ZF: NYC 当前未实现 0x21~0x24 高级应用上送，启动完成/停止完成事件在此忽略。
     }
 
     cJSON_Delete(root);
@@ -1763,6 +1594,10 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
     appendString8(tradeNo);
 
     m_gunRuntimeData[gun].pendingRecordTradeNo = tradeNo;
+    m_gunRuntimeData[gun].pendingRecordStartTime = startTime;
+    m_gunRuntimeData[gun].pendingRecordTotalElectRaw = scaleToU32(totalElect, 1000.0);
+    m_gunRuntimeData[gun].pendingRecordTotalCostRaw = scaleToU32(totalCost, 10000.0);
+    m_gunRuntimeData[gun].pendingRecordCardNumber = cardNumber;
     return true;
 }
 
@@ -2065,7 +1900,6 @@ bool CommProcess::connectPlatformTcp()
     m_lastHeartbeatRecv = std::chrono::steady_clock::now();
     m_lastChargeInfoReport = std::chrono::steady_clock::now();
     m_lastTelemetryReport = std::chrono::steady_clock::now();
-    m_lastChargeInfoReportByGun.assign(static_cast<size_t>(m_config.gunCount), m_lastChargeInfoReport);
     m_runtimeChangedByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
     m_lastTelesignalValuesByGun.assign(static_cast<size_t>(m_config.gunCount), std::array<uint8_t, 6>{{0}});
     m_lastTelesignalValidByGun.assign(static_cast<size_t>(m_config.gunCount), 0);
@@ -2420,7 +2254,7 @@ std::vector<uint8_t> CommProcess::buildPlatformFrameEx(uint8_t cmd, const std::v
     }
 
     // BY ZF: NYC报文头：68H + 报文长度低/高 + 桩地址 + 帧类型 + 传送原因 + 加密方式 + 信息体个数。
-    // BY ZF: 报文长度不含启动符和长度域，固定头后5字节 + 信息体长度；完整报文不附加中石化2.0 CRC。
+    // BY ZF: 报文长度不含启动符和长度域，固定头后5字节 + 信息体长度；完整报文不附加额外CRC。
     const uint16_t totalLen = static_cast<uint16_t>(5U + payload.size());
     const uint8_t bodyCount = (bodyCountOverride >= 0)
             ? static_cast<uint8_t>(bodyCountOverride & 0xFF)
@@ -2509,393 +2343,6 @@ std::vector<uint8_t> CommProcess::buildHeartbeatBody()
     return std::vector<uint8_t>();
 }
 
-std::vector<uint8_t> CommProcess::buildBrmBody(uint8_t gun) const
-{
-    std::vector<uint8_t> body;
-    if (gun >= m_gunRuntimeData.size()) {
-        return body;
-    }
-
-    const GunRuntimeData& rd = m_gunRuntimeData[gun];
-    auto fillAsciiFixed = [](std::vector<uint8_t>& out, const std::string& s, size_t width) {
-        size_t n = std::min(width, s.size());
-        out.insert(out.end(), s.begin(), s.begin() + static_cast<std::ptrdiff_t>(n));
-        if (n < width) {
-            out.insert(out.end(), width - n, 0x00);
-        }
-    };
-
-    // BY ZF: 0x15 BRM 上送：交易流水号 + 桩编号 + 枪号。
-    appendBcdFixed(body, rd.orderNo, 16);
-    appendPileCodeBcd7(body, m_config.cdzNo);
-    const int gunNo = static_cast<int>(gun) + 1;
-    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
-
-    // BY ZF: BRM(BMS)通信协议版本号（3字节）。
-    // BY ZF: 按协议示例 V1.10 => 0x01 0x01 0x00，上送3字节原值。
-    body.insert(body.end(),
-                rd.startCompleteData.pileBmsVersion.begin(),
-                rd.startCompleteData.pileBmsVersion.end());
-
-    // BY ZF: BRM 基础字段。
-    body.push_back(rd.startCompleteData.batteryType);
-    appendU16LE(body, rd.startCompleteData.ratedCapacity);
-    appendU16LE(body, rd.startCompleteData.ratedTotalVoltage);
-
-    fillAsciiFixed(body, rd.startCompleteData.batteryManufacturer, 4);
-    body.insert(body.end(), rd.startCompleteData.batterySerial.begin(), rd.startCompleteData.batterySerial.end());
-
-    body.push_back(rd.startCompleteData.batteryProdYear);
-    body.push_back(rd.startCompleteData.batteryProdMonth);
-    body.push_back(rd.startCompleteData.batteryProdDay);
-    
-
-    body.insert(body.end(), rd.startCompleteData.batteryChargeCount.begin(), rd.startCompleteData.batteryChargeCount.end());
-    body.push_back(rd.startCompleteData.batteryPropertyFlag);
-    // BY ZF: 预留1字节，当前固定0x00。
-    body.push_back(0x00);
-    fillAsciiFixed(body, rd.startCompleteData.vin, 17);
-    body.insert(body.end(), rd.startCompleteData.bmsSoftwareVersion.begin(), rd.startCompleteData.bmsSoftwareVersion.end());
-    // BY ZF: 离线模式标记，当前在线固定 0x00。
-    body.push_back(0x00);
-    return body;
-}
-
-std::vector<uint8_t> CommProcess::buildBcpBody(uint8_t gun) const
-{
-    std::vector<uint8_t> body;
-    if (gun >= m_gunRuntimeData.size()) {
-        return body;
-    }
-
-    const GunRuntimeData& rd = m_gunRuntimeData[gun];
-
-    // BY ZF: 0x17 BCP参数配置报文。
-    // 1) 交易流水号 BCD16
-    appendBcdFixed(body, rd.orderNo, 16);
-    // 2) 桩编号 BCD7
-    appendPileCodeBcd7(body, m_config.cdzNo);
-    // 3) 枪号 BCD1（1..n）
-    const int gunNo = static_cast<int>(gun) + 1;
-    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
-
-    // 4) BMS单体动力蓄电池最高允许充电电压（0.01V/位）
-    appendU16LE(body, rd.startCompleteData.cellMaxChargeVoltage);
-    // 5) BMS最高允许充电电流（0.1A/位，按协议偏移+800A）
-    {
-        int bmsMaxCurrentRaw = static_cast<int>(rd.startCompleteData.maxAllowChargeCurrent) + 8000;
-        if (bmsMaxCurrentRaw < 0) {
-            bmsMaxCurrentRaw = 0;
-        }
-        if (bmsMaxCurrentRaw > 65535) {
-            bmsMaxCurrentRaw = 65535;
-        }
-        appendU16LE(body, static_cast<uint16_t>(bmsMaxCurrentRaw));
-    }
-    // 6) BMS动力蓄电池标称总能量（0.1kWh/位）
-    appendU16LE(body, static_cast<uint16_t>(rd.startCompleteData.nominalEnergy));
-    // 7) BMS最高允许充电总电压（0.1V/位）
-    appendU16LE(body, rd.startCompleteData.bmsMaxChargeVoltage);
-    // 8) BMS最高允许温度（偏移50，原始值直传）
-    body.push_back(rd.startCompleteData.maxAllowTemp + 50);
-    // 9) BMS整车动力蓄电池荷电状态SOC（0.1%/位）
-    appendU16LE(body, static_cast<uint16_t>(rd.startCompleteData.soc));
-    // 10) BMS整车动力蓄电池当前电池总电压（0.1V/位）
-    appendU16LE(body, rd.startCompleteData.currentTotalVoltage);
-    // 11) CML电桩最高输出电压（0.1V/位）
-    appendU16LE(body, rd.startCompleteData.pileMaxOutputVoltage);
-    // 12) CML电桩最低输出电压（0.1V/位）
-    appendU16LE(body, rd.startCompleteData.pileMinOutputVoltage);
-    // 13) CML电桩最大输出电流（0.1A/位，按协议偏移+800A）
-    {
-        int pileMaxCurrentRaw = static_cast<int>(rd.startCompleteData.pileMaxOutputCurrent) + 8000;
-        if (pileMaxCurrentRaw < 0) {
-            pileMaxCurrentRaw = 0;
-        }
-        if (pileMaxCurrentRaw > 65535) {
-            pileMaxCurrentRaw = 65535;
-        }
-        appendU16LE(body, static_cast<uint16_t>(pileMaxCurrentRaw));
-    }
-    // 14) CML电桩最小输出电流（0.1A/位，按协议偏移+800A）
-    {
-        int pileMinCurrentRaw = static_cast<int>(rd.startCompleteData.pileMinOutputCurrent) + 8000;
-        if (pileMinCurrentRaw < 0) {
-            pileMinCurrentRaw = 0;
-        }
-        if (pileMinCurrentRaw > 65535) {
-            pileMinCurrentRaw = 65535;
-        }
-        appendU16LE(body, static_cast<uint16_t>(pileMinCurrentRaw));
-    }
-    // 15) 是否离线模式下产生（当前固定在线0x00）
-    body.push_back(0x00);
-
-    return body;
-}
-
-std::vector<uint8_t> CommProcess::buildChargeEndStageBody(uint8_t gun, cJSON* stopCompleteData) const
-{
-    std::vector<uint8_t> body;
-    if (gun >= m_gunRuntimeData.size() || !stopCompleteData) {
-        return body;
-    }
-
-    // BY ZF: 结束阶段关键量直接取 stop_complete 事件，累计时间/电量取 feeData 运行态缓存。
-    auto getU8 = [stopCompleteData](const char* key, uint8_t defVal) -> uint8_t {
-        cJSON* n = cJSON_GetObjectItem(stopCompleteData, key);
-        if (!n || !cJSON_IsNumber(n)) {
-            return defVal;
-        }
-        int v = n->valueint;
-        if (v < 0) v = 0;
-        if (v > 255) v = 255;
-        return static_cast<uint8_t>(v);
-    };
-    auto getU16 = [stopCompleteData](const char* key, uint16_t defVal) -> uint16_t {
-        cJSON* n = cJSON_GetObjectItem(stopCompleteData, key);
-        if (!n || !cJSON_IsNumber(n)) {
-            return defVal;
-        }
-        int v = n->valueint;
-        if (v < 0) v = 0;
-        if (v > 0xFFFF) v = 0xFFFF;
-        return static_cast<uint16_t>(v);
-    };
-    auto getTemp = [stopCompleteData](const char* key, uint8_t defVal) -> uint8_t {
-        cJSON* n = cJSON_GetObjectItem(stopCompleteData, key);
-        if (!n || !cJSON_IsNumber(n)) {
-            return defVal;
-        }
-        int v = n->valueint + 50;
-        if (v < 0) v = 0;
-        if (v > 255) v = 255;
-        return static_cast<uint8_t>(v);
-    };
-
-    const GunRuntimeData& rd = m_gunRuntimeData[gun];
-
-    // BY ZF: 0x19 上传充电结束阶段报文。
-    // 1) 交易流水号 BCD16
-    appendBcdFixed(body, rd.orderNo, 16);
-    // 2) 桩编号 BCD7
-    appendPileCodeBcd7(body, m_config.cdzNo);
-    // 3) 枪号 BCD1（1..n）
-    const int gunNo = static_cast<int>(gun) + 1;
-    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
-    // 4) BMS中止充电状态SOC BIN1
-    body.push_back(getU8("stopSoc", 0));
-    // 5) BMS动力蓄电池单体最低电压 BIN2（直接沿用 stop_complete 数据）
-    appendU16LE(body, getU16("cellMinVoltage", 0));
-    // 6) BMS动力蓄电池单体最高电压 BIN2（直接沿用 stop_complete 数据）
-    appendU16LE(body, getU16("cellMaxVoltage", 0));
-    // 7) BMS动力蓄电池最低温度 BIN1（按协议加50偏移）
-    body.push_back(getTemp("batteryMinTemp", 50));
-    // 8) BMS动力蓄电池最高温度 BIN1（按协议加50偏移）
-    body.push_back(getTemp("batteryMaxTemp", 50));
-    // BY ZF: feeData.chargedTime 当前缓存单位为秒，0x19 要求分钟。
-    const uint16_t chargedMinutes = static_cast<uint16_t>(std::max(0.0, rd.chargedTime / 60.0));
-    // 9) 本次充电累计充电时间 BIN2（min）
-    appendU16LE(body, chargedMinutes);
-    // BY ZF: feeData.totalEnergy 当前缓存单位为kWh，0x19 要求0.1kWh。
-    int energyRaw = static_cast<int>(rd.totalEnergy * 10.0);
-    if (energyRaw < 0) energyRaw = 0;
-    if (energyRaw > 0xFFFF) energyRaw = 0xFFFF;
-    // 10) 本次充电电量 BIN2（0.1kWh）
-    appendU16LE(body, static_cast<uint16_t>(energyRaw));
-    // 11) 是否离线模式下产生 BIN1（当前在线固定0x00）
-    body.push_back(0x00);
-    return body;
-}
-
-std::vector<uint8_t> CommProcess::buildBstBody(uint8_t gun, cJSON* stopCompleteData) const
-{
-    std::vector<uint8_t> body;
-    if (gun >= m_gunRuntimeData.size() || !stopCompleteData) {
-        return body;
-    }
-
-    auto getU8 = [stopCompleteData](const char* key, uint8_t defVal) -> uint8_t {
-        cJSON* n = cJSON_GetObjectItem(stopCompleteData, key);
-        if (!n || !cJSON_IsNumber(n)) {
-            return defVal;
-        }
-        int v = n->valueint;
-        if (v < 0) v = 0;
-        if (v > 255) v = 255;
-        return static_cast<uint8_t>(v);
-    };
-    auto getU16 = [stopCompleteData](const char* key, uint16_t defVal) -> uint16_t {
-        cJSON* n = cJSON_GetObjectItem(stopCompleteData, key);
-        if (!n || !cJSON_IsNumber(n)) {
-            return defVal;
-        }
-        int v = n->valueint;
-        if (v < 0) v = 0;
-        if (v > 0xFFFF) v = 0xFFFF;
-        return static_cast<uint16_t>(v);
-    };
-
-    const GunRuntimeData& rd = m_gunRuntimeData[gun];
-    // BY ZF: 0x1D BST停车中止上送报文。
-    // 1) 交易流水号 BCD16
-    appendBcdFixed(body, rd.orderNo, 16);
-    // 2) 桩编号 BCD7
-    appendPileCodeBcd7(body, m_config.cdzNo);
-    // 3) 枪号 BCD1（1..n）
-    const int gunNo = static_cast<int>(gun) + 1;
-    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
-    // 4) BMS中止充电原因 BIN1
-    body.push_back(getU8("bmsStopReason", 0));
-    // 5) BMS中止充电故障原因 BIN2
-    appendU16LE(body, getU16("bmsChargeFaultReason", 0));
-    // 6) BMS中止充电错误原因 BIN1
-    body.push_back(getU8("bmsStopErrorReason", 0));
-    // 7) 是否离线模式下产生 BIN1（当前在线固定0x00）
-    body.push_back(0x00);
-    return body;
-}
-
-std::vector<uint8_t> CommProcess::buildBclBcsCcsBody(uint8_t gun) const
-{
-    std::vector<uint8_t> body;
-    if (gun >= m_gunRuntimeData.size()) {
-        return body;
-    }
-
-    const GunRuntimeData& rd = m_gunRuntimeData[gun];
-
-    auto clampU8 = [](int v) -> uint8_t {
-        if (v < 0) v = 0;
-        if (v > 255) v = 255;
-        return static_cast<uint8_t>(v);
-    };
-    auto clampU16 = [](int v) -> uint16_t {
-        if (v < 0) v = 0;
-        if (v > 0xFFFF) v = 0xFFFF;
-        return static_cast<uint16_t>(v);
-    };
-
-    // BY ZF: 0x23 上送充电过程BMS需求与充电机输出报文（15秒周期）。
-    // 1) 交易流水号 BCD16
-    appendBcdFixed(body, rd.orderNo, 16);
-    // 2) 桩编号 BCD7
-    appendPileCodeBcd7(body, m_config.cdzNo);
-    // 3) 枪号 BCD1（1..n）
-    const int gunNo = static_cast<int>(gun) + 1;
-    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
-
-    // 4) BCL BMS电压需求（0.1V）
-    appendU16LE(body, clampU16(static_cast<int>(rd.bmsReqVoltage * 10.0)));
-    // 5) BCL BMS电流需求（0.1A，偏移+800A）
-    appendU16LE(body, clampU16(static_cast<int>(rd.bmsReqCurrent * 10.0 + 8000.0)));
-    // 6) BCL BMS充电模式
-    body.push_back(clampU8(rd.ycChargeMode));
-    // 7) BCS BMS当前电压测量值（0.1V）
-    appendU16LE(body, clampU16(static_cast<int>(rd.bmsMeasuredVoltage * 10.0)));
-    // 8) BCS BMS当前电流测量值（0.1A，偏移+800A）
-    appendU16LE(body, clampU16(static_cast<int>(rd.bmsMeasuredCurrent * 10.0 + 8000.0)));
-    // BY ZF: 当前仅缓存最高/最低单体编号，分组号无来源，先按0上送。
-    const uint16_t cellMaxVoltageAndGroup =
-            static_cast<uint16_t>(clampU16(static_cast<int>(rd.cellMaxVoltage * 100.0)) & 0x0FFFU);
-    // 9) BCS 最高单体动力蓄电池电压及组号
-    appendU16LE(body, cellMaxVoltageAndGroup);
-    // 10) BCS 当前荷电状态SOC（%）
-    body.push_back(clampU8(static_cast<int>(rd.soc + 0.5)));
-    // 11) BCS 估算剩余充电时间（min）
-    appendU16LE(body, clampU16(static_cast<int>(rd.estimatedRemainTime)));
-    // 12) CCS 电桩电压输出值（0.1V）
-    appendU16LE(body, clampU16(static_cast<int>(rd.voltage * 10.0)));
-    // 13) CCS 电桩电流输出值（0.1A，偏移+800A）
-    appendU16LE(body, clampU16(static_cast<int>(rd.current * 10.0 + 8000.0)));
-    // 14) CCS 累计充电时间（min）
-    appendU16LE(body, clampU16(static_cast<int>(rd.chargedTime / 60.0)));
-    // 15) 是否离线模式下产生
-    body.push_back(0x00);
-    const uint16_t cellMinVoltageAndGroup =
-            static_cast<uint16_t>(clampU16(static_cast<int>(rd.cellMinVoltage * 100.0)) & 0x0FFFU);
-    // 16) 最低单体动力蓄电池电压及组号
-    appendU16LE(body, cellMinVoltageAndGroup);
-    // 17) 预留字段（BCD4）
-    body.insert(body.end(), 4, 0x00);
-    return body;
-}
-
-std::vector<uint8_t> CommProcess::buildCstBody(uint8_t gun) const
-{
-    std::vector<uint8_t> body;
-    if (gun >= m_gunRuntimeData.size()) {
-        return body;
-    }
-
-    const GunRuntimeData& rd = m_gunRuntimeData[gun];
-    // BY ZF: 0x21 CST充电中止上送报文（当前中止原因固定0x00）。
-    // 1) 交易流水号 BCD16
-    appendBcdFixed(body, rd.orderNo, 16);
-    // 2) 桩编号 BCD7
-    appendPileCodeBcd7(body, m_config.cdzNo);
-    // 3) 枪号 BCD1（1..n）
-    const int gunNo = static_cast<int>(gun) + 1;
-    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
-    // 4) 充电桩中止充电原因 BIN1（固定0x00）
-    body.push_back(0x00);
-    // 5) 充电桩中止充电故障原因 BIN2（固定0x0000）
-    appendU16LE(body, 0x0000);
-    // 6) 充电桩中止充电错误原因 BIN1（固定0x00）
-    body.push_back(0x00);
-    // 7) 是否离线模式下产生 BIN1（当前在线固定0x00）
-    body.push_back(0x00);
-    return body;
-}
-
-std::vector<uint8_t> CommProcess::buildBsmBody(uint8_t gun) const
-{
-    std::vector<uint8_t> body;
-    if (gun >= m_gunRuntimeData.size()) {
-        return body;
-    }
-    const GunRuntimeData& rd = m_gunRuntimeData[gun];
-
-    auto clampU8 = [](int v) -> uint8_t {
-        if (v < 0) v = 0;
-        if (v > 255) v = 255;
-        return static_cast<uint8_t>(v);
-    };
-
-    // BY ZF: 0x25 BSM上送报文（充电中15秒周期）。
-    // 1) 交易流水号 BCD16
-    appendBcdFixed(body, rd.orderNo, 16);
-    // 2) 桩编号 BCD7
-    appendPileCodeBcd7(body, m_config.cdzNo);
-    // 3) 枪号 BCD1（1..n）
-    const int gunNo = static_cast<int>(gun) + 1;
-    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
-
-    // 4) BMS最高单体动力蓄电池电压所在编号（1Byte）
-    body.push_back(clampU8(rd.maxVoltageCellNo));
-    // 5) BMS当前单体动力蓄电池最高温度（1Byte，偏移50）
-    body.push_back(clampU8(static_cast<int>(rd.batteryMaxTemp + 50.0)));
-    // 6) BMS最高温度探测点编号（1Byte）
-    body.push_back(clampU8(rd.maxTempPointNo));
-    // 7) BMS当前单体动力蓄电池最低温度（1Byte，偏移50）
-    body.push_back(clampU8(static_cast<int>(rd.batteryMinTemp + 50.0)));
-    // 8) BMS最低动力蓄电池温度探测点编号（1Byte）
-    body.push_back(clampU8(rd.minTempPointNo));
-
-    // 9~16) 8组状态位，每组2bit，共16bit(2Byte)。
-    uint16_t bsmStatusWord = 0x0000;
-    // g9~g14 默认00(正常)
-    // g15 充电禁止：00=禁止，01=允许
-    bsmStatusWord |= static_cast<uint16_t>(0x01U << 2); // g15
-    // g16 预留默认00
-    appendU16LE(body, bsmStatusWord);
-    // 17) 是否离线模式下产生（1Byte）
-    body.push_back(0x00);
-    // 18) 预留字段（BCD4）
-    body.insert(body.end(), 4, 0x00);
-    return body;
-}
-
 std::vector<uint8_t> CommProcess::buildPlugChargeAuthBody(uint8_t gun, cJSON* data)
 {
     std::vector<uint8_t> body;
@@ -2939,37 +2386,6 @@ std::vector<uint8_t> CommProcess::buildRemoteStopAckBody(uint8_t stopNature, uin
     const size_t textLen = std::min<size_t>(message.size(), 255U);
     body.push_back(static_cast<uint8_t>(textLen));
     body.insert(body.end(), message.begin(), message.begin() + static_cast<std::ptrdiff_t>(textLen));
-    return body;
-}
-
-std::vector<uint8_t> CommProcess::buildStartChargeResultBody(uint8_t gun) const
-{
-    std::vector<uint8_t> body;
-    if (gun >= m_gunRuntimeData.size()) {
-        return body;
-    }
-
-    const GunRuntimeData& rd = m_gunRuntimeData[gun];
-    body.reserve(32);
-    // BY ZF: 1) 交易流水号 BCD16，优先使用启动阶段缓存的订单号。
-    appendBcdFixed(body, rd.orderNo, 16);
-    // BY ZF: 2) 桩编号 BCD7。
-    appendPileCodeBcd7(body, m_config.cdzNo);
-    // BY ZF: 3) 枪号 BCD1（按1..n上送）。
-    const int gunNo = static_cast<int>(gun) + 1;
-    body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
-    // BY ZF: 4) 启动结果 BCD1：0x02成功，0x01失败。
-    const int successFlag = static_cast<int>(rd.startCompleteData.successFlag);
-    body.push_back(static_cast<uint8_t>(successFlag == 0 ? 0x02 : 0x01));
-    // BY ZF: 5) 失败原因 BIN1（成功时填0x00）。
-    int failReason = static_cast<int>(rd.startCompleteData.failReason);
-    if (failReason < 0) {
-        failReason = 0;
-    }
-    if (failReason > 255) {
-        failReason = 255;
-    }
-    body.push_back(static_cast<uint8_t>(successFlag == 0 ? 0x00 : failReason));
     return body;
 }
 
@@ -3198,26 +2614,6 @@ void CommProcess::reportTelesignalPeriodic()
         }
     }
 
-    // BY ZF: 保留充电过程中 0x23/0x24 周期业务上送，不与 0x12/0x17 互相耦合。
-    for (uint8_t gun = 0; gun < static_cast<uint8_t>(std::min(m_gunRuntimeData.size(), m_lastChargeInfoReportByGun.size())); ++gun) {
-        const bool charging = (m_gunRuntimeData[gun].gunStatus == 0x03);
-        if (now - m_lastChargeInfoReportByGun[gun] < std::chrono::seconds(15)) {
-            continue;
-        }
-        if (charging) {
-            const std::vector<uint8_t> bclBcsCcsBody = buildBclBcsCcsBody(gun);
-            if (!bclBcsCcsBody.empty() && !sendPlatformFrame(kCmdRawMessagePassThrough, bclBcsCcsBody)) {
-                closePlatformTcp();
-                return;
-            }
-            const std::vector<uint8_t> bsmBody = buildBsmBody(gun);
-            if (!bsmBody.empty() && !sendPlatformFrame(kCmdChargeCurveCall, bsmBody)) {
-                closePlatformTcp();
-                return;
-            }
-            m_lastChargeInfoReportByGun[gun] = now;
-        }
-    }
 }
 
 void CommProcess::reportTelemetryPeriodic()
@@ -3537,10 +2933,6 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
 
         if (m_loginState == LOGIN_REQ_FEE_MODEL) {
             m_loginState = LOGIN_ONLINE;
-            if (!m_platformOnlineEventActive) {
-                m_platformOnlineEventActive = true;
-                publishPlatformLinkEvent(true, "fee_model_ready");
-            }
             m_lastHeartbeat = std::chrono::steady_clock::now();
             m_lastHeartbeatRecv = std::chrono::steady_clock::now();
         }
@@ -3571,6 +2963,13 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
 
     if (cmd == kCmdHeartbeat) {
         m_lastHeartbeatRecv = std::chrono::steady_clock::now();
+        if (!m_config.offlineRunMode &&
+            m_loginState == LOGIN_ONLINE &&
+            !m_platformOnlineEventActive &&
+            transferReason == 0x04U) {
+            m_platformOnlineEventActive = true;
+            publishPlatformLinkEvent(true, "heartbeat_ok");
+        }
         return;
     }
 
@@ -3651,7 +3050,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
     if (cmd == kCmdUploadTradeRecord) {
         uint8_t gun = 0;
         cJSON* cfmData = nullptr;
-        if (parseRecordConfirm040(body, decBodyLen, gun, &cfmData)) {
+        if (parseRecordConfirm040(body, decBodyLen, transferReason, gun, &cfmData)) {
             m_logSender.info("platform_record_confirm_rx",
                              std::string("gun=") + std::to_string(static_cast<int>(gun)));
             publishPlatCommand(gun, "record_cfm", cfmData);
@@ -4018,48 +3417,91 @@ bool CommProcess::handleRemoteStopCommand(uint8_t chargerAddr, uint8_t stopReaso
     return publishOk;
 }
 
-bool CommProcess::parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uint8_t& gun, cJSON** outData)
+bool CommProcess::parseRecordConfirm040(const uint8_t* body, size_t bodyLen, uint8_t transferReason, uint8_t& gun, cJSON** outData)
 {
     if (!body || !outData) {
         return false;
     }
-    // BY ZF: 0x40 最小长度：交易流水号BCD16 + 确认结果1
-    if (bodyLen < 17) {
+    // BY ZF: NYC 0x42 确认体按“开始时间6 + 电量4 + 金额4 + 卡号长度1 + 卡号N”解析。
+    if (bodyLen < 15) {
         return false;
     }
 
-    const std::string tradeNo = bcdToDigitString(body, 16);
-    const uint8_t feedbackResult = body[16];
-    const bool ackOk = (feedbackResult == 0x00);
+    const uint64_t startTime = static_cast<uint64_t>(2000 + static_cast<int>(body[5])) * 10000000000ULL +
+                               static_cast<uint64_t>(body[4]) * 100000000ULL +
+                               static_cast<uint64_t>(body[3]) * 1000000ULL +
+                               static_cast<uint64_t>(body[2]) * 10000ULL +
+                               static_cast<uint64_t>(body[1]) * 100ULL +
+                               static_cast<uint64_t>(body[0]);
+    const uint32_t totalElectRaw = static_cast<uint32_t>(body[6]) |
+                                   (static_cast<uint32_t>(body[7]) << 8) |
+                                   (static_cast<uint32_t>(body[8]) << 16) |
+                                   (static_cast<uint32_t>(body[9]) << 24);
+    const uint32_t totalCostRaw = static_cast<uint32_t>(body[10]) |
+                                  (static_cast<uint32_t>(body[11]) << 8) |
+                                  (static_cast<uint32_t>(body[12]) << 16) |
+                                  (static_cast<uint32_t>(body[13]) << 24);
+    const uint8_t cardLen = body[14];
+    if (bodyLen < static_cast<size_t>(15U + cardLen)) {
+        return false;
+    }
+    const std::string cardNumber(reinterpret_cast<const char*>(body + 15), static_cast<size_t>(cardLen));
+    const bool confirmed = (transferReason == 0x04U || transferReason == 0x10U);
 
-    // BY ZF: 协议无枪号，按 tradeNo 在待确认缓存中反查所属枪。
+    // BY ZF: NYC 确认体不带 tradeNo，按最近一次上送缓存的关键字段反查所属枪和订单。
     int gunIndex = 0;
     bool foundGun = false;
+    std::string tradeNo;
     for (size_t i = 0; i < m_gunRuntimeData.size(); ++i) {
-        if (m_gunRuntimeData[i].pendingRecordTradeNo == tradeNo) {
+        const GunRuntimeData& rd = m_gunRuntimeData[i];
+        if (rd.pendingRecordTradeNo.empty()) {
+            continue;
+        }
+        if (rd.pendingRecordStartTime == startTime &&
+            rd.pendingRecordTotalElectRaw == totalElectRaw &&
+            rd.pendingRecordTotalCostRaw == totalCostRaw &&
+            rd.pendingRecordCardNumber == cardNumber) {
             gunIndex = static_cast<int>(i);
             foundGun = true;
+            tradeNo = rd.pendingRecordTradeNo;
             break;
         }
     }
-    // BY ZF: 若未命中缓存，兜底归到0号枪，避免丢失确认消息。
-    (void)foundGun;
+
+    // BY ZF: 若未命中完整缓存，按卡号兜底匹配同枪最后一条待确认记录。
+    if (!foundGun && !cardNumber.empty()) {
+        for (size_t i = 0; i < m_gunRuntimeData.size(); ++i) {
+            const GunRuntimeData& rd = m_gunRuntimeData[i];
+            if (!rd.pendingRecordTradeNo.empty() && rd.pendingRecordCardNumber == cardNumber) {
+                gunIndex = static_cast<int>(i);
+                foundGun = true;
+                tradeNo = rd.pendingRecordTradeNo;
+                break;
+            }
+        }
+    }
+
     gun = static_cast<uint8_t>(gunIndex);
 
     cJSON* data = cJSON_CreateObject();
     cJSON_AddStringToObject(data, "tradeNo", tradeNo.c_str());
-    cJSON_AddNumberToObject(data, "confirmFlag", ackOk ? 1 : 0);
-    cJSON_AddNumberToObject(data, "result", feedbackResult);
+    cJSON_AddNumberToObject(data, "confirmFlag", confirmed ? 1 : 0);
+    cJSON_AddNumberToObject(data, "result", transferReason);
+    cJSON_AddStringToObject(data, "cardNumber", cardNumber.c_str());
     *outData = data;
 
-    // BY ZF: 直接完成交易记录确认（0x00=上传成功）。
-    if (ackOk && !tradeNo.empty()) {
+    // BY ZF: 新协议下 0x04/0x10 都表示主站已处理到该条记录，NYC 直接完成订单确认。
+    if (confirmed && !tradeNo.empty()) {
         m_logSender.confirmTradeRecord(tradeNo, 1);
     }
 
-    // BY ZF: 成功应答后清理缓存，避免后续回包误关联旧记录。
-    if (ackOk && foundGun && gun < m_gunRuntimeData.size()) {
+    // BY ZF: 收到确认/否认后都清理缓存，避免后续回包误关联旧记录。
+    if (confirmed && foundGun && gun < m_gunRuntimeData.size()) {
         m_gunRuntimeData[gun].pendingRecordTradeNo.clear();
+        m_gunRuntimeData[gun].pendingRecordStartTime = 0ULL;
+        m_gunRuntimeData[gun].pendingRecordTotalElectRaw = 0U;
+        m_gunRuntimeData[gun].pendingRecordTotalCostRaw = 0U;
+        m_gunRuntimeData[gun].pendingRecordCardNumber.clear();
     }
     return true;
 }
@@ -4128,7 +3570,7 @@ bool CommProcess::publishSetConfig(uint8_t gun, cJSON* dataObj)
         m_lastSetConfigPublishByGun[gun] = now;
     }
     const std::string outTopic = buildTopic("plat", gun, "event");
-    return m_mqtt.publish(outTopic, payload, 1, true);
+    return m_mqtt.publish(outTopic, payload, 1, false);
 }
 
 void CommProcess::publishPlatformLinkEvent(bool online, const char* reason)
@@ -4162,7 +3604,7 @@ void CommProcess::publishPlatformLinkEvent(bool online, const char* reason)
             continue;
         }
         const std::string outTopic = buildTopic("plat", gun, "event");
-        m_mqtt.publish(outTopic, payload, 1, true);
+        m_mqtt.publish(outTopic, payload, 2, true);
     }
 }
 

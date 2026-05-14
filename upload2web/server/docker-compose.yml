@@ -1,0 +1,13 @@
+services:
+  log-upload:
+    build: ./app
+    container_name: log-upload
+    ports:
+      - "8080:8080"
+    environment:
+      UPLOAD_TOKEN: "test-token-001"
+      UPLOAD_ROOT: "/data/uploads"
+      MAX_UPLOAD_MB: "100"
+    volumes:
+      - ./data/uploads:/data/uploads
+    restart: unless-stopped
