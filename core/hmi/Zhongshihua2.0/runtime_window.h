@@ -103,6 +103,7 @@ public:
         bool enableQrEntry;
         bool enableCardEntry;
         bool cardOnlineAuth;
+        bool guangdongWavPlay;
 
         HmiConfig();
     };
@@ -123,6 +124,7 @@ public:
         double totalEnergy;
         double chargedTime;
         int soc;
+        int gunSeatStatus;
         bool cardOfflineActive;
         bool vinChargeActive;
         std::string qrPayload;
@@ -222,6 +224,7 @@ private:
     void handlePlatEvent(uint8_t gun, const std::string &payload);
     void handleSaveEvent(uint8_t gun, const std::string &payload);
     void handleMonEvent(const std::string &payload);
+    void playAudioPrompt(const QString &filePath) const;
 
     void rebuildQrPayload(int gun);
     void applyIdleLayout();

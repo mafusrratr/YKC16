@@ -1,0 +1,100 @@
+# TCU uploader cross compile Makefile
+# BY ZF
+
+CXX = $(CROSS_COMPILE)g++
+CXXFLAGS = -pipe -std=c++0x -O2 -D_REENTRANT -w
+
+TOOLCHAIN_LIB_PATH ?= $(shell dirname $(shell which $(CXX) 2>/dev/null || echo /usr/bin/g++))/../lib
+EXTRA_LIB_PATH ?= $(shell cd ../.. && pwd)/extraLib
+CURL_ROOT ?= $(EXTRA_LIB_PATH)/curl/install/curl/usr
+OPENSSL_ROOT ?= $(EXTRA_LIB_PATH)/openSSL/install-arm
+
+PLATFORM ?=
+ifeq ($(PLATFORM),)
+ifeq ($(CROSS_COMPILE),arm-none-linux-gnueabi-)
+PLATFORM := jzq
+else ifeq ($(CROSS_COMPILE),arm-linux-gnueabihf-)
+PLATFORM := imx6ul
+else ifeq ($(CROSS_COMPILE),arm-nuvoton-linux-uclibceabi-)
+PLATFORM := nuc980
+endif
+endif
+
+PLATFORM_LIB_PATH = $(if $(PLATFORM),$(EXTRA_LIB_PATH)/$(PLATFORM),$(EXTRA_LIB_PATH))
+LIBDIRS = -L$(PLATFORM_LIB_PATH) -L$(EXTRA_LIB_PATH) -L$(CURL_ROOT)/lib -L$(OPENSSL_ROOT)/lib
+RPATH = -Wl,-rpath,/usr/lib:/lib:$(PLATFORM_LIB_PATH):$(EXTRA_LIB_PATH):$(TOOLCHAIN_LIB_PATH)
+LIBS = -lpthread -lsqlite3 -lmosquitto -lcjson -lcurl -lssl -lcrypto -ldl
+
+DEFAULT_STATIC_STDCPP = 0
+ifeq ($(PLATFORM),jzq)
+DEFAULT_STATIC_STDCPP = 1
+else ifeq ($(CROSS_COMPILE),arm-none-linux-gnueabi-)
+DEFAULT_STATIC_STDCPP = 1
+endif
+STATIC_STDCPP ?= $(DEFAULT_STATIC_STDCPP)
+ifeq ($(STATIC_STDCPP),1)
+    LIBS += -static-libstdc++ -static-libgcc
+    CXXFLAGS += -static-libstdc++ -static-libgcc
+endif
+
+INCLUDES = -I../base -I../interfaces -I../base/mqtt -I../base/mqtt/include -I../base/cjson/include -I$(EXTRA_LIB_PATH)/sql -I$(CURL_ROOT)/include -I$(OPENSSL_ROOT)/include
+
+OBJ_DIR = obj
+RELEASE_DIR = release
+TARGET = $(RELEASE_DIR)/tcu_uploader
+
+SOURCES = main.cpp tcu_uploader_process.cpp
+BASE_SOURCES = ../base/common/config_manager_lite.cpp ../base/common/message_queue.cpp ../base/logger/log_sender.cpp ../base/mqtt/mqtt_client.cpp
+OBJECTS = $(addprefix $(OBJ_DIR)/, $(SOURCES:.cpp=.o)) $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
+
+all: directories $(TARGET)
+
+directories:
+	@mkdir -p $(OBJ_DIR) $(RELEASE_DIR)
+
+$(TARGET): $(OBJECTS)
+	$(CXX) $(OBJECTS) -o $(TARGET) $(LIBDIRS) $(RPATH) $(LIBS)
+	@echo "Build completed: $(TARGET)"
+
+$(OBJ_DIR)/%.o: %.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/config_manager_lite.o: ../base/common/config_manager_lite.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/message_queue.o: ../base/common/message_queue.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/log_sender.o: ../base/logger/log_sender.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/mqtt_client.o: ../base/mqtt/mqtt_client.cpp
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+clean:
+	rm -rf $(OBJ_DIR) $(RELEASE_DIR)
+
+install: all
+	@mkdir -p /usr/app/tcu
+	@cp $(TARGET) /usr/app/tcu/
+
+info:
+	@echo "Cross-compiler: $(CXX)"
+	@echo "Flags: $(CXXFLAGS)"
+	@echo "Includes: $(INCLUDES)"
+	@echo "Library directories: $(LIBDIRS)"
+	@echo "Runtime paths (rpath): $(RPATH)"
+	@echo "Libraries: $(LIBS)"
+	@echo "CROSS_COMPILE: $(CROSS_COMPILE)"
+	@echo "EXTRA_LIB_PATH: $(EXTRA_LIB_PATH)"
+	@echo "CURL_ROOT: $(CURL_ROOT)"
+	@echo "OPENSSL_ROOT: $(OPENSSL_ROOT)"
+	@echo "PLATFORM: $(PLATFORM)"
+	@echo "PLATFORM_LIB_PATH: $(PLATFORM_LIB_PATH)"
+
+.PHONY: all directories clean install info

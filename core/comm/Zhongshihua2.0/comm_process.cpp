@@ -356,6 +356,8 @@ namespace {
                                 const int c3len = ASN1_STRING_length(t2->value.octet_string);
                                 const unsigned char* c2 = ASN1_STRING_get0_data(t3->value.octet_string);
                                 const int c2len = ASN1_STRING_length(t3->value.octet_string);
+                                std::cout << "c3len: " << c3len << ", c2len: " << c2len << std::endl;
+
                                 if (c3 && c2 && c3len > 0 && c2len >= 0) {
                                     raw.insert(raw.end(), c3, c3 + c3len); // C3
                                     raw.insert(raw.end(), c2, c2 + c2len); // C2
@@ -983,7 +985,7 @@ bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& pa
                     } else if (std::strcmp(to->valuestring, "ERROR") == 0) {
                         mappedStatus = 0x01;
                     } else if (std::strcmp(to->valuestring, "STOPPED") == 0) {
-                        mappedStatus = 0x04;
+                        mappedStatus = 0x05;
                     }
                     printf("mappedStatus: %d\n", mappedStatus);
                     m_gunRuntimeData[gun].gunStatus = mappedStatus;
@@ -1005,13 +1007,35 @@ bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& pa
                 cJSON_IsObject(data)) {
                 int mergeChargeFlag = 0;
                 (void)jsonGetInt(data, "mergeChargeFlag", mergeChargeFlag);
-                std::vector<uint8_t> body = (mergeChargeFlag != 0)
-                        ? buildMergeVinStartApplyBody(gun, data)
-                        : buildVinStartApplyBody(gun, data);
-                if (!body.empty()) {
-                    (void)sendPlatformFrame((mergeChargeFlag != 0) ? kCmdMergeChargeApply : kCmdStartApply, body);
+                if (mergeChargeFlag != 0) {
+                    const uint8_t leftGun = static_cast<uint8_t>(gun & static_cast<uint8_t>(~0x01));
+                    const uint8_t rightGun = static_cast<uint8_t>(leftGun + 1);
+                    bool sentAny = false;
+
+                    const std::vector<uint8_t> leftBody = buildMergeVinStartApplyBody(leftGun, data);
+                    if (!leftBody.empty()) {
+                        (void)sendPlatformFrame(kCmdMergeChargeApply, leftBody);
+                        sentAny = true;
+                    }
+
+                    if (rightGun < m_gunRuntimeData.size()) {
+                        const std::vector<uint8_t> rightBody = buildMergeVinStartApplyBody(rightGun, data);
+                        if (!rightBody.empty()) {
+                            (void)sendPlatformFrame(kCmdMergeChargeApply, rightBody);
+                            sentAny = true;
+                        }
+                    }
+
+                    if (!sentAny) {
+                        m_logSender.warn("platform_vin_start_apply", "build_merge_body_fail");
+                    }
                 } else {
-                    m_logSender.warn("platform_vin_start_apply", "build_body_fail");
+                    const std::vector<uint8_t> body = buildVinStartApplyBody(gun, data);
+                    if (!body.empty()) {
+                        (void)sendPlatformFrame(kCmdStartApply, body);
+                    } else {
+                        m_logSender.warn("platform_vin_start_apply", "build_body_fail");
+                    }
                 }
             }
             cJSON_Delete(root);
@@ -1439,7 +1463,16 @@ bool CommProcess::buildChargeRecordBodyFromUpdateRecord(uint8_t gun, cJSON* data
     // 15) 交易时间 CP56Time2a 7字节（取结束时间）
     appendCp56Time2aFromYmdHms(body, endTime);
     // 16) 停止原因 BIN2
-    appendU16LE(body, mapTradeStopReasonToPlatform(reason));
+    const uint16_t platformStopReason = mapTradeStopReasonToPlatform(reason);
+    appendU16LE(body, platformStopReason);
+    
+    if (m_config.debugTcp) {
+        std::cout << "[Comm][TRADE][STOP_REASON] gun=" << static_cast<int>(gun)
+                  << " mqtt=0x" << std::hex << reason
+                  << " platform=0x" << platformStopReason
+                  << std::dec << std::endl;
+    }
+
     // 17) 物理卡号 BIN8（不足补0，优先十六进制串）
     std::string hexDigits;
     for (size_t i = 0; i < cardNumber.size(); ++i) {
@@ -1826,10 +1859,6 @@ uint16_t CommProcess::mapTradeStopReasonToPlatform(int mqttReason) const
 {
     // BY ZF: 这里预留“MQTT reason -> 平台停机原因点表”映射入口。
     // BY ZF: 后续和平台点表对齐后，在这里补充 switch/case 或查表逻辑即可。
-    // BY ZF: 当前默认保持原值透传，仅做协议范围兜底。
-    if (mqttReason < 0) {
-        return 0U;
-    }
 
     // BY ZF: 统一维护“MQTT reason -> 平台停机原因”映射。
     switch (mqttReason) {
@@ -1901,10 +1930,10 @@ uint16_t CommProcess::mapTradeStopReasonToPlatform(int mqttReason) const
     case 0x1002F: return 0x0420U;
     case 0x10030: return 0x0420U;
     case 0x10040: return 0x04F0U;
-    case 0x1F001: return 0x04FFU;
-    case 0x1003B: return 0xFF3BU;
-    case 0x10028: return 0xFFFFU;
-    case 0x100FF: return 0xFFFFU;
+    case 0x1F001: return 0x0401U;
+    case 0x1003B: return 0x0401U;
+    case 0x10028: return 0x0401U;
+    case 0x100FF: return 0x0401U;
 
     // BY ZF: 充电中阶段映射，沿用当前已整理内容。
     case 0x2000C:
@@ -2006,22 +2035,22 @@ uint16_t CommProcess::mapTradeStopReasonToPlatform(int mqttReason) const
         return 0x0701U;
     // BY ZF: 原始整理内容里出现了重复 0x20023 -> 0x0707，当前先保留 0x0302 映射，待你确认后再修正。
     case 0x20007:
-        return 0x07FFU;
+        return 0x0708U;
     case 0x20032:
-        return 0xFF32U;
+        return 0x0708U;
     case 0x20033:
-        return 0xFF33U;
+        return 0x0708U;
     case 0x2002D:
     case 0x200FF:
-        return 0xFFFFU;
+        return 0x0708U;
+
+    case 0x00000:
+        return 0x0701U;
+
     default:
+        return 0x0707U;
         break;
     }
-
-    if (mqttReason > 0xFFFF) {
-        return 0xFFFFU;
-    }
-    return static_cast<uint16_t>(mqttReason);
 }
 
 std::string CommProcess::ensureGunField(const std::string& payload, uint8_t gun) const
@@ -2468,9 +2497,19 @@ std::vector<uint8_t> CommProcess::buildLoginRequestBody() const
 
     // BY ZF: 1) 随机秘钥A明文（16字节BIN）取当前会话SM4密钥。
     std::vector<uint8_t> randomSecretPlain(m_sm4SessionKey.begin(), m_sm4SessionKey.end());
+    if (m_config.debugTcp) {
+        std::cout << "[Comm][TCP][LOGIN_RANDOM_SECRET] plainHex="
+                  << (randomSecretPlain.empty() ? "" : toHex(randomSecretPlain.data(), randomSecretPlain.size()))
+                  << std::endl;
+    }
+
     const std::string randomCipher = sm2EncryptToAscii(randomSecretPlain, m_sm2PublicKeyActive);
     if (randomCipher.empty()) {
         return std::vector<uint8_t>();
+    }
+    if (m_config.debugTcp) {
+        std::cout << "[Comm][TCP][LOGIN_RANDOM_SECRET] cipherAscii="
+                  << randomCipher << std::endl;
     }
     body.insert(body.end(), randomCipher.begin(), randomCipher.end());
 
@@ -3053,14 +3092,14 @@ std::vector<uint8_t> CommProcess::buildRemoteStartAckBody(uint8_t gun, uint8_t r
     return body;
 }
 
-std::vector<uint8_t> CommProcess::buildRemoteMergeStartAckBody(uint8_t gun, uint8_t result, uint8_t failReason, const std::string& mergeSeq) const
+std::vector<uint8_t> CommProcess::buildRemoteMergeStartAckBody(uint8_t gun, const std::string& orderNo, uint8_t result, uint8_t failReason, const std::string& mergeSeq) const
 {
     std::vector<uint8_t> body;
     if (gun >= m_gunRuntimeData.size()) {
         return body;
     }
     // BY ZF: 0xA3 远程并充启动应答：交易流水号BCD16 + 桩编号BCD7 + 枪号BCD1 + 启动结果BCD1 + 失败原因BIN1 + 主辅枪标记BIN1 + 并充序号BCD6。
-    appendBcdFixed(body, m_gunRuntimeData[gun].orderNo, 16);
+    appendBcdFixed(body, orderNo, 16);
     appendPileCodeBcd7(body, m_config.cdzNo);
     const int gunNo = static_cast<int>(gun) + 1;
     body.push_back(static_cast<uint8_t>(((gunNo / 10) << 4) | (gunNo % 10)));
@@ -3266,12 +3305,12 @@ void CommProcess::reportChargeInfoPeriodic()
                 }
             }
             // BY ZF: 充电中每15秒同步上送0x25 BSM信息。
-            // if (charging) {
+            if (charging) {
                 const std::vector<uint8_t> bsmBody = buildBsmBody(gun);
                 if (!bsmBody.empty()) {
                     sendPlatformFrame(kCmdBsm, bsmBody);
                 }
-            // }
+            }
             m_lastChargeInfoReportByGun[gun] = now;
             m_runtimeChangedByGun[gun] = 0;
             if (gun < m_forcePluggedChargeInfoByGun.size()) {
@@ -3762,7 +3801,8 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             }
             int successFlag = 1;
             (void)jsonGetInt(startData, "successFlag", successFlag);
-            if (successFlag == 0) {
+            // BY ZF: 0xA2 鉴权成功标志：0x01 成功，0x00 失败。
+            if (successFlag == 1) {
                 cJSON_DeleteItemFromObject(startData, "successFlag");
                 cJSON_DeleteItemFromObject(startData, "failReason");
                 publishPlatCommand(gun, "start_charge", startData);
@@ -3826,11 +3866,8 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             const uint8_t leftGun = static_cast<uint8_t>(gun & static_cast<uint8_t>(~0x01));
             const uint8_t rightGun = static_cast<uint8_t>(leftGun + 1);
             if (!parsedFeeModel.feeModelId.empty()) {
-                if (leftGun < m_feeModelByGun.size()) {
-                    m_feeModelByGun[leftGun] = parsedFeeModel;
-                }
-                if (rightGun < m_feeModelByGun.size()) {
-                    m_feeModelByGun[rightGun] = parsedFeeModel;
+                if (gun < m_feeModelByGun.size()) {
+                    m_feeModelByGun[gun] = parsedFeeModel;
                 }
                 m_logSender.saveFeeModel(parsedFeeModel);
             }
@@ -3843,26 +3880,45 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             }
 
             if (startData) {
-                cJSON* leftData = cJSON_Duplicate(startData, 1);
-                cJSON* rightData = cJSON_Duplicate(startData, 1);
-                if (leftData) {
-                    cJSON_AddNumberToObject(leftData, "masterGunFlag", 0x00);
-                    publishPlatCommand(leftGun, "start_charge", leftData);
-                    cJSON_Delete(leftData);
-                }
-                if (rightGun < m_gunRuntimeData.size() && rightData) {
-                    cJSON_AddNumberToObject(rightData, "masterGunFlag", 0x01);
-                    publishPlatCommand(rightGun, "start_charge", rightData);
-                    cJSON_Delete(rightData);
-                } else if (rightData) {
-                    cJSON_Delete(rightData);
+                cJSON* gunData = cJSON_Duplicate(startData, 1);
+                if (gunData) {
+                    const uint8_t masterGunFlag = (gun == leftGun) ? 0x00 : 0x01;
+                    cJSON_AddNumberToObject(gunData, "masterGunFlag", masterGunFlag);
+                    const std::string orderNo = jsonGetString(gunData, "orderNo");
+                    const std::string preTradeNo = jsonGetString(gunData, "preTradeNo");
+                    const std::string tradeNo = jsonGetString(gunData, "tradeNo");
+                    if (m_config.debugTcp) {
+                        std::cout << "[Comm][MERGE_A4][PUBLISH] srcGun=" << static_cast<int>(gun)
+                                  << " targetGun=" << static_cast<int>(gun)
+                                  << " orderNo=" << orderNo
+                                  << " preTradeNo=" << preTradeNo
+                                  << " tradeNo=" << tradeNo
+                                  << " mergeSeq=" << mergeSeq
+                                  << " masterGunFlag=" << static_cast<int>(masterGunFlag)
+                                  << std::endl;
+                    }
+                    {
+                        std::ostringstream oss;
+                        oss << "srcGun=" << static_cast<int>(gun)
+                            << ",targetGun=" << static_cast<int>(gun)
+                            << ",orderNo=" << orderNo
+                            << ",preTradeNo=" << preTradeNo
+                            << ",tradeNo=" << tradeNo
+                            << ",mergeSeq=" << mergeSeq
+                            << ",masterGunFlag=" << static_cast<int>(masterGunFlag);
+                        m_logSender.info("platform_remote_merge_start_publish", oss.str());
+                    }
+                    publishPlatCommand(gun, "start_charge", gunData);
+                    cJSON_Delete(gunData);
                 }
             }
 
             m_logSender.info("platform_remote_merge_start_rx",
-                             std::string("leftGun=") + std::to_string(static_cast<int>(leftGun)) +
+                             std::string("gun=") + std::to_string(static_cast<int>(gun)) +
+                             ",leftGun=" + std::to_string(static_cast<int>(leftGun)) +
                              ",rightGun=" + std::to_string(static_cast<int>(rightGun)));
-            const std::vector<uint8_t> ackBody = buildRemoteMergeStartAckBody(leftGun, 0x01, 0x00, mergeSeq);
+            const std::string ackOrderNo = startData ? jsonGetString(startData, "orderNo") : std::string();
+            const std::vector<uint8_t> ackBody = buildRemoteMergeStartAckBody(gun, ackOrderNo, 0x01, 0x00, mergeSeq);
             if (!ackBody.empty()) {
                 (void)sendPlatformFrame(kCmdMergeStartReply, ackBody, rxSeq);
             }
@@ -3870,8 +3926,9 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             const uint8_t gunNoBcd = (decBodyLen >= 24U) ? body[23] : 0x01;
             const int gunNo = ((gunNoBcd >> 4) & 0x0F) * 10 + (gunNoBcd & 0x0F);
             const uint8_t gunIndex = (gunNo > 0) ? static_cast<uint8_t>(gunNo - 1) : 0U;
+            const std::string orderNo = (decBodyLen >= 16U) ? bcdToDigitString(body, 16) : std::string();
             const std::string mergeSeq = (decBodyLen >= 50U) ? bcdToDigitString(body + 44, 6) : std::string("000000000000");
-            const std::vector<uint8_t> nackBody = buildRemoteMergeStartAckBody(gunIndex, 0x00, 0x01, mergeSeq);
+            const std::vector<uint8_t> nackBody = buildRemoteMergeStartAckBody(gunIndex, orderNo, 0x00, 0x01, mergeSeq);
             if (!nackBody.empty()) {
                 (void)sendPlatformFrame(kCmdMergeStartReply, nackBody, rxSeq);
             }
@@ -4423,29 +4480,122 @@ bool CommProcess::parseMergeChargeApplyAck0A2(const uint8_t* body, size_t bodyLe
     if (!body || !outData) {
         return false;
     }
-    if (bodyLen < 46U) {
+    // BY ZF: 0xA2 平台并充启动应答：
+    // 交易流水号16 + 桩编号7 + 枪号1 + 逻辑卡号8 + 账户余额4 + 鉴权成功标志1 + 失败原因1 + 并充序号6。
+    if (bodyLen < 44U) {
         return false;
     }
 
-    if (!parseStartApplyAck0A6(body, 40U, gun, outData, feeModel)) {
+    const uint8_t* tradeBcd = body;
+    const uint8_t* pileBcd = body + 16;
+    const uint8_t gunBcd = body[23];
+    const uint8_t* logicCardBcd = body + 24;
+    const uint32_t balanceRaw = static_cast<uint32_t>(body[32]) |
+                                (static_cast<uint32_t>(body[33]) << 8) |
+                                (static_cast<uint32_t>(body[34]) << 16) |
+                                (static_cast<uint32_t>(body[35]) << 24);
+    const uint8_t successFlag = body[36];
+    const uint8_t failReason = body[37];
+    const uint8_t* mergeSeqBcd = body + 38;
+
+    const std::string recvPileCode = bcdToDigitString(pileBcd, 7);
+    const std::string localPileCode = normalizePileCode14(m_config.cdzNo);
+    if (recvPileCode != localPileCode) {
         return false;
     }
 
-    const uint8_t* mergeSeqBcd = body + 40U;
+    const int gunNo = ((gunBcd >> 4) & 0x0F) * 10 + (gunBcd & 0x0F);
+    if (gunNo <= 0) {
+        return false;
+    }
+    const int gunIndex = gunNo - 1;
+    if (gunIndex < 0 || gunIndex >= static_cast<int>(m_gunRuntimeData.size())) {
+        return false;
+    }
+    gun = static_cast<uint8_t>(gunIndex);
+
+    const std::string orderNo = bcdToDigitString(tradeBcd, 16);
+    const std::string chargeUserNo = bcdToDigitString(logicCardBcd, 8);
     const std::string mergeSeq = bcdToDigitString(mergeSeqBcd, 6);
-    if (!*outData || !cJSON_IsObject(*outData)) {
-        return false;
+    const GunRuntimeData& rd = m_gunRuntimeData[gun];
+
+    if (gun < m_feeModelByGun.size()) {
+        feeModel = m_feeModelByGun[gun];
+    } else {
+        feeModel.feeModelId.clear();
+        feeModel.timeNum = 0;
+        feeModel.timeSeg.clear();
+        feeModel.segFlag.clear();
+        feeModel.chargeFee.clear();
+        feeModel.serviceFee.clear();
     }
 
-    cJSON_AddStringToObject(*outData, "mergeChargeSeq", mergeSeq.c_str());
-    cJSON_AddStringToObject(*outData, "mergeSeq", mergeSeq.c_str());
-    cJSON_AddNumberToObject(*outData, "mergeChargeFlag", 0x01);
-    if (gun < m_gunRuntimeData.size()) {
-        cJSON_AddNumberToObject(*outData, "masterGunFlag", m_gunRuntimeData[gun].pendingVinAuthMasterGunFlag);
-        m_gunRuntimeData[gun].pendingVinAuthMergeSeq = mergeSeq;
-    } else {
-        cJSON_AddNumberToObject(*outData, "masterGunFlag", 0x00);
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddNumberToObject(data, "startTime", static_cast<double>(std::time(nullptr)) * 1000.0);
+    cJSON_AddStringToObject(data, "vin", rd.pendingVinAuthVin.c_str());
+    cJSON_AddStringToObject(data, "vinCode", rd.pendingVinAuthVin.c_str());
+    cJSON_AddStringToObject(data, "chargeUserNo", chargeUserNo.c_str());
+    cJSON_AddStringToObject(data, "logicCardNo", chargeUserNo.c_str());
+    cJSON_AddStringToObject(data, "orderNo", orderNo.c_str());
+    cJSON_AddStringToObject(data, "preTradeNo", orderNo.c_str());
+    cJSON_AddStringToObject(data, "tradeNo", orderNo.c_str());
+    cJSON_AddNumberToObject(data, "chargeMode", 0x60);
+    cJSON_AddNumberToObject(data, "prechargeAmount", static_cast<double>(balanceRaw) / 100.0);
+    cJSON_AddNumberToObject(data, "plugAndChargeFlag", rd.pendingVinAuthPlugAndChargeFlag);
+    cJSON_AddNumberToObject(data, "mergeChargeFlag", 0x01);
+    cJSON_AddStringToObject(data, "mergeChargeSeq", mergeSeq.c_str());
+    cJSON_AddStringToObject(data, "mergeSeq", mergeSeq.c_str());
+    cJSON_AddNumberToObject(data, "masterGunFlag", rd.pendingVinAuthMasterGunFlag);
+    cJSON_AddNumberToObject(data, "successFlag", successFlag);
+    cJSON_AddNumberToObject(data, "failReason", failReason);
+    cJSON_AddNumberToObject(data, "feeModelNo", 0);
+    cJSON_AddStringToObject(data, "feeModelId", feeModel.feeModelId.c_str());
+
+    const bool feeModelReady =
+            (!feeModel.feeModelId.empty()) &&
+            (feeModel.timeNum > 0) &&
+            (feeModel.timeSeg.size() >= static_cast<size_t>(feeModel.timeNum)) &&
+            (feeModel.chargeFee.size() >= static_cast<size_t>(feeModel.timeNum)) &&
+            (feeModel.serviceFee.size() >= static_cast<size_t>(feeModel.timeNum));
+    if (feeModelReady) {
+        cJSON_AddNumberToObject(data, "timeNum", static_cast<int>(feeModel.timeNum));
+        cJSON* timeSeg = cJSON_CreateArray();
+        cJSON* chargeFee = cJSON_CreateArray();
+        cJSON* serviceFee = cJSON_CreateArray();
+        for (size_t i = 0; i < feeModel.timeSeg.size(); ++i) {
+            cJSON_AddItemToArray(timeSeg, cJSON_CreateString(feeModel.timeSeg[i].c_str()));
+        }
+        for (size_t i = 0; i < feeModel.chargeFee.size(); ++i) {
+            cJSON_AddItemToArray(chargeFee, cJSON_CreateNumber(static_cast<double>(feeModel.chargeFee[i]) / 100000.0));
+        }
+        for (size_t i = 0; i < feeModel.serviceFee.size(); ++i) {
+            cJSON_AddItemToArray(serviceFee, cJSON_CreateNumber(static_cast<double>(feeModel.serviceFee[i]) / 100000.0));
+        }
+        cJSON_AddItemToObject(data, "timeSeg", timeSeg);
+        cJSON_AddItemToObject(data, "chargeFee", chargeFee);
+        cJSON_AddItemToObject(data, "serviceFee", serviceFee);
     }
+
+    GunRuntimeData& wr = m_gunRuntimeData[gun];
+    wr.chargeUserNo = chargeUserNo;
+    wr.orderNo = orderNo;
+    wr.chargeMode = 0x60;
+    wr.prechargeAmount = static_cast<double>(balanceRaw) / 100.0;
+    wr.feeModelId = feeModel.feeModelId;
+    wr.feeTimeNum = static_cast<int>(feeModel.timeNum);
+    wr.pendingVinAuthMergeChargeFlag = 0x01;
+    wr.pendingVinAuthMergeSeq = mergeSeq;
+    wr.feeSegments.clear();
+    const size_t periodCount = feeModel.timeSeg.size();
+    wr.feeSegments.reserve(periodCount);
+    for (size_t i = 0; i < periodCount; ++i) {
+        FeeSegmentData seg;
+        seg.startTs = feeModel.timeSeg[i];
+        seg.endTs = (i + 1 < periodCount) ? feeModel.timeSeg[i + 1] : "2400";
+        wr.feeSegments.push_back(seg);
+    }
+
+    *outData = data;
     return true;
 }
 

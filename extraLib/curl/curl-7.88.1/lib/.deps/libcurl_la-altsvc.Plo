@@ -1,0 +1,397 @@
+libcurl_la-altsvc.lo: altsvc.c \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/stdc-predef.h \
+ curl_setup.h curl_config.h ../include/curl/system.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/types.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/features.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/cdefs.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/wordsize.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/gnu/stubs.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/gnu/stubs-hard.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/types.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/typesizes.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/time.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include/stddef.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/endian.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/endian.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/byteswap.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/byteswap-16.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/select.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/select.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/sigset.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/time.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/sysmacros.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/pthreadtypes.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/socket.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/uio.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/uio.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/socket.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/socket_type.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/sockaddr.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm/socket.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm/sockios.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/stdio.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/libio.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/_G_config.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/wchar.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include/stdarg.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stdio_lim.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/sys_errlist.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stdio.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/assert.h \
+ curl_setup_once.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/stdlib.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/waitflags.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/waitstatus.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/alloca.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stdlib-bsearch.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stdlib-float.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/string.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/xlocale.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/string.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/string2.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/errno.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/errno.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/linux/errno.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm/errno.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm-generic/errno.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm-generic/errno-base.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/stat.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stat.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/time.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include/stdbool.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/unistd.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/posix_opt.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/environments.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/confname.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/getopt.h \
+ functypes.h curl_ctype.h ../include/curl/curl.h \
+ ../include/curl/curlver.h ../include/curl/system.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include-fixed/limits.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include-fixed/syslimits.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/limits.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/posix1_lim.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/local_lim.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/linux/limits.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/posix2_lim.h \
+ ../include/curl/easy.h ../include/curl/multi.h ../include/curl/curl.h \
+ ../include/curl/urlapi.h ../include/curl/options.h \
+ ../include/curl/header.h ../include/curl/websockets.h \
+ ../include/curl/typecheck-gcc.h urldata.h cookie.h psl.h formdata.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/netinet/in.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include/stdint.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/stdint.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/wchar.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/in.h \
+ timeval.h timediff.h http_chunks.h hostip.h hash.h llist.h \
+ curl_addrinfo.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/netdb.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/rpc/netdb.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/netdb.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/arpa/inet.h \
+ asyn.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/setjmp.h \
+ /opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/setjmp.h \
+ splay.h dynbuf.h mime.h imap.h pingpong.h curl_sasl.h bufref.h pop3.h \
+ smtp.h ftp.h file.h vssh/ssh.h ../lib/curl_setup.h http.h ws.h rtsp.h \
+ smb.h mqtt.h wildcard.h multihandle.h conncache.h socketpair.h c-hyper.h \
+ cf-socket.h nonblock.h sockaddr.h altsvc.h curl_get_line.h strcase.h \
+ parsedate.h sendf.h curl_log.h warnless.h fopen.h rename.h curl_printf.h \
+ ../include/curl/mprintf.h curl_memory.h memdebug.h
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/stdc-predef.h:
+
+curl_setup.h:
+
+curl_config.h:
+
+../include/curl/system.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/types.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/features.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/cdefs.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/wordsize.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/gnu/stubs.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/gnu/stubs-hard.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/types.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/typesizes.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/time.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include/stddef.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/endian.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/endian.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/byteswap.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/byteswap-16.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/select.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/select.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/sigset.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/time.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/sysmacros.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/pthreadtypes.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/socket.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/uio.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/uio.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/socket.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/socket_type.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/sockaddr.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm/socket.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm/sockios.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/stdio.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/libio.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/_G_config.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/wchar.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include/stdarg.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stdio_lim.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/sys_errlist.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stdio.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/assert.h:
+
+curl_setup_once.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/stdlib.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/waitflags.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/waitstatus.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/alloca.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stdlib-bsearch.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stdlib-float.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/string.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/xlocale.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/string.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/string2.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/errno.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/errno.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/linux/errno.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm/errno.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm-generic/errno.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/asm-generic/errno-base.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/stat.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/stat.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/sys/time.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include/stdbool.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/unistd.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/posix_opt.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/environments.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/confname.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/getopt.h:
+
+functypes.h:
+
+curl_ctype.h:
+
+../include/curl/curl.h:
+
+../include/curl/curlver.h:
+
+../include/curl/system.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include-fixed/limits.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include-fixed/syslimits.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/limits.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/posix1_lim.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/local_lim.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/linux/limits.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/posix2_lim.h:
+
+../include/curl/easy.h:
+
+../include/curl/multi.h:
+
+../include/curl/curl.h:
+
+../include/curl/urlapi.h:
+
+../include/curl/options.h:
+
+../include/curl/header.h:
+
+../include/curl/websockets.h:
+
+../include/curl/typecheck-gcc.h:
+
+urldata.h:
+
+cookie.h:
+
+psl.h:
+
+formdata.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/netinet/in.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/lib/gcc/arm-linux-gnueabihf/4.9.1/include/stdint.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/stdint.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/wchar.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/in.h:
+
+timeval.h:
+
+timediff.h:
+
+http_chunks.h:
+
+hostip.h:
+
+hash.h:
+
+llist.h:
+
+curl_addrinfo.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/netdb.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/rpc/netdb.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/netdb.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/arpa/inet.h:
+
+asyn.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/setjmp.h:
+
+/opt/toolchains/imx6ul/gcc-linux-arm-4.9/arm-linux-gnueabihf/libc/usr/include/bits/setjmp.h:
+
+splay.h:
+
+dynbuf.h:
+
+mime.h:
+
+imap.h:
+
+pingpong.h:
+
+curl_sasl.h:
+
+bufref.h:
+
+pop3.h:
+
+smtp.h:
+
+ftp.h:
+
+file.h:
+
+vssh/ssh.h:
+
+../lib/curl_setup.h:
+
+http.h:
+
+ws.h:
+
+rtsp.h:
+
+smb.h:
+
+mqtt.h:
+
+wildcard.h:
+
+multihandle.h:
+
+conncache.h:
+
+socketpair.h:
+
+c-hyper.h:
+
+cf-socket.h:
+
+nonblock.h:
+
+sockaddr.h:
+
+altsvc.h:
+
+curl_get_line.h:
+
+strcase.h:
+
+parsedate.h:
+
+sendf.h:
+
+curl_log.h:
+
+warnless.h:
+
+fopen.h:
+
+rename.h:
+
+curl_printf.h:
+
+../include/curl/mprintf.h:
+
+curl_memory.h:
+
+memdebug.h:

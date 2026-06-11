@@ -315,20 +315,26 @@ void CommProcess::handleLogicEvent(uint8_t gun, const std::string& payload)
                     m_gunData[gun].chargeTimeSec = 0;
                     m_gunData[gun].chargedTimeBaseRaw = 0;
                     m_gunData[gun].chargedTimeBaseInited = false;
+                    m_gunData[gun].v2gMode = false;
                 } else if (std::strcmp(to->valuestring, "PREPARE") == 0 ||
                            std::strcmp(to->valuestring, "STARTING") == 0) {
                     m_gunData[gun].gunStatus = 1;
                     m_gunData[gun].connectStatus = 1;
                 } else if (std::strcmp(to->valuestring, "CHARGING") == 0) {
-                    m_gunData[gun].gunStatus = 2;
+                    m_gunData[gun].gunStatus = m_gunData[gun].v2gMode ? 5 : 2;
                     m_gunData[gun].connectStatus = 1;
                 } else if (std::strcmp(to->valuestring, "STOPPING") == 0 ||
                            std::strcmp(to->valuestring, "STOPPED") == 0) {
-                    m_gunData[gun].gunStatus = 3;
+                    m_gunData[gun].gunStatus = m_gunData[gun].v2gMode ? 5 : 3;
                     m_gunData[gun].connectStatus = 2;
                 } else if (std::strcmp(to->valuestring, "ERROR") == 0) {
                     m_gunData[gun].gunStatus = 4;
                 }
+            }
+        } else if (std::strcmp(event->valuestring, "auth_basis") == 0) {
+            cJSON* v2g = cJSON_GetObjectItem(data, "v2g");
+            if (v2g && cJSON_IsNumber(v2g)) {
+                m_gunData[gun].v2gMode = (v2g->valueint != 0);
             }
         }
     }

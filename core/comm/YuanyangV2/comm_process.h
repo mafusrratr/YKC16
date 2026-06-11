@@ -39,7 +39,6 @@ struct CommConfig {
     std::string assetCode;
     uint16_t stationAddr;
     std::vector<uint16_t> deviceAddrList;
-    std::vector<std::string> gunAssetCodeList;
     std::string rsaPublicKey;
     bool offlineRunMode;
     bool debugTcp;
@@ -114,6 +113,7 @@ private:
         double electricAmount;
         double serviceAmount;
         double chargedTime;
+        double estimatedRemainTime;
 
         std::string chargeUserNo;
         std::string orderNo;
@@ -152,6 +152,7 @@ private:
             , electricAmount(0.0)
             , serviceAmount(0.0)
             , chargedTime(0.0)
+            , estimatedRemainTime(0.0)
             , feeTimeNum(0)
         {}
     };
@@ -186,20 +187,14 @@ private:
     struct PendingControl {
         bool active;
         uint8_t action;
-        uint16_t targetStation;
-        uint16_t targetDevice;
         uint8_t vsq;
-        uint16_t commonAddr;
         std::vector<uint8_t> tailPlain;
         std::chrono::steady_clock::time_point createdAt;
 
         PendingControl()
             : active(false)
             , action(0)
-            , targetStation(0)
-            , targetDevice(0)
             , vsq(1)
-            , commonAddr(0)
         {}
     };
 
@@ -234,17 +229,16 @@ private:
     void checkPendingControlTimeouts(const std::chrono::steady_clock::time_point& now);
 
     std::vector<uint8_t> buildHeartbeatFrame(uint32_t control);
-    std::vector<uint8_t> buildAsduFrame(uint8_t cmd, uint8_t vsq, uint16_t cot, uint16_t commonAddr,
+    std::vector<uint8_t> buildAsduFrame(uint8_t cmd, uint8_t vsq, uint16_t cot,
                                         const std::vector<uint8_t>& tailPlain,
-                                        uint16_t targetStation, uint16_t targetDevice,
-                                        uint16_t sourceStation, uint16_t sourceDevice);
+                                        uint32_t sourceAddr);
     bool sendFrame(const std::vector<uint8_t>& frame);
-    bool sendAsdu(uint8_t cmd, uint8_t vsq, uint16_t cot, uint16_t commonAddr,
-                  const std::vector<uint8_t>& tailPlain,
-                  uint16_t targetStation = 0, uint16_t targetDevice = 0);
+    bool sendAsdu(uint8_t cmd, uint8_t vsq, uint16_t cot,
+                  const std::vector<uint8_t>& tailPlain);
     bool sendHeartbeat();
     bool sendRsaPublicKeyRequest();
     bool sendDeviceAuthRequest();
+    bool sendFeeModelRequest();
     bool sendControlAck(uint8_t gun, const PendingControl& pending, uint16_t cot);
     bool sendFeeModelAck(const ParsedFrame& pf, bool ok);
 
@@ -265,10 +259,12 @@ private:
     bool parseRecordConfirm042(const ParsedFrame& pf, uint8_t& gun, cJSON** outData);
 
     std::vector<uint8_t> buildInfoAddrTail(uint32_t infoAddr) const;
+    std::array<uint8_t, 16> buildTelesignalValues(const GunRuntimeData& rd) const;
+    std::array<int32_t, 16> buildTelemetryValues(const GunRuntimeData& rd) const;
     std::vector<uint8_t> buildAllTelesignalTail() const;
     std::vector<uint8_t> buildChangedTelesignalTail(uint8_t gun) const;
     std::vector<uint8_t> buildAllTelemetryTail() const;
-    std::vector<uint8_t> buildChangedTelemetryTail(uint8_t gun) const;
+    std::vector<uint8_t> buildLegacyPulseTail() const;
     std::vector<uint8_t> buildExtPulseTail() const;
     std::vector<uint8_t> buildFaultTail(uint8_t gun, uint32_t faultCode, bool active) const;
     bool buildChargeRecordTail(uint8_t gun, cJSON* data, std::vector<uint8_t>& tail);

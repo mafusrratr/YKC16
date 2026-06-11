@@ -508,6 +508,7 @@ bool ChargeLogicProcess::loadConfig()
     m_config.pileConfigPath = cfg.getString("ChargeLogic", "pile_config_path", "");
     m_config.prechargeStopMargin = std::atof(
         cfg.getString("ChargeLogic", "precharge_stop_margin", "1.0").c_str());
+    m_config.cardLockEnabled = (cfg.getInt("ChargeLogic", "card_lock_enabled", 0) != 0);
 
     if (!m_config.pileConfigPath.empty()) {
         int configuredGunCount = readGunCountFromIni(m_config.pileConfigPath);
@@ -781,21 +782,60 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
         }
         // BY ZF: platform 启动流程，测试阶段默认鉴权通过
         if (gs.state == STATE_PREPARE) {
-            updateAuthBasis(gun, data, "platform");
-            gs.pendingStart = true;
-            gs.pendingStartData.clear();
-            // BY ZF: 缓存“桩侧启动帧参数”，避免透传上层业务字段到 pile
-            cJSON* pileStartData = buildPileStartData(data);
-            if (pileStartData) {
-                char* out = cJSON_PrintUnformatted(pileStartData);
-                if (out) {
-                    gs.pendingStartData = out;
-                    cJSON_free(out);
+            if (getMergeChargeFlag(data) != 0x00) {
+                const int peer = getMergePeerGun(gun);
+                if (peer < 0) {
+                    cJSON* evt = cJSON_CreateObject();
+                    cJSON_AddStringToObject(evt, "cmd", "start_charge");
+                    cJSON_AddStringToObject(evt, "reason", "merge_charge_peer_not_found");
+                    publishLogicEvent(gun, "cmd_reject", evt);
+                    cJSON_Delete(evt);
+                    return;
                 }
-                cJSON_Delete(pileStartData);
+                if (!armPendingStart(gun, data, "platform")) {
+                    cJSON* evt = cJSON_CreateObject();
+                    cJSON_AddStringToObject(evt, "cmd", "start_charge");
+                    cJSON_AddStringToObject(evt, "reason", "merge_charge_arm_failed");
+                    cJSON_AddNumberToObject(evt, "peerGun", peer);
+                    publishLogicEvent(gun, "cmd_reject", evt);
+                    cJSON_Delete(evt);
+                    return;
+                }
+                {
+                    std::ostringstream oss;
+                    oss << "gun=" << static_cast<int>(gun)
+                        << ",peerGun=" << peer
+                        << ",orderNo=" << gs.orderNo
+                        << ",preTradeNo=" << gs.preTradeNo
+                        << ",tradeNo=" << gs.tradeNo
+                        << ",mergeChargeFlag=" << static_cast<int>(gs.mergeChargeFlag);
+                    m_logSender.info("merge_plat_start_arm", oss.str());
+                }
+                if (!tryDispatchMergePendingStart(gun, "merge_plat_start_cmd", "merge_plat_start_auto_auth_ok")) {
+                    cJSON* evt = cJSON_CreateObject();
+                    cJSON_AddStringToObject(evt, "cmd", "start_charge");
+                    cJSON_AddStringToObject(evt, "reason", "merge_charge_wait_peer_start");
+                    cJSON_AddNumberToObject(evt, "peerGun", peer);
+                    publishLogicEvent(gun, "merge_wait_peer_start", evt);
+                    cJSON_Delete(evt);
+                }
+            } else {
+                updateAuthBasis(gun, data, "platform");
+                gs.pendingStart = true;
+                gs.pendingStartData.clear();
+                // BY ZF: 缓存“桩侧启动帧参数”，避免透传上层业务字段到 pile
+                cJSON* pileStartData = buildPileStartData(data);
+                if (pileStartData) {
+                    char* out = cJSON_PrintUnformatted(pileStartData);
+                    if (out) {
+                        gs.pendingStartData = out;
+                        cJSON_free(out);
+                    }
+                    cJSON_Delete(pileStartData);
+                }
+                handleEvent(gun, EVT_START_CMD, "plat_start_cmd");
+                handleEvent(gun, EVT_AUTH_OK, "plat_start_auto_auth_ok");
             }
-            handleEvent(gun, EVT_START_CMD, "plat_start_cmd");
-            handleEvent(gun, EVT_AUTH_OK, "plat_start_auto_auth_ok");
         } else {
             cJSON* evt = cJSON_CreateObject();
             cJSON_AddStringToObject(evt, "cmd", "start_charge");
@@ -997,13 +1037,6 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
         gs.pileOfflineFaultActive = false;
         gs.pileOfflineEventLatched = false;
         gs.pileOfflinePendingTime = std::chrono::steady_clock::time_point();
-        if (gs.state == STATE_ERROR && !gs.meterOfflineFaultActive && !gs.platformOfflineFaultActive) {
-            if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
-                transitionTo(gun, STATE_PREPARE, "pile_yx_recovered");
-            } else {
-                transitionTo(gun, STATE_IDLE, "pile_yx_recovered");
-            }
-        }
         cJSON* ws = cJSON_GetObjectItem(data, "workStatus");
         cJSON* vc = cJSON_GetObjectItem(data, "vehicleConnectStatus");
         cJSON* tf = cJSON_GetObjectItem(data, "totalFault");
@@ -1031,6 +1064,20 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
                     const FaultJudgeResult result = JudgeStandbyFaultPoint(MakeStandbyPointKey(otherFault));
                     publishSaveErrorEvent(gun, result, otherFault, "pile_yx");
                 }
+            }
+        }
+
+        const bool pileFaultActive = (gs.hasTotalFault && gs.lastTotalFault != 0) ||
+                                     (gs.hasOtherFault && gs.lastOtherFault != 0);
+        if (gs.state == STATE_ERROR &&
+            !gs.meterOfflineFaultActive &&
+            !gs.platformOfflineFaultActive &&
+            !pileFaultActive) {
+            // BY ZF: 必须用本包最新遥信确认总故障/详细故障均已清零，避免同一包先恢复又立即 total_fault。
+            if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
+                transitionTo(gun, STATE_PREPARE, "pile_yx_recovered");
+            } else {
+                transitionTo(gun, STATE_IDLE, "pile_yx_recovered");
             }
         }
 
@@ -1340,6 +1387,7 @@ void ChargeLogicProcess::beginOfflineCardCharge(uint8_t gun)
     // BY ZF: 刷卡启动也要继承 HMI 下发的 v2g/合并充/即插即充等启动参数，不能退回默认启动帧。
     cJSON* pileStartData = buildPileStartData(data);
     if (pileStartData) {
+        cJSON_ReplaceItemInObject(pileStartData, "v2g", cJSON_CreateNumber(gs.v2gMode ? 1 : 0));
         char* out = cJSON_PrintUnformatted(pileStartData);
         if (out) {
             gs.pendingStartData = out;
@@ -1605,7 +1653,7 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
             if (tryResumeOfflineCardSettlement(cardNo, cardBalance)) {
                 return;
             }
-            if (locked) {
+            if (m_config.cardLockEnabled && locked) {
                 {
                     std::ostringstream oss;
                     oss << "gun=" << static_cast<int>(m_cardReaderState.gun)
@@ -1621,7 +1669,6 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
                 cJSON_Delete(evt);
             } else if (cardBalance > 100) {
                 gs.offlineCardStartBalance = static_cast<uint32_t>(cardBalance);
-                m_cardReaderState.phase = CARD_PHASE_WAIT_START_LOCK;
                 {
                     std::ostringstream oss;
                     oss << "gun=" << static_cast<int>(m_cardReaderState.gun)
@@ -1634,7 +1681,12 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
                 cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardStartBalance));
                 publishLogicEvent(m_cardReaderState.gun, "card_auth_ok", evt);
                 cJSON_Delete(evt);
-                publishCardCmd("card_lock", gs.offlineCardNoHex.c_str(), false, 0U);
+                if (m_config.cardLockEnabled) {
+                    m_cardReaderState.phase = CARD_PHASE_WAIT_START_LOCK;
+                    publishCardCmd("card_lock", gs.offlineCardNoHex.c_str(), false, 0U);
+                } else {
+                    beginOfflineCardCharge(m_cardReaderState.gun);
+                }
             } else {
                 {
                     std::ostringstream oss;
@@ -2402,6 +2454,7 @@ bool ChargeLogicProcess::armPendingStart(uint8_t gun, cJSON* data, const char* s
 
     cJSON* pileStartData = buildPileStartData(data);
     if (pileStartData) {
+        cJSON_ReplaceItemInObject(pileStartData, "v2g", cJSON_CreateNumber(gs.v2gMode ? 1 : 0));
         char* out = cJSON_PrintUnformatted(pileStartData);
         if (out) {
             gs.pendingStartData = out;
@@ -2419,6 +2472,35 @@ void ChargeLogicProcess::dispatchArmedStart(uint8_t gun, const char* startReason
     }
     handleEvent(gun, EVT_START_CMD, startReason);
     handleEvent(gun, EVT_AUTH_OK, authReason);
+}
+
+bool ChargeLogicProcess::tryDispatchMergePendingStart(uint8_t gun, const char* startReason, const char* authReason)
+{
+    if (gun >= m_gunStates.size()) {
+        return false;
+    }
+    GunState& gs = m_gunStates[gun];
+    if (gs.mergeChargeFlag == 0x00 || !gs.pendingStart || !gs.hasAuthBasis) {
+        return false;
+    }
+
+    const int peer = getMergePeerGun(gun);
+    if (peer < 0 || static_cast<size_t>(peer) >= m_gunStates.size()) {
+        return false;
+    }
+    GunState& peerGs = m_gunStates[peer];
+    if (peerGs.state != STATE_PREPARE ||
+        peerGs.mergeChargeFlag == 0x00 ||
+        !peerGs.pendingStart ||
+        !peerGs.hasAuthBasis) {
+        return false;
+    }
+
+    syncMergePrechargeAmount(gun);
+    syncMergePrechargeAmount(static_cast<uint8_t>(peer));
+    dispatchArmedStart(gun, startReason, authReason);
+    dispatchArmedStart(static_cast<uint8_t>(peer), startReason, authReason);
+    return true;
 }
 
 void ChargeLogicProcess::syncMergePrechargeAmount(uint8_t gun)
@@ -2559,24 +2641,37 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     gs.tradeNo = baseTradeNo.empty()
         ? ("T" + std::to_string(gun) + "_" + std::to_string(gs.chargeStartTime))
         : baseTradeNo;
-    if (source && std::string(source) == "platform") {
-        gs.startType = 2;
+    const int plugAndChargeFlag = getPlugAndChargeFlag(data);
+    const char* vin = data ? getString(data, "vin") : nullptr;
+    if ((!vin || !vin[0]) && data) {
+        vin = getString(data, "vinCode");
+    }
+    const bool isVinStart = (plugAndChargeFlag == 0x02) || (vin && vin[0]);
+
+    if (isVinStart) {
+        // BY ZF: VIN/即插即充启动即使由平台回参触发，交易标识仍应按VIN启动上送。
+        gs.startType = 5;
     } else if (source && std::string(source) == "card_offline") {
         gs.startType = 4;
     } else {
+        // BY ZF: 普通平台远程启动按普通启动口径记录，不再误记为卡启动。
         gs.startType = 1;
     }
     gs.startSoc = 0;
     gs.endSoc = 0;
     gs.stopReason = 0;
-    gs.plugAndChargeFlag = getPlugAndChargeFlag(data);
+    gs.plugAndChargeFlag = plugAndChargeFlag;
     gs.mergeChargeFlag = getMergeChargeFlag(data);
     gs.plugAndChargeActive = (gs.plugAndChargeFlag == 0x02);
     gs.plugAndChargeVehicleIdReceived = false;
     gs.plugAndChargeVehicleIdConfirmed = false;
+    gs.plugAndChargeVehicleIdRxCount = 0;
     gs.plugAndChargeAuthRequestPublished = false;
     gs.plugAndChargeAuthResultSent = false;
     gs.plugAndChargeAuthAckReceived = false;
+    gs.plugAndChargeAuthResultReady = false;
+    gs.plugAndChargeAuthCachedSuccess = false;
+    gs.plugAndChargeAuthCachedFailReason = 0;
     gs.plugAndChargeBatteryChargeCount[0] = 0;
     gs.plugAndChargeBatteryChargeCount[1] = 0;
     gs.plugAndChargeBatteryChargeCount[2] = 0;
@@ -2973,6 +3068,7 @@ void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
         gs.hasVinCode = true;
     }
     gs.plugAndChargeVehicleIdReceived = true;
+    ++gs.plugAndChargeVehicleIdRxCount;
 
     if (data) {
         cJSON* arr = cJSON_GetObjectItem(data, "batteryChargeCount");
@@ -2994,7 +3090,8 @@ void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
         }
     }
 
-    const bool singleGunConfirmOk = gs.plugAndChargeActive && gs.state == STATE_STARTING && isValidVinString(vin);
+    const bool vinValid = isValidVinString(vin);
+    const bool singleGunConfirmOk = gs.plugAndChargeActive && gs.state == STATE_STARTING && vinValid;
     const bool mergePlugAndCharge = (gs.plugAndChargeActive && gs.mergeChargeFlag != 0x00);
     const int peer = mergePlugAndCharge ? getMergePeerGun(gun) : -1;
 
@@ -3025,7 +3122,24 @@ void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
     }
 
     GunState& peerGs = m_gunStates[peer];
-    if (!singleGunConfirmOk) {
+    // BY ZF: 合并充即插即充场景下，若一侧已经因其他原因退出 STARTING，
+    // 之后迟到的 vehicle_id 不应再按 invalid_vin 覆盖原始启动失败原因。
+    if (!gs.plugAndChargeActive ||
+        gs.state != STATE_STARTING ||
+        !peerGs.plugAndChargeActive ||
+        peerGs.state != STATE_STARTING) {
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "vin", vin.c_str());
+        cJSON_AddNumberToObject(evt, "peerGun", peer);
+        cJSON_AddStringToObject(evt, "reason", "stale_vehicle_id_ignored");
+        cJSON_AddStringToObject(evt, "state", stateToString(gs.state));
+        cJSON_AddStringToObject(evt, "peerState", stateToString(peerGs.state));
+        publishLogicEvent(gun, "plug_and_charge_vehicle_id_ignored", evt);
+        cJSON_Delete(evt);
+        return;
+    }
+
+    if (!vinValid) {
         const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(0x32U));
         for (size_t idx = 0; idx < 2; ++idx) {
             const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
@@ -3053,11 +3167,13 @@ void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
         return;
     }
 
-    if (!peerGs.plugAndChargeVehicleIdReceived) {
+    if (gs.plugAndChargeVehicleIdRxCount == 0U || peerGs.plugAndChargeVehicleIdRxCount == 0U || !peerGs.plugAndChargeVehicleIdReceived) {
         cJSON* evt = cJSON_CreateObject();
         cJSON_AddStringToObject(evt, "vin", vin.c_str());
         cJSON_AddNumberToObject(evt, "peerGun", peer);
         cJSON_AddStringToObject(evt, "reason", "waiting_peer_vehicle_id");
+        cJSON_AddNumberToObject(evt, "selfRxCount", static_cast<double>(gs.plugAndChargeVehicleIdRxCount));
+        cJSON_AddNumberToObject(evt, "peerRxCount", static_cast<double>(peerGs.plugAndChargeVehicleIdRxCount));
         publishLogicEvent(gun, "plug_and_charge_vehicle_id_wait_peer", evt);
         cJSON_Delete(evt);
         return;
@@ -3216,74 +3332,93 @@ void ChargeLogicProcess::handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data,
         failReason = 0x02;
     }
 
+    // BY ZF: 当前枪先缓存各自的鉴权结果；合并充即插即充需等待对枪结果也到齐后再双枪同时继续。
+    gs.plugAndChargeAuthResultReady = true;
+    gs.plugAndChargeAuthCachedSuccess = authSuccess;
+    gs.plugAndChargeAuthCachedFailReason = failReason;
+
+    if (data) {
+        const char* userNo = getString(data, "chargeUserNo");
+        if (!userNo || !userNo[0]) userNo = getString(data, "userNo");
+        if (!userNo || !userNo[0]) userNo = getString(data, "userId");
+        if (userNo && userNo[0]) {
+            gs.chargeUserNo = userNo;
+        }
+
+        const char* orderNo = getString(data, "orderNo");
+        if (!orderNo || !orderNo[0]) orderNo = getString(data, "chargeOrderNo");
+        if (orderNo && orderNo[0]) {
+            gs.orderNo = orderNo;
+        }
+
+        const char* preTradeNo = getString(data, "preTradeNo");
+        if (preTradeNo && preTradeNo[0]) {
+            gs.preTradeNo = preTradeNo;
+        } else if (gs.preTradeNo.empty() && !gs.orderNo.empty()) {
+            gs.preTradeNo = gs.orderNo;
+        }
+
+        const char* tradeNo = getString(data, "tradeNo");
+        if (tradeNo && tradeNo[0]) {
+            gs.tradeNo = tradeNo;
+        } else if (gs.tradeNo.empty()) {
+            const std::string baseTradeNo = gs.preTradeNo.empty() ? gs.orderNo : gs.preTradeNo;
+            gs.tradeNo = baseTradeNo.empty()
+                ? ("T" + std::to_string(gun) + "_" + std::to_string(gs.chargeStartTime))
+                : baseTradeNo;
+        }
+
+        int chargeMode = 0;
+        if (jsonGetInt(data, "chargeMode", chargeMode)) {
+            gs.chargeMode = chargeMode;
+        }
+
+        cJSON* prechargeAmount = cJSON_GetObjectItem(data, "prechargeAmount");
+        if (!prechargeAmount) prechargeAmount = cJSON_GetObjectItem(data, "prepaidAmount");
+        if (prechargeAmount && cJSON_IsNumber(prechargeAmount)) {
+            gs.prechargeAmount = prechargeAmount->valuedouble;
+        }
+
+        int feeModelNo = 0;
+        if (jsonGetInt(data, "feeModelNo", feeModelNo)) {
+            gs.feeModelNo = feeModelNo;
+        }
+
+        const char* feeModelId = getString(data, "feeModelId");
+        if (feeModelId && feeModelId[0]) {
+            gs.feeModelId = feeModelId;
+        }
+
+        gs.mergeChargeFlag = getMergeChargeFlag(data);
+
+        if (cJSON_GetObjectItem(data, "timeNum")) {
+            parseFeeModel(gun, data);
+        }
+    }
+
+    if (peerGs && !peerGs->plugAndChargeAuthResultReady) {
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "sourceCmd", resultSource ? resultSource : "");
+        cJSON_AddStringToObject(evt, "reason", "merge_wait_peer_auth_result");
+        cJSON_AddNumberToObject(evt, "peerGun", peer);
+        cJSON_AddNumberToObject(evt, "successFlag", authSuccess ? 0x00 : 0x01);
+        cJSON_AddNumberToObject(evt, "failReason", failReason);
+        publishLogicEvent(gun, "merge_wait_peer_auth_result", evt);
+        cJSON_Delete(evt);
+        return;
+    }
+
     const size_t targetCount = peerGs ? 2U : 1U;
     for (size_t idx = 0; idx < targetCount; ++idx) {
         const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
         GunState& targetGs = m_gunStates[targetGun];
-
-        if (data) {
-            const char* userNo = getString(data, "chargeUserNo");
-            if (!userNo || !userNo[0]) userNo = getString(data, "userNo");
-            if (!userNo || !userNo[0]) userNo = getString(data, "userId");
-            if (userNo && userNo[0]) {
-                targetGs.chargeUserNo = userNo;
-            }
-
-            const char* orderNo = getString(data, "orderNo");
-            if (!orderNo || !orderNo[0]) orderNo = getString(data, "chargeOrderNo");
-            if (orderNo && orderNo[0]) {
-                targetGs.orderNo = orderNo;
-            }
-
-            const char* preTradeNo = getString(data, "preTradeNo");
-            if (preTradeNo && preTradeNo[0]) {
-                targetGs.preTradeNo = preTradeNo;
-            } else if (targetGs.preTradeNo.empty() && !targetGs.orderNo.empty()) {
-                targetGs.preTradeNo = targetGs.orderNo;
-            }
-
-            const char* tradeNo = getString(data, "tradeNo");
-            if (tradeNo && tradeNo[0]) {
-                targetGs.tradeNo = tradeNo;
-            } else if (targetGs.tradeNo.empty()) {
-                const std::string baseTradeNo = targetGs.preTradeNo.empty() ? targetGs.orderNo : targetGs.preTradeNo;
-                targetGs.tradeNo = baseTradeNo.empty()
-                    ? ("T" + std::to_string(targetGun) + "_" + std::to_string(targetGs.chargeStartTime))
-                    : baseTradeNo;
-            }
-
-            int chargeMode = 0;
-            if (jsonGetInt(data, "chargeMode", chargeMode)) {
-                targetGs.chargeMode = chargeMode;
-            }
-
-            cJSON* prechargeAmount = cJSON_GetObjectItem(data, "prechargeAmount");
-            if (!prechargeAmount) prechargeAmount = cJSON_GetObjectItem(data, "prepaidAmount");
-            if (prechargeAmount && cJSON_IsNumber(prechargeAmount)) {
-                targetGs.prechargeAmount = prechargeAmount->valuedouble;
-            }
-
-            int feeModelNo = 0;
-            if (jsonGetInt(data, "feeModelNo", feeModelNo)) {
-                targetGs.feeModelNo = feeModelNo;
-            }
-
-            const char* feeModelId = getString(data, "feeModelId");
-            if (feeModelId && feeModelId[0]) {
-                targetGs.feeModelId = feeModelId;
-            }
-
-            targetGs.mergeChargeFlag = getMergeChargeFlag(data);
-
-            if (cJSON_GetObjectItem(data, "timeNum")) {
-                parseFeeModel(targetGun, data);
-            }
-        }
+        const bool targetAuthSuccess = targetGs.plugAndChargeAuthCachedSuccess;
+        unsigned int targetFailReason = targetGs.plugAndChargeAuthCachedFailReason;
 
         cJSON* pileData = cJSON_CreateObject();
-        cJSON_AddStringToObject(pileData, "vin", authVin.c_str());
-        cJSON_AddNumberToObject(pileData, "successFlag", authSuccess ? 0x00 : 0x01);
-        cJSON_AddNumberToObject(pileData, "failReason", failReason);
+        cJSON_AddStringToObject(pileData, "vin", targetGs.vinCode.c_str());
+        cJSON_AddNumberToObject(pileData, "successFlag", targetAuthSuccess ? 0x00 : 0x01);
+        cJSON_AddNumberToObject(pileData, "failReason", targetFailReason);
         cJSON_AddStringToObject(pileData, "chargeUserNo", targetGs.chargeUserNo.c_str());
         cJSON_AddStringToObject(pileData, "orderNo", targetGs.orderNo.c_str());
         cJSON_AddStringToObject(pileData, "preTradeNo", targetGs.preTradeNo.c_str());
@@ -3318,18 +3453,18 @@ void ChargeLogicProcess::handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data,
 
         cJSON* evt = cJSON_CreateObject();
         cJSON_AddStringToObject(evt, "sourceCmd", resultSource ? resultSource : "");
-        cJSON_AddStringToObject(evt, "vin", authVin.c_str());
-        cJSON_AddNumberToObject(evt, "successFlag", authSuccess ? 0x00 : 0x01);
-        cJSON_AddNumberToObject(evt, "failReason", failReason);
+        cJSON_AddStringToObject(evt, "vin", targetGs.vinCode.c_str());
+        cJSON_AddNumberToObject(evt, "successFlag", targetAuthSuccess ? 0x00 : 0x01);
+        cJSON_AddNumberToObject(evt, "failReason", targetFailReason);
         if (peerGs) {
             cJSON_AddNumberToObject(evt, "peerGun", (targetGun == gun) ? peer : gun);
         }
 
-        if (!authSuccess) {
+        if (!targetAuthSuccess) {
             unsigned int startFailPoint = 0xF002U;
-            if (failReason == 0x01U) {
+            if (targetFailReason == 0x01U) {
                 startFailPoint = 0x32U;
-            } else if (failReason == 0x03U) {
+            } else if (targetFailReason == 0x03U) {
                 startFailPoint = 0x34U;
             }
             const FaultJudgeResult result = JudgeStartFailPoint(MakeStartPointKey(startFailPoint));
@@ -3345,7 +3480,7 @@ void ChargeLogicProcess::handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data,
         cJSON_Delete(evt);
     }
 
-    if (!authSuccess) {
+    if (!gs.plugAndChargeAuthCachedSuccess || (peerGs && !peerGs->plugAndChargeAuthCachedSuccess)) {
         for (size_t idx = 0; idx < targetCount; ++idx) {
             const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
             if (m_gunStates[targetGun].state == STATE_STARTING) {
@@ -3387,11 +3522,19 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
                 if (!gs.pendingStartData.empty()) {
                     cJSON* startData = cJSON_Parse(gs.pendingStartData.c_str());
                     if (startData) {
+                        cJSON_ReplaceItemInObject(startData, "v2g", cJSON_CreateNumber(gs.v2gMode ? 1 : 0));
                         publishPileCmd(gun, "start_charge", startData);
-                        gs.lastStartCmdData = gs.pendingStartData;
+                        char* out = cJSON_PrintUnformatted(startData);
+                        if (out) {
+                            gs.lastStartCmdData = out;
+                            cJSON_free(out);
+                        } else {
+                            gs.lastStartCmdData = gs.pendingStartData;
+                        }
                         cJSON_Delete(startData);
                     } else {
                         cJSON* pileStartData = buildPileStartData(nullptr);
+                        cJSON_ReplaceItemInObject(pileStartData, "v2g", cJSON_CreateNumber(gs.v2gMode ? 1 : 0));
                         publishPileCmd(gun, "start_charge", pileStartData);
                         char* out = cJSON_PrintUnformatted(pileStartData);
                         if (out) {
@@ -3402,6 +3545,7 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
                     }
                 } else {
                     cJSON* pileStartData = buildPileStartData(nullptr);
+                    cJSON_ReplaceItemInObject(pileStartData, "v2g", cJSON_CreateNumber(gs.v2gMode ? 1 : 0));
                     publishPileCmd(gun, "start_charge", pileStartData);
                     char* out = cJSON_PrintUnformatted(pileStartData);
                     if (out) {
@@ -3586,9 +3730,13 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.plugAndChargeActive = false;
     gs.plugAndChargeVehicleIdReceived = false;
     gs.plugAndChargeVehicleIdConfirmed = false;
+    gs.plugAndChargeVehicleIdRxCount = 0;
     gs.plugAndChargeAuthRequestPublished = false;
     gs.plugAndChargeAuthResultSent = false;
     gs.plugAndChargeAuthAckReceived = false;
+    gs.plugAndChargeAuthResultReady = false;
+    gs.plugAndChargeAuthCachedSuccess = false;
+    gs.plugAndChargeAuthCachedFailReason = 0;
     gs.plugAndChargeBatteryChargeCount[0] = 0;
     gs.plugAndChargeBatteryChargeCount[1] = 0;
     gs.plugAndChargeBatteryChargeCount[2] = 0;
@@ -3699,4 +3847,24 @@ void ChargeLogicProcess::enterStopping(uint8_t gun, const char* reason)
     m_gunStates[gun].stoppingEnterTime = std::chrono::steady_clock::now();
     publishPileCmd(gun, "stop_charge", nullptr);
     m_gunStates[gun].lastStopCmdTime = std::chrono::steady_clock::now();
+
+    // BY ZF: 合并充电模式下，任一枪收到停止命令后，需要同时给对枪下发停止命令。
+    if (m_gunStates[gun].mergeChargeFlag != 0x00) {
+        const int peer = getMergePeerGun(gun);
+        if (peer >= 0 && static_cast<size_t>(peer) < m_gunStates.size()) {
+            GunState& peerGs = m_gunStates[static_cast<size_t>(peer)];
+            if (peerGs.mergeChargeFlag != 0x00 &&
+                peerGs.state != STATE_IDLE &&
+                peerGs.state != STATE_STOPPING &&
+                peerGs.state != STATE_STOPPED) {
+                transitionTo(static_cast<uint8_t>(peer), STATE_STOPPING, "merge_peer_stop_cmd");
+                peerGs.vehicleDisconnectedDuringStopping = false;
+                peerGs.stopCompleteSeen = false;
+                peerGs.meterStableCount = 0;
+                peerGs.stoppingEnterTime = std::chrono::steady_clock::now();
+                publishPileCmd(static_cast<uint8_t>(peer), "stop_charge", nullptr);
+                peerGs.lastStopCmdTime = std::chrono::steady_clock::now();
+            }
+        }
+    }
 }

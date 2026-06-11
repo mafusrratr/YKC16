@@ -4271,7 +4271,7 @@ void RuntimeWindow::refreshAuthorizePage(const GunUiData &gun)
     if (showCardModeOptions && btnCard && m_cardChargeRadio && m_cardDischargeRadio) {
         // BY ZF: 刷卡放电投入后，在刷卡入口下方补充充/放电互斥选择，默认充电。
         const QRect cardRect = btnCard->geometry();
-        const int radioY = cardRect.bottom() + 10;
+        const int radioY = cardRect.bottom() + 40;
         m_cardChargeRadio->setGeometry(cardRect.left() - 4, radioY, 76, 30);
         m_cardDischargeRadio->setGeometry(cardRect.left() + 84, radioY, 76, 30);
         m_cardChargeRadio->raise();

@@ -1,6 +1,6 @@
 # TCU Log Upload Server
 
-这是一个平台侧日志上传测试服务，用于接收设备通过 HTTP multipart 上传的 `data_*.tar.gz` 日志包。
+这是一个平台侧日志上传测试服务，用于接收设备通过 HTTP multipart 上传的 `delta_*.tar.gz` 增量日志包。
 
 ## 目录结构
 
@@ -95,4 +95,18 @@ MAX_UPLOAD_MB: "100"
 
 ```text
 data/uploads/<device_id>/<yyyymm>/<dd>/
+```
+
+服务器落盘结构详见：
+
+```text
+SERVER_STORAGE_STRUCTURE.md
+```
+
+## 资产导入模板
+
+资产 CSV 模板使用桩级粒度，一行一个桩，不配置枪级字段：
+
+```text
+assets_template.csv
 ```

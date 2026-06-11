@@ -474,8 +474,8 @@ int CAN2CCUProtocol::encodeStartChargeFrame()
     memset(businessData, 0, sizeof(businessData));
     businessData[0] = m_cmdStartChargeData.loadControlSwitch;
     businessData[1] = m_cmdStartChargeData.plugAndChargeFlag;
-    businessData[2] = m_cmdStartChargeData.auxPowerVoltage;
-    businessData[3] = (m_cmdStartChargeData.mergeChargeFlag!= 0) ? 0x02 : 0x01;
+    // businessData[2] = m_cmdStartChargeData.auxPowerVoltage;
+    businessData[2] = (m_cmdStartChargeData.mergeChargeFlag!= 0) ? 0x02 : 0x01;
     businessData[6] = (m_cmdStartChargeData.v2g != 0) ? 0x02 : 0x01;
     return sendSingleFrame(0x10, PGN_START_CHARGE, businessData, 7);
 }

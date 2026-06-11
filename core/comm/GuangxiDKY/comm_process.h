@@ -87,6 +87,7 @@ private:
         uint16_t chargeTimeSec;
         uint32_t chargedTimeBaseRaw;
         bool chargedTimeBaseInited;
+        bool v2gMode;
         uint16_t chargeEnergyDeciKwh;
         uint16_t amountDeciYuan;
         uint16_t meterDeciKwh;
@@ -104,6 +105,7 @@ private:
             , chargeTimeSec(0)
             , chargedTimeBaseRaw(0)
             , chargedTimeBaseInited(false)
+            , v2gMode(false)
             , chargeEnergyDeciKwh(0)
             , amountDeciYuan(0)
             , meterDeciKwh(0)

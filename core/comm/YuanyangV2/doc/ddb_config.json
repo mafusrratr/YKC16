@@ -1,0 +1,79 @@
+{
+  "global_settings": {
+    "min_port_gap_ms": 100,
+    "max_retry_count": 3,
+    "default_timeout_ms": 1000,
+    "debug_enabled": true,
+    "polling_thread_interval_ms": 50
+  },
+  "meters": [
+    {
+      "id": 1,
+      "name": "dc_meter_1",
+      "protocol": "DL645_PD1056",
+      "port": "/dev/ttyS3",
+      "polling_interval_ms": 2000,
+      "protocol_config": {
+        "baudrate": 2400,
+        "data_bits": 8,
+        "stop_bits": 1,
+        "parity": "even",
+        "timeout_ms": 1000,
+        "version": "PD1056",
+        "address": "510710000368",
+        "retry_count": 3
+      }
+    },
+    {
+      "id": 2,
+      "name": "dc_meter_2",
+      "protocol": "DL645_PD1056",
+      "port": "/dev/ttyS3",
+      "polling_interval_ms": 2000,
+      "protocol_config": {
+        "baudrate": 2400,
+        "data_bits": 8,
+        "stop_bits": 1,
+        "parity": "even",
+        "timeout_ms": 1000,
+        "version": "PD1056",
+        "address": "510710000368",
+        "retry_count": 3
+      }
+    },
+    {
+      "id": 3,
+      "name": "dc_meter_2",
+      "protocol": "DL645_PD1056",
+      "port": "/dev/ttyS3",
+      "polling_interval_ms": 2000,
+      "protocol_config": {
+        "baudrate": 2400,
+        "data_bits": 8,
+        "stop_bits": 1,
+        "parity": "even",
+        "timeout_ms": 1000,
+        "version": "PD1056",
+        "address": "510710000368",
+        "retry_count": 3
+      }
+    },
+    {
+      "id": 4,
+      "name": "dc_meter_2",
+      "protocol": "DL645_PD1056",
+      "port": "/dev/ttyS3",
+      "polling_interval_ms": 2000,
+      "protocol_config": {
+        "baudrate": 2400,
+        "data_bits": 8,
+        "stop_bits": 1,
+        "parity": "even",
+        "timeout_ms": 1000,
+        "version": "PD1056",
+        "address": "510710000368",
+        "retry_count": 3
+      }
+    }
+  ]
+}

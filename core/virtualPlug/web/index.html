@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>virtualPlug Pile Controller Demo</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">VP</div>
+        <div>
+          <h1>virtualPlug</h1>
+          <p>Pile Controller Lab</p>
+        </div>
+      </div>
+
+      <section class="broker-panel" aria-label="Broker 配置">
+        <label>
+          <span>后端</span>
+          <input id="brokerHost" value="127.0.0.1">
+        </label>
+        <label class="short">
+          <span>端口</span>
+          <input id="brokerPort" value="18080" inputmode="numeric">
+        </label>
+        <label class="short">
+          <span>前缀</span>
+          <input id="topicPrefix" value="tcu">
+        </label>
+        <button id="connectBtn" class="primary-btn" type="button">连接</button>
+      </section>
+    </header>
+
+    <section class="status-strip" aria-label="运行状态">
+      <div class="status-tile">
+        <span>Broker</span>
+        <strong id="summaryBroker">离线</strong>
+      </div>
+      <div class="status-tile">
+        <span>全局枪号</span>
+        <strong id="summaryGuns">0 / 1</strong>
+      </div>
+      <div class="status-tile">
+        <span>活动输出</span>
+        <strong id="summaryPower">0.0 kW</strong>
+      </div>
+      <div class="status-tile">
+        <span>MQTT Seq</span>
+        <strong id="summarySeq">1</strong>
+      </div>
+      <div class="status-tile">
+        <span>自动计量</span>
+        <strong id="summaryMeter">运行</strong>
+      </div>
+    </section>
+
+    <main class="workspace">
+      <aside class="left-rail">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>实例配置</h2>
+            <span id="connectionBadge" class="badge muted">未连接</span>
+          </div>
+          <div class="form-grid">
+            <label>
+              <span>plug_id</span>
+              <input id="plugId" value="plug-A">
+            </label>
+            <label>
+              <span>bias_no</span>
+              <input id="biasNo" value="0" inputmode="numeric">
+            </label>
+            <label>
+              <span>gun_count</span>
+              <input id="gunCount" value="2" inputmode="numeric">
+            </label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>双枪操作</h2>
+            <span class="badge">A/B</span>
+          </div>
+          <div class="action-grid">
+            <button data-pair-action="plug">双枪插枪</button>
+            <button data-pair-action="unplug">双枪拔枪</button>
+            <button data-pair-action="vin">响应双枪 VIN</button>
+            <button data-pair-action="startComplete">双枪启动完成</button>
+            <button data-pair-action="stopComplete">双枪停机完成</button>
+            <button data-pair-action="fault">双枪故障</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>模拟收到 cmd</h2>
+            <span class="badge warn">Demo</span>
+          </div>
+          <div class="action-grid">
+            <button data-cmd="start_charge">start_charge</button>
+            <button data-cmd="stop_charge">stop_charge</button>
+            <button data-cmd="vehicle_auth">vehicle_auth</button>
+            <button data-cmd="power_ctrl">power_ctrl</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>模拟 logic 状态</h2>
+            <span class="badge">logic/event</span>
+          </div>
+          <div class="action-grid">
+            <button data-logic-state="IDLE">IDLE</button>
+            <button data-logic-state="PREPARE">PREPARE</button>
+            <button data-logic-state="STARTING">STARTING</button>
+            <button data-logic-state="CHARGING">CHARGING</button>
+            <button data-logic-state="STOPPING">STOPPING</button>
+            <button data-logic-state="STOPPED">STOPPED</button>
+            <button data-logic-state="ERROR">ERROR</button>
+          </div>
+        </section>
+      </aside>
+
+      <section class="center-stage">
+        <div class="stage-head">
+          <div>
+            <h2>枪位操作</h2>
+            <p>主状态来自 tcu/logic/{gun}/event；pile 动作只生成桩侧报文</p>
+          </div>
+          <div class="stage-tools">
+            <button id="tickOnceBtn" type="button">单次计量</button>
+            <button id="clearLogBtn" type="button">清空日志</button>
+          </div>
+        </div>
+
+        <div id="gunGrid" class="gun-grid" aria-live="polite"></div>
+      </section>
+
+      <aside class="right-rail">
+        <section class="panel preview-panel">
+          <div class="panel-head">
+            <h2>MQTT 预览</h2>
+            <span id="previewDirection" class="badge muted">等待动作</span>
+          </div>
+          <div class="topic-box" id="previewTopic">尚未生成报文</div>
+          <pre id="previewPayload">{}</pre>
+        </section>
+
+        <section class="panel meter-panel">
+          <div class="panel-head">
+            <h2>meter 手动窗口</h2>
+            <span class="badge">保留入口</span>
+          </div>
+          <div class="meter-actions">
+            <button data-meter="online">meter_online</button>
+            <button data-meter="offline">meter_offline</button>
+            <button data-meter="pause">暂停自动计量</button>
+            <button data-meter="resume">恢复自动计量</button>
+          </div>
+        </section>
+      </aside>
+    </main>
+
+    <section class="bottom-deck">
+      <div class="panel log-panel">
+        <div class="panel-head">
+          <h2>MQTT 收发日志</h2>
+          <span id="logCount" class="badge muted">0 条</span>
+        </div>
+        <div id="mqttLog" class="log-list"></div>
+      </div>
+
+      <div class="panel timeline-panel">
+        <div class="panel-head">
+          <h2>业务轨迹</h2>
+          <span class="badge">当前状态</span>
+        </div>
+        <div id="timeline" class="timeline"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -19,6 +19,7 @@
 #include <sstream>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <openssl/bn.h>
@@ -33,6 +34,7 @@
 namespace {
     static const uint8_t kCmdTimeSync = 0x02;
     static const uint8_t kCmdTotalCall = 0x03;
+    static const uint8_t kCmdPulse = 0x10;
     static const uint8_t kCmdExtPulse = 0x11;
     static const uint8_t kCmdFault = 0x12;
     static const uint8_t kCmdRemoteControl = 0x41;
@@ -50,16 +52,18 @@ namespace {
     static const uint32_t kControlHeartbeatReq = 0x00000043U;
     static const uint32_t kControlHeartbeatAck = 0x00000083U;
     static const uint32_t kControlDefault = 0x00000000U;
-    static const uint16_t kMasterAddr = 0x0000U;
+    static const uint32_t kMasterFrameAddr = 0x00000000U;
     static const uint16_t kBroadcastDeviceAddr = 0xFFFFU;
     static const uint16_t kCotBurst = 0x0001U;
     static const uint16_t kCotActive = 0x0003U;
     static const uint16_t kCotConfirm = 0x0004U;
     static const uint16_t kCotTotalCall = 0x0005U;
     static const uint16_t kCotReject = 0x0006U;
-    static const int kYxPointsPerGun = 10;
-    static const int kYcPointsPerGun = 14;
-    static const int kYmPointsPerGun = 5;
+    static const uint16_t kCommonAddrDefault = 0x0000U;
+    static const int kYxPointsPerGun = 16;
+    static const int kYcPointsPerGun = 16;
+    static const int kYmPointsPerGun = 9;
+    static const int kLegacyYmPoints = 4;
 
     void feedDaemonWatchdog()
     {
@@ -73,6 +77,74 @@ namespace {
             const char* processName = "tcu_comm";
             watchdogQueue.send(MSG_WATCHDOG_FEED, processName, strlen(processName));
         }
+    }
+
+    uint32_t packFrameAddr(uint16_t station, uint16_t device)
+    {
+        // BY ZF: YuanyangV2 frame address is low-16 station + high-16 device.
+        return static_cast<uint32_t>(station) | (static_cast<uint32_t>(device) << 16);
+    }
+
+    std::string hexFixed(uint32_t value, int width)
+    {
+        // BY ZF: Debug helper for stable protocol field logs.
+        std::ostringstream oss;
+        oss << "0x" << std::uppercase << std::hex << std::setw(width)
+            << std::setfill('0') << value;
+        return oss.str();
+    }
+
+    bool connectWithTimeout(int fd, const struct sockaddr* addr, socklen_t addrLen,
+                            int timeoutSec, int& lastErrno)
+    {
+        // BY ZF: 避免现场网络异常时阻塞在connect()导致进程看起来不主动发包。
+        const int oldFlags = ::fcntl(fd, F_GETFL, 0);
+        if (oldFlags < 0) {
+            lastErrno = errno;
+            return false;
+        }
+        if (::fcntl(fd, F_SETFL, oldFlags | O_NONBLOCK) < 0) {
+            lastErrno = errno;
+            return false;
+        }
+        const int rc = ::connect(fd, addr, addrLen);
+        if (rc == 0) {
+            (void)::fcntl(fd, F_SETFL, oldFlags);
+            return true;
+        }
+        if (errno != EINPROGRESS) {
+            lastErrno = errno;
+            (void)::fcntl(fd, F_SETFL, oldFlags);
+            return false;
+        }
+
+        fd_set writeSet;
+        FD_ZERO(&writeSet);
+        FD_SET(fd, &writeSet);
+        struct timeval tv;
+        tv.tv_sec = std::max(1, timeoutSec);
+        tv.tv_usec = 0;
+        const int sel = ::select(fd + 1, nullptr, &writeSet, nullptr, &tv);
+        if (sel <= 0) {
+            lastErrno = (sel == 0) ? ETIMEDOUT : errno;
+            (void)::fcntl(fd, F_SETFL, oldFlags);
+            return false;
+        }
+
+        int soError = 0;
+        socklen_t soErrorLen = sizeof(soError);
+        if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soErrorLen) < 0) {
+            lastErrno = errno;
+            (void)::fcntl(fd, F_SETFL, oldFlags);
+            return false;
+        }
+        if (soError != 0) {
+            lastErrno = soError;
+            (void)::fcntl(fd, F_SETFL, oldFlags);
+            return false;
+        }
+        (void)::fcntl(fd, F_SETFL, oldFlags);
+        return true;
     }
 
     std::vector<std::string> split(const std::string& s, char ch)
@@ -312,6 +384,7 @@ namespace {
         switch (cmd) {
         case kCmdTimeSync: return "time_sync";
         case kCmdTotalCall: return "total_call";
+        case kCmdPulse: return "pulse";
         case kCmdExtPulse: return "ext_pulse";
         case kCmdFault: return "fault";
         case kCmdPowerControl: return "power_control";
@@ -383,17 +456,6 @@ namespace {
         std::string num = s;
         if (num.size() > 2U && num[0] == '0' && (num[1] == 'x' || num[1] == 'X')) {
             base = 16;
-        } else if (num.size() == 8U) {
-            bool allHex = true;
-            for (size_t i = 0; i < num.size(); ++i) {
-                if (std::isxdigit(static_cast<unsigned char>(num[i])) == 0) {
-                    allHex = false;
-                    break;
-                }
-            }
-            if (allHex) {
-                base = 16;
-            }
         }
         char* end = nullptr;
         const unsigned long long v = std::strtoull(num.c_str(), &end, base);
@@ -403,7 +465,7 @@ namespace {
         const uint32_t addr = static_cast<uint32_t>(v & 0xFFFFFFFFULL);
         station = static_cast<uint16_t>(addr & 0xFFFFU);
         device = static_cast<uint16_t>((addr >> 16) & 0xFFFFU);
-        return station != 0U && station != 0xFFFFU && device != 0U;
+        return station != 0U && station != 0xFFFFU;
     }
 }
 
@@ -502,53 +564,44 @@ bool CommProcess::loadConfig()
         m_config.loginRetrySec = 10;
     }
     m_config.assetCode = cfg.getString(section, "asset_code", "");
-    m_config.stationAddr = static_cast<uint16_t>(cfg.getInt(section, "station_addr", 1) & 0xFFFF);
-    if (m_config.stationAddr == 0 || m_config.stationAddr == 0xFFFFU) {
-        m_config.stationAddr = 1;
-    }
     uint16_t assetStation = 0;
     uint16_t assetDevice = 0;
     const bool hasAssetAddr = parseAssetAddressCode(m_config.assetCode, assetStation, assetDevice);
+    (void)assetDevice;
     if (hasAssetAddr) {
-        // BY ZF: YuanyangV2 frame address comes from asset_code, same config role as NYC.
+        // BY ZF: asset_code is the station/concentrator address; decimal strings like 012345 are accepted.
         m_config.stationAddr = assetStation;
-    } else if (!m_config.assetCode.empty()) {
+    } else if (!hasAssetAddr && !m_config.assetCode.empty()) {
         m_logSender.warn("invalid_asset_code", m_config.assetCode);
+        m_config.stationAddr = static_cast<uint16_t>(cfg.getInt(section, "station_addr", 1) & 0xFFFF);
+    } else {
+        m_config.stationAddr = static_cast<uint16_t>(cfg.getInt(section, "station_addr", 1) & 0xFFFF);
+    }
+    if (m_config.stationAddr == 0 || m_config.stationAddr == 0xFFFFU) {
+        m_config.stationAddr = 1;
     }
     m_config.rsaPublicKey = cfg.getString(section, "rsa_public_key", "");
     m_config.offlineRunMode = (cfg.getInt(section, "offline_run_mode", 0) != 0);
     m_config.debugTcp = (cfg.getInt(section, "debug", 0) != 0);
+    if (m_config.debugTcp) {
+        std::cout << "[YuanyangV2][CONFIG]"
+                  << " master=" << m_config.masterHost << ":" << m_config.masterPort
+                  << " stationAddr=" << m_config.stationAddr
+                  << " gunCount=" << static_cast<int>(m_config.gunCount)
+                  << " tcpReconnectSec=" << m_config.tcpReconnectSec
+                  << " loginRetrySec=" << m_config.loginRetrySec
+                  << std::endl;
+    }
 
     m_config.deviceAddrList.clear();
-    m_config.gunAssetCodeList.clear();
     m_gunRuntimeData.clear();
     m_feeModelByGun.clear();
     m_config.deviceAddrList.reserve(static_cast<size_t>(m_config.gunCount));
-    m_config.gunAssetCodeList.reserve(static_cast<size_t>(m_config.gunCount));
     m_gunRuntimeData.reserve(static_cast<size_t>(m_config.gunCount));
     m_feeModelByGun.reserve(static_cast<size_t>(m_config.gunCount));
     for (uint8_t i = 0; i < m_config.gunCount; ++i) {
-        std::ostringstream key;
-        key << "gun" << static_cast<int>(i + 1) << "_device_addr";
-        std::ostringstream assetKey;
-        assetKey << "gun" << static_cast<int>(i + 1) << "_asset_code";
-        const std::string gunAssetCode = cfg.getString(section, assetKey.str(), "");
-        uint16_t gunStation = 0;
-        uint16_t gunDevice = 0;
-        int addr = cfg.getInt(section, key.str(), hasAssetAddr ? static_cast<int>(assetDevice) : static_cast<int>(i + 1));
-        if (!gunAssetCode.empty() && parseAssetAddressCode(gunAssetCode, gunStation, gunDevice)) {
-            if (gunStation != m_config.stationAddr) {
-                m_logSender.warn("gun_asset_station_mismatch", gunAssetCode);
-            }
-            addr = static_cast<int>(gunDevice);
-        } else if (!gunAssetCode.empty()) {
-            m_logSender.warn("invalid_gun_asset_code", gunAssetCode);
-        }
-        if (addr <= 0 || addr > 0xFFFF) {
-            addr = hasAssetAddr ? static_cast<int>(assetDevice) : static_cast<int>(i + 1);
-        }
-        m_config.deviceAddrList.push_back(static_cast<uint16_t>(addr & 0xFFFF));
-        m_config.gunAssetCodeList.push_back(gunAssetCode.empty() ? m_config.assetCode : gunAssetCode);
+        const uint16_t addr = static_cast<uint16_t>(i + 1U);
+        m_config.deviceAddrList.push_back(addr);
         m_gunRuntimeData.push_back(GunRuntimeData());
         m_feeModelByGun.push_back(FeeModel());
     }
@@ -699,9 +752,8 @@ bool CommProcess::handleLogicEventForPlatform(uint8_t gun, const std::string& pa
             std::vector<uint8_t> tail;
             if (buildChargeRecordTail(gun, data, tail)) {
                 const std::vector<uint8_t> frame = buildAsduFrame(
-                            kCmdTradeRecord, 0x01, kCotActive, 0x0000, tail,
-                            kMasterAddr, kMasterAddr,
-                            m_config.stationAddr, deviceAddrFromGun(gun));
+                            kCmdTradeRecord, 0x01, kCotActive, tail,
+                            packFrameAddr(m_config.stationAddr, deviceAddrFromGun(gun)));
                 sendFrame(frame);
             }
         }
@@ -728,6 +780,25 @@ bool CommProcess::handleLogicFeeForPlatform(uint8_t gun, const std::string& payl
         rd.electricAmount = jsonNumber(data, "electricAmount", jsonNumber(data, "electicAmount", rd.electricAmount));
         rd.serviceAmount = jsonNumber(data, "serviceAmount", rd.serviceAmount);
         rd.chargedTime = jsonNumber(data, "chargedTime", jsonNumber(data, "chargeTime", rd.chargedTime));
+        cJSON* segments = cJSON_GetObjectItem(data, "segmentsAmount");
+        if (cJSON_IsArray(segments)) {
+            rd.feeSegments.clear();
+            const int count = cJSON_GetArraySize(segments);
+            for (int i = 0; i < count; ++i) {
+                cJSON* segJson = cJSON_GetArrayItem(segments, i);
+                if (!cJSON_IsObject(segJson)) {
+                    continue;
+                }
+                FeeSegmentData seg;
+                seg.startTs = jsonString(segJson, "startTs");
+                seg.endTs = jsonString(segJson, "endTs");
+                seg.energyKwh = jsonNumber(segJson, "energyKwh", 0.0);
+                seg.electricAmount = jsonNumber(segJson, "electricAmount",
+                                                jsonNumber(segJson, "electicAmount", 0.0));
+                seg.serviceAmount = jsonNumber(segJson, "serviceAmount", 0.0);
+                rd.feeSegments.push_back(seg);
+            }
+        }
         const std::string feeModelId = jsonString(data, "feeModelId");
         if (!feeModelId.empty()) {
             rd.feeModelId = feeModelId;
@@ -793,6 +864,9 @@ bool CommProcess::handlePileDataForPlatform(uint8_t gun, const std::string& payl
             rd.pileEnvTemp = jsonNumber(data, "pileEnvTemp", rd.pileEnvTemp);
             rd.bmsReqVoltage = jsonNumber(data, "bmsReqVoltage", rd.bmsReqVoltage);
             rd.bmsReqCurrent = jsonNumber(data, "bmsReqCurrent", rd.bmsReqCurrent);
+            rd.estimatedRemainTime = jsonNumber(data, "estimatedRemainTime",
+                                                jsonNumber(data, "remainTime",
+                                                           jsonNumber(data, "remainingTime", rd.estimatedRemainTime)));
         }
     }
     cJSON_Delete(root);
@@ -931,6 +1005,10 @@ void CommProcess::publishInitialSetConfig()
 bool CommProcess::connectPlatformTcp()
 {
     closePlatformTcp();
+    if (m_config.debugTcp) {
+        std::cout << "[YuanyangV2][TCP] connect_try "
+                  << m_config.masterHost << ":" << m_config.masterPort << std::endl;
+    }
     struct addrinfo hints;
     std::memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -938,25 +1016,52 @@ bool CommProcess::connectPlatformTcp()
     struct addrinfo* res = nullptr;
     std::ostringstream portText;
     portText << m_config.masterPort;
-    if (::getaddrinfo(m_config.masterHost.c_str(), portText.str().c_str(), &hints, &res) != 0 || !res) {
-        m_logSender.warn("platform_tcp", "resolve_failed");
+    std::ostringstream endpoint;
+    endpoint << "host=" << m_config.masterHost << ",port=" << m_config.masterPort;
+    const int gai = ::getaddrinfo(m_config.masterHost.c_str(), portText.str().c_str(), &hints, &res);
+    if (gai != 0 || !res) {
+        std::ostringstream detail;
+        detail << "resolve_failed," << endpoint.str() << ",gai=" << gai
+               << ",reason=" << gai_strerror(gai);
+        m_logSender.warn("platform_tcp", detail.str());
+        if (m_config.debugTcp) {
+            std::cout << "[YuanyangV2][TCP] " << detail.str() << std::endl;
+        }
         return false;
     }
     int fd = -1;
+    int lastErrno = 0;
     for (struct addrinfo* rp = res; rp; rp = rp->ai_next) {
         fd = ::socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) {
+            lastErrno = errno;
             continue;
         }
-        if (::connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+        if (m_config.debugTcp) {
+            std::cout << "[YuanyangV2][TCP] connect_addr family=" << rp->ai_family
+                      << " timeoutSec=" << std::max(1, m_config.tcpReconnectSec)
+                      << std::endl;
+        }
+        if (connectWithTimeout(fd, rp->ai_addr, rp->ai_addrlen,
+                               std::max(1, m_config.tcpReconnectSec), lastErrno)) {
             break;
+        }
+        if (m_config.debugTcp) {
+            std::cout << "[YuanyangV2][TCP] connect_addr_failed errno=" << lastErrno
+                      << " reason=" << std::strerror(lastErrno) << std::endl;
         }
         ::close(fd);
         fd = -1;
     }
     freeaddrinfo(res);
     if (fd < 0) {
-        m_logSender.warn("platform_tcp", "connect_failed");
+        std::ostringstream detail;
+        detail << "connect_failed," << endpoint.str() << ",errno=" << lastErrno
+               << ",reason=" << std::strerror(lastErrno);
+        m_logSender.warn("platform_tcp", detail.str());
+        if (m_config.debugTcp) {
+            std::cout << "[YuanyangV2][TCP] " << detail.str() << std::endl;
+        }
         return false;
     }
     m_tcpFd = fd;
@@ -965,7 +1070,10 @@ bool CommProcess::connectPlatformTcp()
     m_loginState = LOGIN_IDLE;
     m_lastHeartbeatRecv = std::chrono::steady_clock::now();
     resetCryptoSession();
-    m_logSender.info("platform_tcp", "connected");
+    m_logSender.info("platform_tcp", std::string("connected,") + endpoint.str());
+    if (m_config.debugTcp) {
+        std::cout << "[YuanyangV2][TCP] connected" << std::endl;
+    }
     return true;
 }
 
@@ -976,7 +1084,9 @@ void CommProcess::closePlatformTcp()
         m_tcpFd = -1;
     }
     if (m_platformConnected.exchange(false)) {
-        m_logSender.warn("platform_tcp", "closed");
+        std::ostringstream detail;
+        detail << "closed,host=" << m_config.masterHost << ",port=" << m_config.masterPort;
+        m_logSender.warn("platform_tcp", detail.str());
     }
     m_loginState = LOGIN_IDLE;
     resetCryptoSession();
@@ -1000,9 +1110,13 @@ void CommProcess::maintainPlatformTcp()
 
     const int recvTimeoutSec = std::max(60, m_config.tcpHeartbeatSec * 6);
     if (now - m_lastHeartbeatRecv >= std::chrono::seconds(recvTimeoutSec)) {
-        m_logSender.warn("platform_tcp", "heartbeat_recv_timeout");
+        std::ostringstream detail;
+        detail << "heartbeat_recv_timeout,host=" << m_config.masterHost
+               << ",port=" << m_config.masterPort
+               << ",timeoutSec=" << recvTimeoutSec;
+        m_logSender.warn("platform_tcp", detail.str());
         closePlatformTcp();
-        return
+        return;
     }
 
     char buf[1024];
@@ -1012,7 +1126,12 @@ void CommProcess::maintainPlatformTcp()
         return;
     }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        m_logSender.warn("platform_tcp", std::string("recv_error_") + std::strerror(errno));
+        std::ostringstream detail;
+        detail << "recv_error,host=" << m_config.masterHost
+               << ",port=" << m_config.masterPort
+               << ",errno=" << errno
+               << ",reason=" << std::strerror(errno);
+        m_logSender.warn("platform_tcp", detail.str());
         closePlatformTcp();
         return;
     }
@@ -1087,20 +1206,27 @@ std::vector<uint8_t> CommProcess::buildHeartbeatFrame(uint32_t control)
     frame.push_back(0x00);
     frame.push_back(0x00);
     appendU32LE(frame, control);
-    appendU16LE(frame, kMasterAddr);
-    appendU16LE(frame, kMasterAddr);
-    appendU16LE(frame, m_config.stationAddr);
-    appendU16LE(frame, deviceAddrFromGun(0));
+    appendU32LE(frame, kMasterFrameAddr);
+    appendU32LE(frame, packFrameAddr(m_config.stationAddr, kBroadcastDeviceAddr));
     const uint16_t len = static_cast<uint16_t>(frame.size() - 3U);
     frame[1] = static_cast<uint8_t>(len & 0xFF);
     frame[2] = static_cast<uint8_t>((len >> 8) & 0xFF);
+    if (m_config.debugTcp) {
+        std::cout << "[YuanyangV2][TX_FRAME] kind=heartbeat"
+                  << " lenField=" << len
+                  << " control=" << hexFixed(control, 8)
+                  << " targetAddr=" << hexFixed(kMasterFrameAddr, 8)
+                  << " sourceAddr=" << hexFixed(packFrameAddr(m_config.stationAddr, kBroadcastDeviceAddr), 8)
+                  << " sourceStation=" << m_config.stationAddr
+                  << " sourceDevice=" << kBroadcastDeviceAddr
+                  << std::endl;
+    }
     return frame;
 }
 
-std::vector<uint8_t> CommProcess::buildAsduFrame(uint8_t cmd, uint8_t vsq, uint16_t cot, uint16_t commonAddr,
+std::vector<uint8_t> CommProcess::buildAsduFrame(uint8_t cmd, uint8_t vsq, uint16_t cot,
                                                  const std::vector<uint8_t>& tailPlain,
-                                                 uint16_t targetStation, uint16_t targetDevice,
-                                                 uint16_t sourceStation, uint16_t sourceDevice)
+                                                 uint32_t sourceAddr)
 {
     std::vector<uint8_t> tail;
     if (!encryptTail(cmd, tailPlain, tail)) {
@@ -1112,14 +1238,12 @@ std::vector<uint8_t> CommProcess::buildAsduFrame(uint8_t cmd, uint8_t vsq, uint1
     frame.push_back(0x00);
     frame.push_back(0x00);
     appendU32LE(frame, kControlDefault);
-    appendU16LE(frame, targetStation);
-    appendU16LE(frame, targetDevice);
-    appendU16LE(frame, sourceStation);
-    appendU16LE(frame, sourceDevice);
+    appendU32LE(frame, kMasterFrameAddr);
+    appendU32LE(frame, sourceAddr);
     frame.push_back(cmd);
     frame.push_back(vsq);
     appendU16LE(frame, cot);
-    appendU16LE(frame, commonAddr);
+    appendU16LE(frame, kCommonAddrDefault); // BY ZF: YuanyangV2 public address is fixed to 0.
     frame.insert(frame.end(), tail.begin(), tail.end());
     if (frame.size() > 0xFFFFU + 3U) {
         return std::vector<uint8_t>();
@@ -1127,6 +1251,26 @@ std::vector<uint8_t> CommProcess::buildAsduFrame(uint8_t cmd, uint8_t vsq, uint1
     const uint16_t len = static_cast<uint16_t>(frame.size() - 3U);
     frame[1] = static_cast<uint8_t>(len & 0xFF);
     frame[2] = static_cast<uint8_t>((len >> 8) & 0xFF);
+    if (m_config.debugTcp) {
+        const uint16_t sourceStation = static_cast<uint16_t>(sourceAddr & 0xFFFFU);
+        const uint16_t sourceDevice = static_cast<uint16_t>((sourceAddr >> 16) & 0xFFFFU);
+        std::cout << "[YuanyangV2][TX_FRAME]"
+                  << " lenField=" << len
+                  << " control=" << hexFixed(kControlDefault, 8)
+                  << " targetAddr=" << hexFixed(kMasterFrameAddr, 8)
+                  << " sourceAddr=" << hexFixed(sourceAddr, 8)
+                  << " sourceStation=" << sourceStation
+                  << " sourceDevice=" << sourceDevice
+                  << " cmd=" << hexFixed(cmd, 2) << "(" << cmdName(cmd) << ")"
+                  << " vsq=" << static_cast<unsigned int>(vsq)
+                  << " cot=" << hexFixed(cot, 4)
+                  << " commonAddr=" << hexFixed(kCommonAddrDefault, 4)
+                  << " tailPlainLen=" << tailPlain.size()
+                  << " tailPlain=" << toHex(tailPlain.empty() ? nullptr : tailPlain.data(), tailPlain.size())
+                  << " tailCipherLen=" << tail.size()
+                  << " tailCipher=" << toHex(tail.empty() ? nullptr : tail.data(), tail.size())
+                  << std::endl;
+    }
     return frame;
 }
 
@@ -1140,16 +1284,21 @@ bool CommProcess::sendFrame(const std::vector<uint8_t>& frame)
                   << " hex=" << toHex(frame.data(), frame.size()) << std::endl;
     }
     const ssize_t n = ::send(m_tcpFd, frame.data(), frame.size(), 0);
+    if (n < 0 && m_config.debugTcp) {
+        std::cout << "[YuanyangV2][TX_FAIL] errno=" << errno
+                  << " reason=" << std::strerror(errno) << std::endl;
+    } else if (n >= 0 && static_cast<size_t>(n) != frame.size() && m_config.debugTcp) {
+        std::cout << "[YuanyangV2][TX_FAIL] partial=" << n
+                  << " expected=" << frame.size() << std::endl;
+    }
     return n >= 0 && static_cast<size_t>(n) == frame.size();
 }
 
-bool CommProcess::sendAsdu(uint8_t cmd, uint8_t vsq, uint16_t cot, uint16_t commonAddr,
-                           const std::vector<uint8_t>& tailPlain,
-                           uint16_t targetStation, uint16_t targetDevice)
+bool CommProcess::sendAsdu(uint8_t cmd, uint8_t vsq, uint16_t cot,
+                           const std::vector<uint8_t>& tailPlain)
 {
-    const std::vector<uint8_t> frame = buildAsduFrame(cmd, vsq, cot, commonAddr, tailPlain,
-                                                      targetStation, targetDevice,
-                                                      m_config.stationAddr, kBroadcastDeviceAddr);
+    const std::vector<uint8_t> frame = buildAsduFrame(cmd, vsq, cot, tailPlain,
+                                                      packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0)));
     return sendFrame(frame);
 }
 
@@ -1160,8 +1309,10 @@ bool CommProcess::sendHeartbeat()
 
 bool CommProcess::sendRsaPublicKeyRequest()
 {
-    std::vector<uint8_t> tail;
-    const bool ok = sendAsdu(kCmdRequestRsaPublicKey, 0x00, kCotActive, 0x0000, tail);
+    const std::vector<uint8_t> tail;
+    const std::vector<uint8_t> frame = buildAsduFrame(kCmdRequestRsaPublicKey, 0x00, kCotBurst, tail,
+                                                      packFrameAddr(m_config.stationAddr, kBroadcastDeviceAddr));
+    const bool ok = sendFrame(frame);
     if (ok) {
         m_logSender.info("platform_login_step", "rsa_pubkey_req_sent");
     }
@@ -1175,9 +1326,21 @@ bool CommProcess::sendDeviceAuthRequest()
     }
     std::vector<uint8_t> tail = buildInfoAddrTail(0);
     tail.insert(tail.end(), m_aesSessionKey.begin(), m_aesSessionKey.end());
-    const bool ok = sendAsdu(kCmdDeviceAuth, 0x00, kCotActive, 0x0000, tail);
+    const bool ok = sendAsdu(kCmdDeviceAuth, 0x01, kCotActive, tail);
     if (ok) {
         m_logSender.info("platform_login_step", "device_auth_sent");
+    }
+    return ok;
+}
+
+bool CommProcess::sendFeeModelRequest()
+{
+    const std::vector<uint8_t> tail;
+    const std::vector<uint8_t> frame = buildAsduFrame(kCmdFeeModelV2, 0x01, kCotActive, tail,
+                                                      packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0)));
+    const bool ok = sendFrame(frame);
+    if (ok) {
+        m_logSender.info("platform_fee_model", "request_sent");
     }
     return ok;
 }
@@ -1191,9 +1354,8 @@ bool CommProcess::sendControlAck(uint8_t gun, const PendingControl& pending, uin
             tail.push_back(0x00); // BY ZF: VIN placeholder for v2.15 ack extension.
         }
     }
-    const std::vector<uint8_t> frame = buildAsduFrame(kCmdRemoteControl, pending.vsq, cot, pending.commonAddr, tail,
-                                                      kMasterAddr, kMasterAddr,
-                                                      m_config.stationAddr, deviceAddrFromGun(gun));
+    const std::vector<uint8_t> frame = buildAsduFrame(kCmdRemoteControl, pending.vsq, cot, tail,
+                                                      packFrameAddr(m_config.stationAddr, deviceAddrFromGun(gun)));
     return sendFrame(frame);
 }
 
@@ -1202,9 +1364,8 @@ bool CommProcess::sendFeeModelAck(const ParsedFrame& pf, bool ok)
     const uint16_t sourceDevice = (pf.targetDevice == 0 || pf.targetDevice == kBroadcastDeviceAddr)
             ? kBroadcastDeviceAddr : pf.targetDevice;
     const std::vector<uint8_t> frame = buildAsduFrame(kCmdFeeModelV2, pf.vsq, ok ? kCotConfirm : kCotReject,
-                                                      pf.commonAddr, pf.tail,
-                                                      kMasterAddr, kMasterAddr,
-                                                      m_config.stationAddr, sourceDevice);
+                                                      pf.tail,
+                                                      packFrameAddr(m_config.stationAddr, sourceDevice));
     return sendFrame(frame);
 }
 
@@ -1260,7 +1421,9 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         std::cout << "[YuanyangV2][RX_FRAME] cmd=0x" << std::hex << static_cast<int>(pf.cmd) << std::dec
                   << "(" << cmdName(pf.cmd) << ")"
                   << " cot=0x" << std::hex << pf.cot << std::dec
-                  << " tailLen=" << pf.tail.size() << std::endl;
+                  << " tailLen=" << pf.tail.size()
+                  << " tailPlain=" << toHex(pf.tail.empty() ? nullptr : pf.tail.data(), pf.tail.size())
+                  << std::endl;
     }
 
     if (pf.cmd == kCmdRequestRsaPublicKey) {
@@ -1288,6 +1451,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
                 publishPlatformLinkEvent(true, "login_ready");
             }
             m_logSender.info("platform_login_step", "device_auth_ok");
+            sendFeeModelRequest();
         } else {
             m_loginState = LOGIN_IDLE;
             m_nextLoginAllowedTime = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -1324,10 +1488,7 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             PendingControl pending;
             pending.active = true;
             pending.action = (action == 0 ? 0U : 1U);
-            pending.targetStation = pf.sourceStation;
-            pending.targetDevice = pf.sourceDevice;
             pending.vsq = pf.vsq;
-            pending.commonAddr = pf.commonAddr;
             pending.tailPlain = pf.tail;
             pending.createdAt = std::chrono::steady_clock::now();
             m_pendingControls[gun] = pending;
@@ -1336,7 +1497,6 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
             pending.active = true;
             pending.action = action;
             pending.vsq = pf.vsq;
-            pending.commonAddr = pf.commonAddr;
             pending.tailPlain = pf.tail;
             sendControlAck(gun, pending, kCotReject);
         }
@@ -1351,9 +1511,8 @@ void CommProcess::processPlatformPacket(const uint8_t* frame, size_t frameLen)
         cJSON* dataObj = nullptr;
         if (parsePowerControl02E(pf, gun, &dataObj)) {
             publishPlatCommand(gun, "power_ctrl", dataObj);
-            const std::vector<uint8_t> ack = buildAsduFrame(kCmdPowerControl, pf.vsq, kCotConfirm, pf.commonAddr, pf.tail,
-                                                            kMasterAddr, kMasterAddr,
-                                                            m_config.stationAddr, deviceAddrFromGun(gun));
+            const std::vector<uint8_t> ack = buildAsduFrame(kCmdPowerControl, pf.vsq, kCotConfirm, pf.tail,
+                                                            packFrameAddr(m_config.stationAddr, deviceAddrFromGun(gun)));
             sendFrame(ack);
         }
         if (dataObj) {
@@ -1405,10 +1564,12 @@ bool CommProcess::parseFrame(const uint8_t* frame, size_t frameLen, ParsedFrame&
         return false;
     }
     out.control = readU32LE(frame + 3);
-    out.targetStation = readU16LE(frame + 7);
-    out.targetDevice = readU16LE(frame + 9);
-    out.sourceStation = readU16LE(frame + 11);
-    out.sourceDevice = readU16LE(frame + 13);
+    const uint32_t targetAddr = readU32LE(frame + 7);
+    const uint32_t sourceAddr = readU32LE(frame + 11);
+    out.targetStation = static_cast<uint16_t>(targetAddr & 0xFFFFU);
+    out.targetDevice = static_cast<uint16_t>((targetAddr >> 16) & 0xFFFFU);
+    out.sourceStation = static_cast<uint16_t>(sourceAddr & 0xFFFFU);
+    out.sourceDevice = static_cast<uint16_t>((sourceAddr >> 16) & 0xFFFFU);
     if (frameLen == 15U) {
         out.hasAsdu = false;
         return true;
@@ -1465,7 +1626,7 @@ bool CommProcess::tryUpdateRsaPubKeyFromResponse(const uint8_t* tail, size_t tai
             off += 2U;
             keyLen = lenLE;
         } else {
-            keyLen = tailLen - off;
+        keyLen = tailLen - off;
         }
     }
     std::string key;
@@ -1592,9 +1753,48 @@ bool CommProcess::parseRemoteControl041(const ParsedFrame& pf, uint8_t& gun, uin
     cJSON_AddStringToObject(data, "orderNo", order.c_str());
     cJSON_AddStringToObject(data, "tradeNo", order.c_str());
     cJSON_AddStringToObject(data, "preTradeNo", order.c_str());
+    if (action != 0U && gun < m_feeModelByGun.size()) {
+        // BY ZF: 远洋0x41启动不随帧携带计费模型，转内部start_charge时使用最近一次0x51缓存。
+        const FeeModel& feeModel = m_feeModelByGun[gun];
+        const bool feeReady = (!feeModel.feeModelId.empty()) &&
+                feeModel.timeNum > 0 &&
+                feeModel.timeSeg.size() >= static_cast<size_t>(feeModel.timeNum) &&
+                feeModel.chargeFee.size() >= static_cast<size_t>(feeModel.timeNum) &&
+                feeModel.serviceFee.size() >= static_cast<size_t>(feeModel.timeNum);
+        if (!feeReady) {
+            m_logSender.warn("remote_start_fee_model_missing", std::string("gun=") + std::to_string(static_cast<int>(gun)));
+            cJSON_Delete(data);
+            return false;
+        }
+        std::string digits;
+        digits.reserve(feeModel.feeModelId.size());
+        for (size_t i = 0; i < feeModel.feeModelId.size(); ++i) {
+            if (feeModel.feeModelId[i] >= '0' && feeModel.feeModelId[i] <= '9') {
+                digits.push_back(feeModel.feeModelId[i]);
+            }
+        }
+        cJSON_AddNumberToObject(data, "feeModelNo", digits.empty() ? 0 : std::atoi(digits.c_str()));
+        cJSON_AddStringToObject(data, "feeModelId", feeModel.feeModelId.c_str());
+        cJSON_AddNumberToObject(data, "timeNum", static_cast<int>(feeModel.timeNum));
+        cJSON* timeSeg = cJSON_CreateArray();
+        cJSON* chargeFee = cJSON_CreateArray();
+        cJSON* serviceFee = cJSON_CreateArray();
+        for (size_t i = 0; i < static_cast<size_t>(feeModel.timeNum); ++i) {
+            cJSON_AddItemToArray(timeSeg, cJSON_CreateString(feeModel.timeSeg[i].c_str()));
+            cJSON_AddItemToArray(chargeFee, cJSON_CreateNumber(static_cast<double>(feeModel.chargeFee[i]) / 100000.0));
+            cJSON_AddItemToArray(serviceFee, cJSON_CreateNumber(static_cast<double>(feeModel.serviceFee[i]) / 100000.0));
+        }
+        cJSON_AddItemToObject(data, "timeSeg", timeSeg);
+        cJSON_AddItemToObject(data, "chargeFee", chargeFee);
+        cJSON_AddItemToObject(data, "serviceFee", serviceFee);
+    }
     if (gun < m_gunRuntimeData.size()) {
         m_gunRuntimeData[gun].chargeUserNo = card;
         m_gunRuntimeData[gun].orderNo = order;
+        if (action != 0U && gun < m_feeModelByGun.size()) {
+            m_gunRuntimeData[gun].feeModelId = m_feeModelByGun[gun].feeModelId;
+            m_gunRuntimeData[gun].feeTimeNum = static_cast<int>(m_feeModelByGun[gun].timeNum);
+        }
     }
     if (outData) {
         *outData = data;
@@ -1662,21 +1862,24 @@ bool CommProcess::parseFeeModel051(const ParsedFrame& pf, FeeModel& feeModel)
         seg.sm = pf.tail[pos++];
         seg.eh = pf.tail[pos++];
         seg.em = pf.tail[pos++];
-        if (seg.flag < 1U || seg.flag > 4U || seg.sh > 23U || seg.sm > 59U) {
+        if (seg.flag < 1U || seg.flag > 5U ||
+            seg.sh > 23U || seg.sm > 59U || seg.eh > 23U || seg.em > 59U) {
             return false;
         }
         segments.push_back(seg);
     }
-    uint32_t chargePrice[5] = {0U};
-    uint32_t servicePrice[5] = {0U};
-    chargePrice[1] = readU32LE(&pf.tail[pos]); pos += 4U; // peak
-    chargePrice[2] = readU32LE(&pf.tail[pos]); pos += 4U; // sharp
-    chargePrice[3] = readU32LE(&pf.tail[pos]); pos += 4U; // flat
-    chargePrice[4] = readU32LE(&pf.tail[pos]); pos += 4U; // valley
+    uint32_t chargePrice[6] = {0U};
+    uint32_t servicePrice[6] = {0U};
+    chargePrice[1] = readU32LE(&pf.tail[pos]); pos += 4U; // BY ZF: 1 峰
+    chargePrice[2] = readU32LE(&pf.tail[pos]); pos += 4U; // BY ZF: 2 尖
+    chargePrice[3] = readU32LE(&pf.tail[pos]); pos += 4U; // BY ZF: 3 平
+    chargePrice[4] = readU32LE(&pf.tail[pos]); pos += 4U; // BY ZF: 4 谷
+    chargePrice[5] = 0U; // BY ZF: 预留 5 深谷，当前协议未下发价格时按0展开。
     servicePrice[1] = readU32LE(&pf.tail[pos]); pos += 4U;
     servicePrice[2] = readU32LE(&pf.tail[pos]); pos += 4U;
     servicePrice[3] = readU32LE(&pf.tail[pos]); pos += 4U;
     servicePrice[4] = readU32LE(&pf.tail[pos]); pos += 4U;
+    servicePrice[5] = 0U; // BY ZF: 预留 5 深谷，当前协议未下发价格时按0展开。
 
     std::ostringstream id;
     id << "YYV2_" << static_cast<unsigned long long>(nowMs());
@@ -1690,6 +1893,7 @@ bool CommProcess::parseFeeModel051(const ParsedFrame& pf, FeeModel& feeModel)
                       static_cast<unsigned int>(segments[i].sm));
         feeModel.timeSeg.push_back(hhmm);
         feeModel.segFlag.push_back(segments[i].flag);
+        // BY ZF: 给logger仍转换成标准计费模型：chargeFee/serviceFee按timeNum逐时段展开。
         feeModel.chargeFee.push_back(chargePrice[segments[i].flag]);
         feeModel.serviceFee.push_back(servicePrice[segments[i].flag]);
     }
@@ -1733,21 +1937,33 @@ std::vector<uint8_t> CommProcess::buildInfoAddrTail(uint32_t infoAddr) const
     return out;
 }
 
+std::array<uint8_t, 16> CommProcess::buildTelesignalValues(const GunRuntimeData& rd) const
+{
+    std::array<uint8_t, 16> vals = {{
+        static_cast<uint8_t>(rd.yxWorkStatus != 0),             // BY ZF: 0 charge, True=充电中。
+        static_cast<uint8_t>(rd.gunStatus == 6U),               // BY ZF: 1 error, 按logic状态ERROR判断。
+        0U,                                                     // BY ZF: 2 检修状态，当前固定非检修。
+        static_cast<uint8_t>(rd.yxVehicleConnectStatus != 0),   // BY ZF: 3 cable, 插头连接状态。
+        1U,                                                     // BY ZF: 4 comm, 无集中器场景固定通信连接。
+        static_cast<uint8_t>(rd.yxEmergencyStopFault != 0),     // BY ZF: 5 stop, 急停按钮状态。
+        0U,                                                     // BY ZF: 6 pulse, 当前固定常规充电。
+        0U,                                                     // BY ZF: 7 lock, 当前固定地锁关闭。
+        static_cast<uint8_t>(rd.yxGunSeatStatus != 0),          // BY ZF: 8 homing, 枪座/归位状态来自YX。
+        0U,                                                     // BY ZF: 9 door, 当前固定门禁关闭。
+        0U, 0U, 0U, 0U, 0U, 0U                                  // BY ZF: 10-15 预留点位。
+    }};
+    return vals;
+}
+
 std::vector<uint8_t> CommProcess::buildAllTelesignalTail() const
 {
     std::vector<uint8_t> out = buildInfoAddrTail(0);
     for (size_t i = 0; i < m_gunRuntimeData.size(); ++i) {
         const GunRuntimeData& rd = m_gunRuntimeData[i];
-        out.push_back(rd.gunStatus != 0 ? 1 : 0);
-        out.push_back(rd.yxWorkStatus != 0 ? 1 : 0);
-        out.push_back(rd.yxTotalFault != 0 ? 1 : 0);
-        out.push_back(rd.yxTotalAlarm != 0 ? 1 : 0);
-        out.push_back(rd.yxEmergencyStopFault != 0 ? 1 : 0);
-        out.push_back(rd.yxVehicleConnectStatus != 0 ? 1 : 0);
-        out.push_back(rd.yxGunSeatStatus != 0 ? 1 : 0);
-        out.push_back(rd.yxElectronicLockStatus != 0 ? 1 : 0);
-        out.push_back(rd.yxDcContactorStatus != 0 ? 1 : 0);
-        out.push_back(rd.yxOtherFault != 0 ? 1 : 0);
+        const std::array<uint8_t, 16> vals = buildTelesignalValues(rd);
+        for (int point = 0; point < kYxPointsPerGun; ++point) {
+            out.push_back(vals[static_cast<size_t>(point)]);
+        }
     }
     return out;
 }
@@ -1760,22 +1976,11 @@ std::vector<uint8_t> CommProcess::buildChangedTelesignalTail(uint8_t gun) const
     }
     const GunRuntimeData& rd = m_gunRuntimeData[gun];
     const uint32_t base = static_cast<uint32_t>(gun) * kYxPointsPerGun;
-    uint8_t vals[kYxPointsPerGun] = {
-        static_cast<uint8_t>(rd.gunStatus != 0),
-        static_cast<uint8_t>(rd.yxWorkStatus != 0),
-        static_cast<uint8_t>(rd.yxTotalFault != 0),
-        static_cast<uint8_t>(rd.yxTotalAlarm != 0),
-        static_cast<uint8_t>(rd.yxEmergencyStopFault != 0),
-        static_cast<uint8_t>(rd.yxVehicleConnectStatus != 0),
-        static_cast<uint8_t>(rd.yxGunSeatStatus != 0),
-        static_cast<uint8_t>(rd.yxElectronicLockStatus != 0),
-        static_cast<uint8_t>(rd.yxDcContactorStatus != 0),
-        static_cast<uint8_t>(rd.yxOtherFault != 0)
-    };
+    const std::array<uint8_t, 16> vals = buildTelesignalValues(rd);
     for (int i = 0; i < kYxPointsPerGun; ++i) {
         const std::vector<uint8_t> addr = buildInfoAddrTail(base + static_cast<uint32_t>(i));
         out.insert(out.end(), addr.begin(), addr.end());
-        out.push_back(vals[i]);
+        out.push_back(vals[static_cast<size_t>(i)]);
     }
     return out;
 }
@@ -1785,52 +1990,61 @@ std::vector<uint8_t> CommProcess::buildAllTelemetryTail() const
     std::vector<uint8_t> out = buildInfoAddrTail(0);
     for (size_t i = 0; i < m_gunRuntimeData.size(); ++i) {
         const GunRuntimeData& rd = m_gunRuntimeData[i];
-        appendI32LE(out, scaleToI32(rd.voltage, 10.0));
-        appendI32LE(out, scaleToI32(rd.current, 10.0));
-        appendI32LE(out, scaleToI32(rd.soc, 1.0));
-        appendI32LE(out, scaleToI32(rd.batteryMinTemp, 1.0));
-        appendI32LE(out, scaleToI32(rd.batteryMaxTemp, 1.0));
-        appendI32LE(out, scaleToI32(rd.cellMaxVoltage, 1000.0));
-        appendI32LE(out, scaleToI32(rd.cellMinVoltage, 1000.0));
-        appendI32LE(out, scaleToI32(rd.pileEnvTemp, 1.0));
-        appendI32LE(out, scaleToI32(rd.bmsReqVoltage, 10.0));
-        appendI32LE(out, scaleToI32(rd.bmsReqCurrent, 10.0));
-        appendI32LE(out, scaleToI32(rd.meterVoltage, 10.0));
-        appendI32LE(out, scaleToI32(rd.meterCurrent, 10.0));
-        appendI32LE(out, scaleToI32(rd.totalEnergy, 1000.0));
-        appendI32LE(out, scaleToI32(rd.totalAmount, 10000.0));
+        const std::array<int32_t, 16> vals = buildTelemetryValues(rd);
+        for (int point = 0; point < kYcPointsPerGun; ++point) {
+            appendI32LE(out, vals[static_cast<size_t>(point)]);
+        }
     }
     return out;
 }
 
-std::vector<uint8_t> CommProcess::buildChangedTelemetryTail(uint8_t gun) const
+std::array<int32_t, 16> CommProcess::buildTelemetryValues(const GunRuntimeData& rd) const
 {
-    std::vector<uint8_t> out;
-    if (gun >= m_gunRuntimeData.size()) {
-        return out;
-    }
-    const GunRuntimeData& rd = m_gunRuntimeData[gun];
-    const int32_t vals[kYcPointsPerGun] = {
-        scaleToI32(rd.voltage, 10.0),
-        scaleToI32(rd.current, 10.0),
-        scaleToI32(rd.soc, 1.0),
-        scaleToI32(rd.batteryMinTemp, 1.0),
-        scaleToI32(rd.batteryMaxTemp, 1.0),
-        scaleToI32(rd.cellMaxVoltage, 1000.0),
-        scaleToI32(rd.cellMinVoltage, 1000.0),
-        scaleToI32(rd.pileEnvTemp, 1.0),
-        scaleToI32(rd.bmsReqVoltage, 10.0),
-        scaleToI32(rd.bmsReqCurrent, 10.0),
-        scaleToI32(rd.meterVoltage, 10.0),
-        scaleToI32(rd.meterCurrent, 10.0),
-        scaleToI32(rd.totalEnergy, 1000.0),
-        scaleToI32(rd.totalAmount, 10000.0)
-    };
-    const uint32_t base = static_cast<uint32_t>(gun) * kYcPointsPerGun;
-    for (int i = 0; i < kYcPointsPerGun; ++i) {
-        const std::vector<uint8_t> addr = buildInfoAddrTail(base + static_cast<uint32_t>(i));
-        out.insert(out.end(), addr.begin(), addr.end());
-        appendI32LE(out, vals[i]);
+    const int32_t chargedSeconds = scaleToI32(rd.chargedTime, 1.0);
+    const int32_t chargedHours = chargedSeconds > 0 ? chargedSeconds / 3600 : 0;
+    const int32_t chargedMinutes = chargedSeconds > 0 ? (chargedSeconds % 3600) / 60 : 0;
+    const int32_t faultCode = (rd.yxOtherFault != 0U)
+            ? static_cast<int32_t>(rd.yxOtherFault)
+            : (rd.yxTotalFault != 0U || rd.gunStatus == 6U ? 1 : 0);
+    const double outputPowerKw = (rd.voltage > 0.0 && rd.current > 0.0)
+            ? (rd.voltage * rd.current / 1000.0) : 0.0;
+
+    std::array<int32_t, 16> vals = {{
+        scaleToI32(rd.voltage, 80.0),        // BY ZF: 0 电压，实际值X80。
+        scaleToI32(rd.current, 160.0),       // BY ZF: 1 电流，实际值X160。
+        chargedHours * 160,                 // BY ZF: 2 已充电时间-小时，实际值X160。
+        chargedMinutes * 160,               // BY ZF: 3 已充电时间-分钟，实际值X160。
+        scaleToI32(outputPowerKw, 100.0),    // BY ZF: 4 输出功率(kW)，实际值X100。
+        scaleToI32(rd.soc, 100.0),           // BY ZF: 5 SOC，实际值X100。
+        faultCode,                           // BY ZF: 6 故障代码，取最近故障码。
+        scaleToI32(rd.estimatedRemainTime, 160.0), // BY ZF: 7 剩余充电时长-分钟，来自YC20 estimatedRemainTime，实际值X160。
+        scaleToI32(rd.meterVoltage, 80.0),   // BY ZF: 8 B相电压，实际值X80。
+        scaleToI32(rd.meterCurrent, 160.0),  // BY ZF: 9 B相电流，实际值X160。
+        scaleToI32(rd.meterVoltage, 80.0),   // BY ZF: 10 C相电压，当前无分相数据时使用电表电压。
+        scaleToI32(rd.meterCurrent, 160.0),  // BY ZF: 11 C相电流，当前无分相数据时使用电表电流。
+        scaleToI32(rd.meterVoltage, 80.0),   // BY ZF: 12 A相电压，当前无分相数据时使用电表电压。
+        scaleToI32(rd.meterCurrent, 160.0),  // BY ZF: 13 A相电流，当前无分相数据时使用电表电流。
+        0,                                   // BY ZF: 14 预留。
+        0                                    // BY ZF: 15 预留。
+    }};
+    return vals;
+}
+
+std::vector<uint8_t> CommProcess::buildLegacyPulseTail() const
+{
+    std::vector<uint8_t> out = buildInfoAddrTail(0);
+    for (int i = 0; i < kLegacyYmPoints; ++i) {
+        uint32_t val = 0U;
+        if (!m_gunRuntimeData.empty()) {
+            const size_t gun = static_cast<size_t>(i) % m_gunRuntimeData.size();
+            if (i < 2) {
+                val = scaleToU32(m_gunRuntimeData[gun].meterEnergy, 1000.0);
+            } else {
+                val = scaleToU32(m_gunRuntimeData[gun].totalEnergy, 1000.0);
+            }
+        }
+        appendU32LE(out, val);
+        out.push_back(0x00);
     }
     return out;
 }
@@ -1840,12 +2054,29 @@ std::vector<uint8_t> CommProcess::buildExtPulseTail() const
     std::vector<uint8_t> out = buildInfoAddrTail(0);
     for (size_t i = 0; i < m_gunRuntimeData.size(); ++i) {
         const GunRuntimeData& rd = m_gunRuntimeData[i];
+        double energyByFlag[5] = {0.0};
+        const FeeModel* model = (i < m_feeModelByGun.size()) ? &m_feeModelByGun[i] : nullptr;
+        for (size_t segIdx = 0; segIdx < rd.feeSegments.size(); ++segIdx) {
+            unsigned int flag = 3U;
+            if (model && model->segFlag.size() > segIdx) {
+                flag = model->segFlag[segIdx];
+            }
+            if (flag < 1U || flag > 4U) {
+                flag = 3U;
+            }
+            energyByFlag[flag] += rd.feeSegments[segIdx].energyKwh;
+        }
+        // BY ZF: feeData金额单位为元、电量单位为kWh，遥脉规约按0.01单位上送。
         const uint32_t vals[kYmPointsPerGun] = {
-            scaleToU32(rd.meterEnergy, 1000.0),
-            scaleToU32(rd.totalEnergy, 1000.0),
-            scaleToU32(rd.totalAmount, 10000.0),
-            scaleToU32(rd.electricAmount, 10000.0),
-            scaleToU32(rd.serviceAmount, 10000.0)
+            scaleToU32(rd.totalEnergy, 100.0),    // BY ZF: 0 充电电量，0.01kWh。
+            scaleToU32(rd.totalAmount, 100.0),    // BY ZF: 1 充电金额，0.01元。
+            scaleToU32(energyByFlag[1], 100.0),   // BY ZF: 2 峰电量，0.01kWh。
+            scaleToU32(energyByFlag[4], 100.0),   // BY ZF: 3 谷电量，0.01kWh。
+            scaleToU32(energyByFlag[2], 100.0),   // BY ZF: 4 尖电量，0.01kWh。
+            scaleToU32(energyByFlag[3], 100.0),   // BY ZF: 5 平电量，0.01kWh。
+            scaleToU32(rd.electricAmount, 100.0), // BY ZF: 6 充电电费，0.01元。
+            scaleToU32(rd.serviceAmount, 100.0),  // BY ZF: 7 充电服务费，0.01元。
+            scaleToU32(rd.meterEnergy, 100.0)     // BY ZF: 8 电表示数，0.01kWh。
         };
         for (int j = 0; j < kYmPointsPerGun; ++j) {
             appendU32LE(out, vals[j]);
@@ -1961,73 +2192,67 @@ void CommProcess::reportRuntimePeriodic()
         return;
     }
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-    const bool periodic = (now - m_lastRuntimeReport >= std::chrono::seconds(10));
+    const bool periodic = (now - m_lastRuntimeReport >= std::chrono::seconds(30));
     for (uint8_t gun = 0; gun < m_config.gunCount; ++gun) {
         const bool changed = gun < m_runtimeChangedByGun.size() && m_runtimeChangedByGun[gun] != 0;
         if (changed) {
-            const std::vector<uint8_t> yx = buildChangedTelesignalTail(gun);
-            sendFrame(buildAsduFrame(kCmdExtChangedTelesignal, kYxPointsPerGun, kCotBurst, 0x0000, yx,
-                                     kMasterAddr, kMasterAddr,
-                                     m_config.stationAddr, deviceAddrFromGun(gun)));
-            const std::vector<uint8_t> yc = buildChangedTelemetryTail(gun);
-            sendFrame(buildAsduFrame(kCmdChangedTelemetry4, kYcPointsPerGun, kCotBurst, 0x0000, yc,
-                                     kMasterAddr, kMasterAddr,
-                                     m_config.stationAddr, deviceAddrFromGun(gun)));
+            const int yxCount = static_cast<int>(m_config.gunCount) * kYxPointsPerGun;
+            sendFrame(buildAsduFrame(kCmdExtAllTelesignal, static_cast<uint8_t>(0x80 | std::min(127, yxCount)),
+                                     kCotBurst, buildAllTelesignalTail(),
+                                     packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0))));
             const uint32_t faultCode = (m_gunRuntimeData[gun].yxOtherFault != 0)
                     ? static_cast<uint32_t>(m_gunRuntimeData[gun].yxOtherFault)
                     : (m_gunRuntimeData[gun].yxTotalFault ? 1U : 0U);
             const bool faultActive = faultCode != 0U;
             if (faultActive != (m_lastFaultActiveByGun[gun] != 0) || faultCode != m_lastFaultCodeByGun[gun]) {
-                sendFrame(buildAsduFrame(kCmdFault, 0x01, kCotBurst, 0x0000,
+                sendFrame(buildAsduFrame(kCmdFault, 0x01, kCotBurst,
                                          buildFaultTail(gun, faultCode, faultActive),
-                                         kMasterAddr, kMasterAddr,
-                                         m_config.stationAddr, deviceAddrFromGun(gun)));
+                                         packFrameAddr(m_config.stationAddr, deviceAddrFromGun(gun))));
                 m_lastFaultActiveByGun[gun] = faultActive ? 1 : 0;
                 m_lastFaultCodeByGun[gun] = faultCode;
             }
             m_runtimeChangedByGun[gun] = 0;
         }
-        if (periodic) {
-            const std::vector<uint8_t> yc = buildChangedTelemetryTail(gun);
-            sendFrame(buildAsduFrame(kCmdExtAllTelemetry, kYcPointsPerGun, kCotBurst, 0x0000, yc,
-                                     kMasterAddr, kMasterAddr,
-                                     m_config.stationAddr, deviceAddrFromGun(gun)));
-            const std::vector<uint8_t> yx = buildChangedTelesignalTail(gun);
-            sendFrame(buildAsduFrame(kCmdExtAllTelesignal, kYxPointsPerGun, kCotBurst, 0x0000, yx,
-                                     kMasterAddr, kMasterAddr,
-                                     m_config.stationAddr, deviceAddrFromGun(gun)));
-        }
     }
     if (periodic) {
+        const int ycCount = static_cast<int>(m_config.gunCount) * kYcPointsPerGun;
+        const int yxCount = static_cast<int>(m_config.gunCount) * kYxPointsPerGun;
         const int pulseCount = static_cast<int>(m_config.gunCount) * kYmPointsPerGun;
+        sendFrame(buildAsduFrame(kCmdExtAllTelemetry, static_cast<uint8_t>(0x80 | std::min(127, ycCount)),
+                                 kCotBurst, buildAllTelemetryTail(),
+                                 packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0))));
+        sendFrame(buildAsduFrame(kCmdExtAllTelesignal, static_cast<uint8_t>(0x80 | std::min(127, yxCount)),
+                                 kCotBurst, buildAllTelesignalTail(),
+                                 packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0))));
+        sendFrame(buildAsduFrame(kCmdPulse, static_cast<uint8_t>(0x80 | kLegacyYmPoints),
+                                 kCotBurst, buildLegacyPulseTail(),
+                                 packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0))));
         sendFrame(buildAsduFrame(kCmdExtPulse, static_cast<uint8_t>(0x80 | std::min(127, pulseCount)),
-                                 kCotBurst, 0x0000, buildExtPulseTail(),
-                                 kMasterAddr, kMasterAddr,
-                                 m_config.stationAddr, kBroadcastDeviceAddr));
+                                 kCotBurst, buildExtPulseTail(),
+                                 packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0))));
         m_lastRuntimeReport = now;
     }
 }
 
 void CommProcess::sendTotalCallResponse()
 {
-    for (uint8_t gun = 0; gun < m_config.gunCount; ++gun) {
-        sendFrame(buildAsduFrame(kCmdExtAllTelesignal, kYxPointsPerGun, kCotTotalCall, 0x0000,
-                                 buildChangedTelesignalTail(gun),
-                                 kMasterAddr, kMasterAddr,
-                                 m_config.stationAddr, deviceAddrFromGun(gun)));
-        sendFrame(buildAsduFrame(kCmdExtAllTelemetry, kYcPointsPerGun, kCotTotalCall, 0x0000,
-                                 buildChangedTelemetryTail(gun),
-                                 kMasterAddr, kMasterAddr,
-                                 m_config.stationAddr, deviceAddrFromGun(gun)));
-    }
+    const int ycCount = static_cast<int>(m_config.gunCount) * kYcPointsPerGun;
+    const int yxCount = static_cast<int>(m_config.gunCount) * kYxPointsPerGun;
     const int pulseCount = static_cast<int>(m_config.gunCount) * kYmPointsPerGun;
+    sendFrame(buildAsduFrame(kCmdExtAllTelemetry, static_cast<uint8_t>(0x80 | std::min(127, ycCount)),
+                             kCotTotalCall, buildAllTelemetryTail(),
+                             packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0))));
+    sendFrame(buildAsduFrame(kCmdExtAllTelesignal, static_cast<uint8_t>(0x80 | std::min(127, yxCount)),
+                             kCotTotalCall, buildAllTelesignalTail(),
+                             packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0))));
+    sendFrame(buildAsduFrame(kCmdPulse, static_cast<uint8_t>(0x80 | kLegacyYmPoints),
+                             kCotTotalCall, buildLegacyPulseTail(),
+                             packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0))));
     sendFrame(buildAsduFrame(kCmdExtPulse, static_cast<uint8_t>(0x80 | std::min(127, pulseCount)),
-                             kCotTotalCall, 0x0000, buildExtPulseTail(),
-                             kMasterAddr, kMasterAddr,
-                             m_config.stationAddr, kBroadcastDeviceAddr));
-    sendFrame(buildAsduFrame(kCmdFault, 0x00, kCotTotalCall, 0x0000, std::vector<uint8_t>(),
-                             kMasterAddr, kMasterAddr,
-                             m_config.stationAddr, kBroadcastDeviceAddr));
+                             kCotTotalCall, buildExtPulseTail(),
+                             packFrameAddr(m_config.stationAddr, deviceAddrFromGun(0))));
+    sendFrame(buildAsduFrame(kCmdFault, 0x00, kCotTotalCall, std::vector<uint8_t>(),
+                             packFrameAddr(m_config.stationAddr, kBroadcastDeviceAddr)));
 }
 
 uint8_t CommProcess::gunFromDeviceAddr(uint16_t deviceAddr) const

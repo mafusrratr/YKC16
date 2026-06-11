@@ -719,6 +719,7 @@ RuntimeWindow::HmiConfig::HmiConfig()
     , enableQrEntry(false)
     , enableCardEntry(false)
     , cardOnlineAuth(false)
+    , guangdongWavPlay(false)
 {
 }
 
@@ -737,6 +738,7 @@ RuntimeWindow::GunUiData::GunUiData()
     , totalEnergy(0.0)
     , chargedTime(0.0)
     , soc(-1)
+    , gunSeatStatus(-1)
     , cardOfflineActive(false)
     , vinChargeActive(false)
     , stopReason("充电完成")
@@ -953,6 +955,7 @@ bool RuntimeWindow::loadConfig()
     m_config.enableQrEntry = cfg.getBool(section, "enable_qr_entry", false);
     m_config.enableCardEntry = cfg.getBool(section, "enable_card_entry", false);
     m_config.cardOnlineAuth = cfg.getBool(section, "card_online_auth", false);
+    m_config.guangdongWavPlay = cfg.getBool(section, "guangdong_wavplay", false);
 
     m_gunCount = cfg.getInt(section, "gun_count", 1);
     if (m_gunCount < 1) {
@@ -1341,6 +1344,7 @@ void RuntimeWindow::handleLogicEvent(uint8_t gun, const std::string &payload)
         cJSON *to = cJSON_GetObjectItem(data, "to");
         if (to && cJSON_IsString(to) && to->valuestring) {
             QMutexLocker locker(&m_dataMutex);
+            const std::string previousState = m_guns[gun].state;
             m_guns[gun].state = to->valuestring;
             m_guns[gun].lastStateChangeMs = nowMs();
             if (m_guns[gun].state == "IDLE" || m_guns[gun].state == "STOPPED" || m_guns[gun].state == "ERROR") {
@@ -1364,6 +1368,10 @@ void RuntimeWindow::handleLogicEvent(uint8_t gun, const std::string &payload)
                 m_guns[gun].stopReason = reasonText;
             } else if (!numericReason.empty()) {
                 m_guns[gun].stopReason = numericReason;
+            }
+            if (previousState == "STOPPED" && m_guns[gun].state == "IDLE") {
+                locker.unlock();
+                playAudioPrompt(QString::fromUtf8("/usr/app/tcu/wav/to_billing.wav"));
             }
         }
     } else if ((eventName == "cmd_reject" || eventName == "card_auth_reject") && cJSON_IsObject(data)) {
@@ -1429,10 +1437,46 @@ void RuntimeWindow::handlePileData(uint8_t gun, const std::string &payload)
         m_guns[gun].batteryMaxTemp = getNumber(data, "batteryMaxTemp", m_guns[gun].batteryMaxTemp);
         m_guns[gun].power = (v * c) / 1000.0;
         m_guns[gun].soc = getInt(data, "soc", getInt(data, "vehicleSoc", m_guns[gun].soc));
+    } else if (type && cJSON_IsString(type) && type->valuestring &&
+        std::strcmp(type->valuestring, "yx") == 0 &&
+        cJSON_IsObject(data)) {
+        QMutexLocker locker(&m_dataMutex);
+        const int prevSeat = m_guns[gun].gunSeatStatus;
+        const int currentSeat = getInt(data, "gunSeatStatus", prevSeat);
+        m_guns[gun].gunSeatStatus = currentSeat;
+        if (prevSeat == 1 && currentSeat == 0) {
+            locker.unlock();
+            playAudioPrompt(QString::fromUtf8("/usr/app/tcu/wav/connect_cable.wav"));
+        }
     }
 
     cJSON_Delete(root);
     QMetaObject::invokeMethod(this, "refreshUi", Qt::QueuedConnection);
+}
+
+void RuntimeWindow::playAudioPrompt(const QString &filePath) const
+{
+    if (!m_config.guangdongWavPlay) {
+        std::cerr << "[HMI] audio prompt skipped by config guangdong_wavplay=0: "
+                  << filePath.toStdString() << std::endl;
+        return;
+    }
+
+    QFileInfo wavFile(filePath);
+    if (!wavFile.exists() || !wavFile.isFile()) {
+        std::cerr << "[HMI] audio prompt missing: " << filePath.toStdString() << std::endl;
+        return;
+    }
+
+    const QString command = QString::fromUtf8("aplay \"%1\" >/dev/null 2>&1 &").arg(filePath);
+    std::cerr << "[HMI] play audio prompt try: " << filePath.toStdString() << std::endl;
+    const bool started = QProcess::startDetached(QString::fromUtf8("sh"),
+                                                 QStringList() << QString::fromUtf8("-c") << command);
+    if (started) {
+        std::cerr << "[HMI] play audio prompt started: " << filePath.toStdString() << std::endl;
+    } else {
+        std::cerr << "[HMI] play audio prompt failed: " << filePath.toStdString() << std::endl;
+    }
 }
 
 void RuntimeWindow::handlePlatEvent(uint8_t gun, const std::string &payload)
@@ -3434,7 +3478,8 @@ bool RuntimeWindow::publishVinRequest(bool mergeCharge)
 
     {
         QMutexLocker locker(&m_dataMutex);
-        m_guns[gun].vinChargeActive = !mergeCharge;
+        // BY ZF: VIN 启动与合并充启动都需要在充电页显示“停止充电”按钮。
+        m_guns[gun].vinChargeActive = true;
         m_guns[gun].cardOfflineActive = false;
     }
 

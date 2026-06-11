@@ -20,7 +20,8 @@ enum DatabaseType {
     DB_MAIN = 0,        // 主运行数据库
     DB_CHARGE = 1,       // 充电记录数据库
     DB_FEE = 2,         // 计费模型数据库
-    DB_ERROR = 3        // 故障记录数据库
+    DB_ERROR = 3,       // 故障记录数据库
+    DB_TELEMETRY = 4    // BY ZF: 运行遥测采样数据库
 };
 
 /**
@@ -43,7 +44,8 @@ public:
     bool initialize(const std::string& mainDbPath, 
                    const std::string& chargeDbPath,
                    const std::string& feeDbPath,
-                   const std::string& errorDbPath);
+                   const std::string& errorDbPath,
+                   const std::string& telemetryDbPath = "");
     
     /**
      * 关闭所有数据库连接
@@ -107,7 +109,7 @@ public:
                             double amount, const std::string& paymentMethod);
     
     // 记录充电交易明细（参考 _evs_event_tradeInfo），数组字段以JSON字符串形式存储
-    // 必填：tradeNo 建议唯一；可选：preTradeNo、vinCode、feeModelId、cardNumber
+    // 必填：tradeNo；可选：preTradeNo、vinCode、feeModelId、cardNumber
     /**
      * @brief 存储充电交易详细信息，所有时段/跨点字段均为逗号拼接数值文本
      * @param partElectText 时段电量，逗号分隔文本，长度= timeNum
@@ -147,7 +149,7 @@ public:
 
     /**
      * @brief 更新交易记录的平台确认标志。
-     * @param tradeNo 设备交易流水号（唯一键）
+     * @param tradeNo 设备交易流水号
      * @param confirmFlag 确认标志（0未确认，1已确认）
      * @return true 成功
      */
@@ -169,6 +171,28 @@ public:
                         const std::string& pointKey,
                         const std::string& faultMessage,
                         unsigned int rawValue);
+
+    // ========== 遥测采样相关 ==========
+    // BY ZF: 保存每枪每分钟最后一条电表遥测点。
+    bool saveMeterMinutePoint(int gunNo,
+                              const std::string& createdAt,
+                              double totalEnergy,
+                              double reverseEnergy,
+                              double voltage,
+                              double current);
+
+    // BY ZF: 保存每枪每分钟最后一条 BMS/桩侧遥测点。
+    bool saveBmsMinutePoint(int gunNo,
+                            const std::string& createdAt,
+                            double bmsReqVoltage,
+                            double bmsReqCurrent,
+                            double bmsMeasuredVoltage,
+                            double bmsMeasuredCurrent,
+                            double outputVoltage,
+                            double outputCurrent);
+
+    // BY ZF: 删除 cutoffTime 之前的遥测点。
+    bool cleanupTelemetryBefore(const std::string& cutoffTime);
     
     // ========== 计费模型相关 ==========
     
@@ -339,6 +363,7 @@ private:
      */
     bool createFeeTables();
     bool createErrorTables();
+    bool createTelemetryTables();
     
     /**
      * 执行SQL语句

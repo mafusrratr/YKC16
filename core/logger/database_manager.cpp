@@ -20,6 +20,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
+#include <cctype>
 #include <tuple>
 #include "../../libv2gshm/libcshm/v2gshm.h"
 
@@ -101,6 +102,15 @@ static std::string getCurrentLocalTimeString() {
     return std::string(timestampStr);
 }
 
+// BY ZF: telemetry_db_path 未配置时，默认与 main_db_path 同目录。
+static std::string defaultTelemetryDbPath(const std::string& mainDbPath) {
+    size_t lastSlash = mainDbPath.find_last_of('/');
+    if (lastSlash == std::string::npos) {
+        return "telemetry.db";
+    }
+    return mainDbPath.substr(0, lastSlash + 1) + "telemetry.db";
+}
+
 // BY ZF: 解析逗号分隔浮点文本（如 "1.23,4.56"）
 static std::vector<double> parseDoubleCsv(const char* text) {
     std::vector<double> out;
@@ -122,6 +132,182 @@ static std::vector<double> parseDoubleCsv(const char* text) {
     return out;
 }
 
+// BY ZF: 执行原生 SQL 并在失败时输出错误
+static bool executeRawSql(sqlite3* db, const char* sql, const char* action) {
+    char* errMsg = nullptr;
+    const int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::cerr << action << " failed: " << (errMsg ? errMsg : "") << std::endl;
+        if (errMsg) {
+            sqlite3_free(errMsg);
+        }
+        return false;
+    }
+    return true;
+}
+
+// BY ZF: 检查表字段是否存在
+static bool hasColumn(sqlite3* db, const char* tableName, const char* columnName) {
+    if (!db || !tableName || !columnName) {
+        return false;
+    }
+
+    std::string sql = "PRAGMA table_info(" + std::string(tableName) + ")";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
+    bool found = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* name = sqlite3_column_text(stmt, 1);
+        if (name && std::string(reinterpret_cast<const char*>(name)) == columnName) {
+            found = true;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+// BY ZF: 检查旧表结构里 trade_no 是否仍带 UNIQUE 约束
+static bool hasTradeNoUniqueConstraint(sqlite3* db) {
+    if (!db) {
+        return false;
+    }
+
+    const char* sql =
+        "SELECT sql FROM sqlite_master "
+        "WHERE type='table' AND name='charge_trade_info'";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
+    bool needMigrate = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* schemaText = sqlite3_column_text(stmt, 0);
+        if (schemaText) {
+            std::string schema(reinterpret_cast<const char*>(schemaText));
+            std::transform(schema.begin(), schema.end(), schema.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+            needMigrate = (schema.find("TRADE_NO TEXT UNIQUE NOT NULL") != std::string::npos) ||
+                          (schema.find("TRADE_NO TEXT UNIQUE") != std::string::npos);
+        }
+    }
+    sqlite3_finalize(stmt);
+    return needMigrate;
+}
+
+// BY ZF: 重建充电记录表，去掉 trade_no 的 UNIQUE 约束并保留历史数据
+static bool rebuildChargeTradeInfoTableWithoutUnique(sqlite3* db) {
+    if (!db) {
+        return false;
+    }
+
+    const bool hasConfirmFlag = hasColumn(db, "charge_trade_info", "platform_confirm_flag");
+    if (!executeRawSql(db, "BEGIN TRANSACTION", "begin charge table migration")) {
+        return false;
+    }
+
+    bool ok = true;
+    ok = ok && executeRawSql(db,
+        "ALTER TABLE charge_trade_info RENAME TO charge_trade_info_old",
+        "rename old charge table");
+    ok = ok && executeRawSql(db,
+        "CREATE TABLE charge_trade_info ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "gun_no INTEGER NOT NULL,"
+        "pre_trade_no TEXT,"
+        "trade_no TEXT NOT NULL,"
+        "vin_code TEXT,"
+        "time_div_type INTEGER,"
+        "start_type INTEGER,"
+        "charge_start_time INTEGER,"
+        "charge_end_time INTEGER,"
+        "start_soc REAL,"
+        "end_soc REAL,"
+        "reason INTEGER,"
+        "fee_model_id TEXT,"
+        "sum_start REAL,"
+        "sum_end REAL,"
+        "total_elect REAL,"
+        "total_power_cost REAL,"
+        "total_serv_cost REAL,"
+        "total_cost REAL,"
+        "time_num INTEGER,"
+        "part_elect_text TEXT,"
+        "charge_fee_text TEXT,"
+        "service_fee_text TEXT,"
+        "start_point INTEGER,"
+        "cross_points INTEGER,"
+        "points_elect_text TEXT,"
+        "card_number TEXT,"
+        "platform_confirm_flag INTEGER DEFAULT 0,"
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ")",
+        "create new charge table");
+
+    std::string copySql =
+        "INSERT INTO charge_trade_info ("
+        "id, gun_no, pre_trade_no, trade_no, vin_code, time_div_type, start_type, "
+        "charge_start_time, charge_end_time, start_soc, end_soc, reason, fee_model_id, "
+        "sum_start, sum_end, total_elect, total_power_cost, total_serv_cost, total_cost, "
+        "time_num, part_elect_text, charge_fee_text, service_fee_text, start_point, "
+        "cross_points, points_elect_text, card_number, platform_confirm_flag, created_at"
+        ") SELECT "
+        "id, gun_no, pre_trade_no, trade_no, vin_code, time_div_type, start_type, "
+        "charge_start_time, charge_end_time, start_soc, end_soc, reason, fee_model_id, "
+        "sum_start, sum_end, total_elect, total_power_cost, total_serv_cost, total_cost, "
+        "time_num, part_elect_text, charge_fee_text, service_fee_text, start_point, "
+        "cross_points, points_elect_text, card_number, ";
+    copySql += hasConfirmFlag ? "platform_confirm_flag" : "0";
+    copySql += ", created_at FROM charge_trade_info_old";
+    ok = ok && executeRawSql(db, copySql.c_str(), "copy charge table data");
+    ok = ok && executeRawSql(db, "DROP TABLE charge_trade_info_old", "drop old charge table");
+
+    if (ok) {
+        ok = executeRawSql(db, "COMMIT", "commit charge table migration");
+    } else {
+        executeRawSql(db, "ROLLBACK", "rollback charge table migration");
+    }
+
+    return ok;
+}
+
+// BY ZF: 重建遥测表，移除旧版本遗留的内部字段并保留可用业务数据。
+static bool rebuildTelemetryTable(sqlite3* db,
+                                  const char* tableName,
+                                  const std::string& createSql,
+                                  const std::string& copySql) {
+    if (!db || !tableName) {
+        return false;
+    }
+
+    const std::string oldTableName = std::string(tableName) + "_old";
+    if (!executeRawSql(db, "BEGIN TRANSACTION", "begin telemetry table migration")) {
+        return false;
+    }
+
+    bool ok = true;
+    ok = ok && executeRawSql(db,
+        ("ALTER TABLE " + std::string(tableName) + " RENAME TO " + oldTableName).c_str(),
+        "rename old telemetry table");
+    ok = ok && executeRawSql(db, createSql.c_str(), "create new telemetry table");
+    ok = ok && executeRawSql(db, copySql.c_str(), "copy telemetry table data");
+    ok = ok && executeRawSql(db,
+        ("DROP TABLE " + oldTableName).c_str(),
+        "drop old telemetry table");
+
+    if (ok) {
+        ok = executeRawSql(db, "COMMIT", "commit telemetry table migration");
+    } else {
+        executeRawSql(db, "ROLLBACK", "rollback telemetry table migration");
+    }
+
+    return ok;
+}
+
 // BY ZF: 文件复制的辅助函数
 static bool copyFileBinary(const std::string& srcPath, const std::string& dstPath) {
     std::ifstream src(srcPath, std::ios::binary);
@@ -138,7 +324,8 @@ static bool copyFileBinary(const std::string& srcPath, const std::string& dstPat
 bool DatabaseManager::initialize(const std::string& mainDbPath, 
                                 const std::string& chargeDbPath,
                                 const std::string& feeDbPath,
-                                const std::string& errorDbPath) {
+                                const std::string& errorDbPath,
+                                const std::string& telemetryDbPath) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
     if (m_initialized) {
@@ -153,12 +340,15 @@ bool DatabaseManager::initialize(const std::string& mainDbPath,
     std::cout << "Charge database: " << chargeDbPath << std::endl;
     std::cout << "Fee database: " << feeDbPath << std::endl;
     std::cout << "Error database: " << errorDbPath << std::endl;
+    const std::string actualTelemetryDbPath = telemetryDbPath.empty() ? defaultTelemetryDbPath(mainDbPath) : telemetryDbPath;
+    std::cout << "Telemetry database: " << actualTelemetryDbPath << std::endl;
     
     // BY ZF: 确保数据库文件所在目录存在
     if (!ensureDirectoryExists(mainDbPath) || 
         !ensureDirectoryExists(chargeDbPath) || 
         !ensureDirectoryExists(feeDbPath) ||
-        !ensureDirectoryExists(errorDbPath)) {
+        !ensureDirectoryExists(errorDbPath) ||
+        !ensureDirectoryExists(actualTelemetryDbPath)) {
         std::cerr << "Failed to create database directories" << std::endl;
         return false;
     }
@@ -168,6 +358,7 @@ bool DatabaseManager::initialize(const std::string& mainDbPath,
     m_dbPaths[DB_CHARGE] = chargeDbPath;
     m_dbPaths[DB_FEE] = feeDbPath;
     m_dbPaths[DB_ERROR] = errorDbPath;
+    m_dbPaths[DB_TELEMETRY] = actualTelemetryDbPath;
     
     // 初始化各个数据库
     int result;
@@ -199,9 +390,16 @@ bool DatabaseManager::initialize(const std::string& mainDbPath,
         std::cout << "Failed to open error database: " << sqlite3_errmsg(m_databases[DB_ERROR]) << std::endl;
         return false;
     }
+
+    // BY ZF: 运行遥测采样数据库
+    result = sqlite3_open(actualTelemetryDbPath.c_str(), &m_databases[DB_TELEMETRY]);
+    if (result != SQLITE_OK) {
+        std::cout << "Failed to open telemetry database: " << sqlite3_errmsg(m_databases[DB_TELEMETRY]) << std::endl;
+        return false;
+    }
     
     // 创建表结构
-    if (!createMainTables() || !createChargeTables() || !createFeeTables() || !createErrorTables()) {
+    if (!createMainTables() || !createChargeTables() || !createFeeTables() || !createErrorTables() || !createTelemetryTables()) {
         std::cout << "Failed to create database tables" << std::endl;
         cleanup();
         return false;
@@ -290,7 +488,7 @@ bool DatabaseManager::createChargeTables() {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             gun_no INTEGER NOT NULL,
             pre_trade_no TEXT,
-            trade_no TEXT UNIQUE NOT NULL,
+            trade_no TEXT NOT NULL,
             vin_code TEXT,
             time_div_type INTEGER,
             start_type INTEGER,
@@ -323,16 +521,6 @@ bool DatabaseManager::createChargeTables() {
         return false;
     }
 
-    if (!executeSQL(DB_CHARGE, "CREATE INDEX IF NOT EXISTS idx_trade_no ON charge_trade_info(trade_no)")) {
-        return false;
-    }
-    if (!executeSQL(DB_CHARGE, "CREATE INDEX IF NOT EXISTS idx_pre_trade_no ON charge_trade_info(pre_trade_no)")) {
-        return false;
-    }
-    if (!executeSQL(DB_CHARGE, "CREATE INDEX IF NOT EXISTS idx_gun_no ON charge_trade_info(gun_no)")) {
-        return false;
-    }
-    // BY ZF: 兼容历史库，补齐平台确认标志字段（已存在时忽略）。
     sqlite3* chargeDb = getConnection(DB_CHARGE);
     if (chargeDb) {
         char* errMsg = nullptr;
@@ -353,6 +541,24 @@ bool DatabaseManager::createChargeTables() {
                 return false;
             }
         }
+
+        // BY ZF: 兼容历史库，自动移除 trade_no 的 UNIQUE 约束。
+        if (hasTradeNoUniqueConstraint(chargeDb)) {
+            std::cout << "Migrating charge_trade_info to remove unique constraint on trade_no" << std::endl;
+            if (!rebuildChargeTradeInfoTableWithoutUnique(chargeDb)) {
+                return false;
+            }
+        }
+    }
+
+    if (!executeSQL(DB_CHARGE, "CREATE INDEX IF NOT EXISTS idx_trade_no ON charge_trade_info(trade_no)")) {
+        return false;
+    }
+    if (!executeSQL(DB_CHARGE, "CREATE INDEX IF NOT EXISTS idx_pre_trade_no ON charge_trade_info(pre_trade_no)")) {
+        return false;
+    }
+    if (!executeSQL(DB_CHARGE, "CREATE INDEX IF NOT EXISTS idx_gun_no ON charge_trade_info(gun_no)")) {
+        return false;
     }
 
     std::cout << "Charge database tables created successfully" << std::endl;
@@ -424,6 +630,91 @@ bool DatabaseManager::createErrorTables() {
     }
 
     std::cout << "Error database tables created successfully" << std::endl;
+    return true;
+}
+
+bool DatabaseManager::createTelemetryTables() {
+    std::cout << "Creating telemetry database tables..." << std::endl;
+
+    // BY ZF: 电表分钟采样表，每枪每分钟一条最后值。
+    const std::string meterSql = R"(
+        CREATE TABLE IF NOT EXISTS meter_minute_points (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gun_no INTEGER NOT NULL,
+            total_energy REAL,
+            reverse_energy REAL,
+            voltage REAL,
+            current REAL,
+            created_at TEXT NOT NULL,
+            UNIQUE(gun_no, created_at)
+        )
+    )";
+    if (!executeSQL(DB_TELEMETRY, meterSql)) {
+        return false;
+    }
+
+    // BY ZF: BMS/桩侧分钟采样表，每枪每分钟一条最后值。
+    const std::string bmsSql = R"(
+        CREATE TABLE IF NOT EXISTS bms_minute_points (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gun_no INTEGER NOT NULL,
+            bms_req_voltage REAL,
+            bms_req_current REAL,
+            bms_measured_voltage REAL,
+            bms_measured_current REAL,
+            output_voltage REAL,
+            output_current REAL,
+            created_at TEXT NOT NULL,
+            UNIQUE(gun_no, created_at)
+        )
+    )";
+    if (!executeSQL(DB_TELEMETRY, bmsSql)) {
+        return false;
+    }
+
+    sqlite3* telemetryDb = getConnection(DB_TELEMETRY);
+    if (telemetryDb && (hasColumn(telemetryDb, "meter_minute_points", "minute_start_ms") ||
+                        hasColumn(telemetryDb, "meter_minute_points", "source_ts_ms") ||
+                        hasColumn(telemetryDb, "meter_minute_points", "seq") ||
+                        hasColumn(telemetryDb, "meter_minute_points", "updated_at") ||
+                        hasColumn(telemetryDb, "meter_minute_points", "topic_gun_no"))) {
+        const std::string copySql =
+            "INSERT OR REPLACE INTO meter_minute_points "
+            "(id, gun_no, total_energy, reverse_energy, voltage, current, created_at) "
+            "SELECT id, gun_no, total_energy, reverse_energy, voltage, current, "
+            "datetime(minute_start_ms / 1000, 'unixepoch', 'localtime') "
+            "FROM meter_minute_points_old";
+        if (!rebuildTelemetryTable(telemetryDb, "meter_minute_points", meterSql, copySql)) {
+            return false;
+        }
+    }
+    if (telemetryDb && (hasColumn(telemetryDb, "bms_minute_points", "minute_start_ms") ||
+                        hasColumn(telemetryDb, "bms_minute_points", "source_ts_ms") ||
+                        hasColumn(telemetryDb, "bms_minute_points", "seq") ||
+                        hasColumn(telemetryDb, "bms_minute_points", "soc") ||
+                        hasColumn(telemetryDb, "bms_minute_points", "updated_at") ||
+                        hasColumn(telemetryDb, "bms_minute_points", "topic_gun_no"))) {
+        const std::string copySql =
+            "INSERT OR REPLACE INTO bms_minute_points "
+            "(id, gun_no, bms_req_voltage, bms_req_current, bms_measured_voltage, "
+            "bms_measured_current, output_voltage, output_current, created_at) "
+            "SELECT id, gun_no, bms_req_voltage, bms_req_current, bms_measured_voltage, "
+            "bms_measured_current, output_voltage, output_current, "
+            "datetime(minute_start_ms / 1000, 'unixepoch', 'localtime') "
+            "FROM bms_minute_points_old";
+        if (!rebuildTelemetryTable(telemetryDb, "bms_minute_points", bmsSql, copySql)) {
+            return false;
+        }
+    }
+
+    if (!executeSQL(DB_TELEMETRY, "CREATE INDEX IF NOT EXISTS idx_meter_minute_gun_time ON meter_minute_points(gun_no, created_at)")) {
+        return false;
+    }
+    if (!executeSQL(DB_TELEMETRY, "CREATE INDEX IF NOT EXISTS idx_bms_minute_gun_time ON bms_minute_points(gun_no, created_at)")) {
+        return false;
+    }
+
+    std::cout << "Telemetry database tables created successfully" << std::endl;
     return true;
 }
 
@@ -783,6 +1074,79 @@ bool DatabaseManager::logFaultRecord(int gun,
     return executeSQL(DB_ERROR, sql.str());
 }
 
+bool DatabaseManager::saveMeterMinutePoint(int gunNo,
+                                           const std::string& createdAt,
+                                           double totalEnergy,
+                                           double reverseEnergy,
+                                           double voltage,
+                                           double current)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    // BY ZF: 同一枪同一分钟只保留最后一条遥测值。
+    const std::string safeCreatedAt = escapeSqlString(createdAt);
+    std::stringstream sql;
+    sql << "INSERT OR REPLACE INTO meter_minute_points ("
+        << "gun_no, total_energy, reverse_energy, voltage, current, created_at"
+        << ") VALUES ("
+        << gunNo << ", "
+        << totalEnergy << ", "
+        << reverseEnergy << ", "
+        << voltage << ", "
+        << current << ", '"
+        << safeCreatedAt << "')";
+
+    return executeSQL(DB_TELEMETRY, sql.str());
+}
+
+bool DatabaseManager::saveBmsMinutePoint(int gunNo,
+                                         const std::string& createdAt,
+                                         double bmsReqVoltage,
+                                         double bmsReqCurrent,
+                                         double bmsMeasuredVoltage,
+                                         double bmsMeasuredCurrent,
+                                         double outputVoltage,
+                                         double outputCurrent)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    // BY ZF: 同一枪同一分钟只保留最后一条 BMS/桩侧遥测值。
+    const std::string safeCreatedAt = escapeSqlString(createdAt);
+    std::stringstream sql;
+    sql << "INSERT OR REPLACE INTO bms_minute_points ("
+        << "gun_no, "
+        << "bms_req_voltage, bms_req_current, bms_measured_voltage, bms_measured_current, "
+        << "output_voltage, output_current, created_at"
+        << ") VALUES ("
+        << gunNo << ", "
+        << bmsReqVoltage << ", "
+        << bmsReqCurrent << ", "
+        << bmsMeasuredVoltage << ", "
+        << bmsMeasuredCurrent << ", "
+        << outputVoltage << ", "
+        << outputCurrent << ", '"
+        << safeCreatedAt << "')";
+
+    return executeSQL(DB_TELEMETRY, sql.str());
+}
+
+bool DatabaseManager::cleanupTelemetryBefore(const std::string& cutoffTime)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    // BY ZF: telemetry.db 只保留最近固定窗口的数据，不执行 VACUUM，减少 flash 写入。
+    const std::string safeCutoffTime = escapeSqlString(cutoffTime);
+    std::stringstream meterSql;
+    meterSql << "DELETE FROM meter_minute_points WHERE created_at < '" << safeCutoffTime << "'";
+    if (!executeSQL(DB_TELEMETRY, meterSql.str())) {
+        return false;
+    }
+
+    std::stringstream bmsSql;
+    bmsSql << "DELETE FROM bms_minute_points WHERE created_at < '" << safeCutoffTime << "'";
+    return executeSQL(DB_TELEMETRY, bmsSql.str());
+}
+
 bool DatabaseManager::getFeeModel(const std::string& modelId, std::string& modelData) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
@@ -853,6 +1217,7 @@ bool DatabaseManager::reopenDatabase(DatabaseType dbType) {
         case DB_CHARGE: tablesOk = createChargeTables(); break;
         case DB_FEE:    tablesOk = createFeeTables(); break;
         case DB_ERROR:  tablesOk = createErrorTables(); break;
+        case DB_TELEMETRY: tablesOk = createTelemetryTables(); break;
         default:        tablesOk = true; break;
     }
     
@@ -879,6 +1244,7 @@ bool DatabaseManager::backupSingleDatabase(DatabaseType dbType,
     std::string prefix = (dbType == DB_MAIN) ? "tcu"
                         : (dbType == DB_CHARGE) ? "chargerecords"
                         : (dbType == DB_FEE) ? "feemodel"
+                        : (dbType == DB_TELEMETRY) ? "telemetry"
                         : "error";
     std::string backupFile = backupDir + "/" + prefix + "_" + timestamp + ".db";
     

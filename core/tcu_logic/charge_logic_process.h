@@ -33,6 +33,7 @@ struct ChargeLogicConfig {
     int biasNo;                     // BY ZF: MQTT topic 枪号偏置
     std::string pileConfigPath;     // pile_controller 配置路径（用于复用枪数）
     double prechargeStopMargin;     // 预充触发停机的剩余金额阈值
+    bool cardLockEnabled;           // BY ZF: 是否启用锁卡流程
 
     ChargeLogicConfig()
         : gunCount(1)
@@ -41,6 +42,7 @@ struct ChargeLogicConfig {
         , mqttTopicPrefix("tcu")
         , biasNo(0)
         , prechargeStopMargin(3.0)
+        , cardLockEnabled(false)
     {}
 };
 
@@ -132,9 +134,13 @@ private:
         bool plugAndChargeActive;               // 当前启动流程是否为即插即充
         bool plugAndChargeVehicleIdReceived;    // 是否已收到 0x17 车辆识别数据
         bool plugAndChargeVehicleIdConfirmed;   // 是否已完成 0x17/0x18 交互
+        unsigned int plugAndChargeVehicleIdRxCount; // 当前启动会话内已收到的 vehicle_id 次数
         bool plugAndChargeAuthRequestPublished; // 是否已向 plat 发布鉴权请求
         bool plugAndChargeAuthResultSent;       // 是否已向 pile 下发 0x19
         bool plugAndChargeAuthAckReceived;      // 是否已收到 0x1A
+        bool plugAndChargeAuthResultReady;      // 是否已收到平台鉴权结果
+        bool plugAndChargeAuthCachedSuccess;    // 缓存的平台鉴权是否成功
+        unsigned int plugAndChargeAuthCachedFailReason; // 缓存的平台鉴权失败原因
         uint8_t plugAndChargeBatteryChargeCount[3]; // 车辆识别帧中的充电次数
         uint16_t plugAndChargeBatterySoc;       // 车辆识别帧中的 SOC 原始值
         uint16_t plugAndChargeCurrentBatteryVoltage; // 车辆识别帧中的当前电压原始值
@@ -232,9 +238,13 @@ private:
             , plugAndChargeActive(false)
             , plugAndChargeVehicleIdReceived(false)
             , plugAndChargeVehicleIdConfirmed(false)
+            , plugAndChargeVehicleIdRxCount(0)
             , plugAndChargeAuthRequestPublished(false)
             , plugAndChargeAuthResultSent(false)
             , plugAndChargeAuthAckReceived(false)
+            , plugAndChargeAuthResultReady(false)
+            , plugAndChargeAuthCachedSuccess(false)
+            , plugAndChargeAuthCachedFailReason(0)
             , plugAndChargeBatterySoc(0)
             , plugAndChargeCurrentBatteryVoltage(0)
             , startSoc(0)
@@ -330,6 +340,7 @@ private:
     bool parseFeeModel(uint8_t gun, cJSON* data);
     int getMergePeerGun(uint8_t gun) const;
     bool armPendingStart(uint8_t gun, cJSON* data, const char* source);
+    bool tryDispatchMergePendingStart(uint8_t gun, const char* startReason, const char* authReason);
     void dispatchArmedStart(uint8_t gun, const char* startReason, const char* authReason);
     void syncMergePrechargeAmount(uint8_t gun);
     double getEffectivePrechargeAmount(uint8_t gun) const;

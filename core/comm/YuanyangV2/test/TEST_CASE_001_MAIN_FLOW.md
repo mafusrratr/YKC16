@@ -12,9 +12,9 @@
 
 ## 用例
 
-- 启动 `tcu_comm` 后，平台收到 `0x81` 请求 RSA 公钥，并返回当前 RSA 公钥。
-- 平台收到 `0x82` 设备认证，确认 AES 密钥后返回 COT `0x04`，`tcu_comm` 进入在线状态并发送心跳。
-- 平台下发 `0x03` 总召唤，`tcu_comm` 回复 `0x25`、`0x27`、`0x11`、`0x12`。
+- 启动 `tcu_comm` 后，平台收到 `0x81` 请求 RSA 公钥，VSQ 为 `0x00`，COT 为 `0x0001`，帧到公共地址结束，不带信息体地址和信息体内容，并返回当前 RSA 公钥。
+- 平台收到 `0x82` 设备认证，VSQ 为 `0x01`，确认 AES 密钥后返回 COT `0x04`，`tcu_comm` 进入在线状态并主动发送 `0x51` 计费模型请求和心跳；`0x51` 请求帧到公共地址结束，不带信息体地址和信息体内容。
+- 平台下发 `0x03` 总召唤，`tcu_comm` 回复连续 VSQ 的 `0x27`、`0x25`、`0x10`、`0x11`、`0x12`。
 - 平台下发 `0x51` 计费模型 2.0，`tcu_comm` 保存 `FeeModel` 并用 COT `0x04` 确认。
 - 平台下发 `0x41` 启动控制，`tcu_comm` 发布 `tcu/plat/{gun}/cmd` 的 `start_charge`，收到 `start_complete.successFlag=0` 后回 COT `0x04`。
 - logic 发布 `update_record` 后，`tcu_comm` 上送 `0x42`；平台 COT `0x04` 确认后，`tcu_comm` 发布 `record_cfm` 并调用本地记录确认。

@@ -16,11 +16,14 @@
 #include <atomic>
 #include <mutex>
 #include <vector>
+#include <map>
 #include <chrono>
 
 // BY ZF: 日志缓冲区配置宏定义（硬编码，不可配置）
 #define LOGGER_MAX_BUFFER_SIZE 1000      // 日志缓冲区最大大小（条数）
 #define LOGGER_FLUSH_INTERVAL_SECONDS 1  // 日志刷新间隔（秒）
+#define LOGGER_TELEMETRY_RETENTION_DAYS 7              // BY ZF: 遥测数据固定保留7日
+#define LOGGER_TELEMETRY_CLEANUP_INTERVAL_MINUTES 60   // BY ZF: 遥测数据固定每60分钟清理一次
 
 /**
  * 日志进程
@@ -110,6 +113,11 @@ private:
     // BY ZF: 处理 MQTT 故障事件并落库到 error.db。
     void handleMqttMessage(const std::string& topic, const std::string& payload);
     bool parseAndSaveErrorEvent(const std::string& topic, const std::string& payload);
+    bool parseAndCacheMeterData(const std::string& topic, const std::string& payload);
+    bool parseAndCacheBmsData(const std::string& topic, const std::string& payload);
+    void flushExpiredTelemetryCaches();
+    void flushAllTelemetryCaches();
+    void maybeCleanupTelemetry();
     bool initMqttPublisher();
     
     /**
@@ -152,6 +160,7 @@ private:
     std::string m_chargeDbPath;
     std::string m_feeDbPath;
     std::string m_errorDbPath;
+    std::string m_telemetryDbPath;
     
     // BY ZF: 共享内存指针
     void* m_shm;
@@ -175,6 +184,33 @@ private:
     int64_t m_backupMaxSizeBytes;  // BY ZF: 备份目录最大大小限制（字节）
     std::chrono::system_clock::time_point m_nextBackupTime;
     std::chrono::system_clock::time_point m_nextBackupCheckTime;
+
+    // BY ZF: 遥测分钟采样缓存（每枪只保留当前分钟最后一条）
+    struct MeterTelemetryPoint {
+        int gunNo;
+        uint64_t minuteStartMs;
+        std::string createdAt;
+        double totalEnergy;
+        double reverseEnergy;
+        double voltage;
+        double current;
+    };
+    struct BmsTelemetryPoint {
+        int gunNo;
+        uint64_t minuteStartMs;
+        std::string createdAt;
+        double bmsReqVoltage;
+        double bmsReqCurrent;
+        double bmsMeasuredVoltage;
+        double bmsMeasuredCurrent;
+        double outputVoltage;
+        double outputCurrent;
+    };
+    std::mutex m_telemetryMutex;
+    std::map<int, MeterTelemetryPoint> m_meterTelemetryCache;
+    std::map<int, BmsTelemetryPoint> m_bmsTelemetryCache;
+    std::map<int, int> m_pileWorkStatusCache; // BY ZF: 缓存最近一次 yx workStatus，用于过滤非充电状态下的 BMS 需求。
+    std::chrono::steady_clock::time_point m_nextTelemetryCleanupTime;
 };
 
 #endif // LOGGER_PROCESS_H

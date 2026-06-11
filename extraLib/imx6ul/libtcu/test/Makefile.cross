@@ -1,0 +1,6 @@
+# BY ZF
+#
+# Usage:
+#   build imx6ul Makefile.cross
+
+include Makefile

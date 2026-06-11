@@ -13,7 +13,7 @@
 #include <cjson/cJSON.h>
 
 // 是否支持即插即充功能
-#define SHM2CCU_PLATFORM_ONLINE_PNC 1
+#define SHM2CCU_PLATFORM_ONLINE_PNC 0
 
 namespace {
 

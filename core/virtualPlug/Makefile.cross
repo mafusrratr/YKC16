@@ -1,0 +1,36 @@
+# BY ZF
+CROSS_COMPILE ?= arm-linux-gnueabihf-
+CXX = $(CROSS_COMPILE)g++
+CXXFLAGS = -Wall -O2 -std=c++11
+INCLUDES = -I../base -I../base/mqtt -I../base/mqtt/include
+LIBDIRS = -L../../extraLib/imx6ul -L../../extraLib
+LIBS = -lpthread -lmosquitto
+
+OBJ_DIR = obj
+RELEASE_DIR = release
+TARGET = $(RELEASE_DIR)/virtual_plug_backend
+
+OBJECTS = $(OBJ_DIR)/main.o $(OBJ_DIR)/virtual_plug_backend.o $(OBJ_DIR)/mqtt_client.o
+
+all: directories $(TARGET)
+
+directories:
+	@mkdir -p $(OBJ_DIR) $(RELEASE_DIR)
+
+$(TARGET): $(OBJECTS)
+	$(CXX) $(OBJECTS) -o $(TARGET) $(LIBDIRS) $(LIBS) -s
+	@echo "Build completed: $(TARGET)"
+
+$(OBJ_DIR)/main.o: main.cpp virtual_plug_backend.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/virtual_plug_backend.o: virtual_plug_backend.cpp virtual_plug_backend.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/mqtt_client.o: ../base/mqtt/mqtt_client.cpp ../base/mqtt/mqtt_client.h
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+clean:
+	rm -rf $(OBJ_DIR) $(RELEASE_DIR)
+
+.PHONY: all clean directories

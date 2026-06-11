@@ -1,16 +1,15 @@
-# curl
+# curl/libcurl
 
-本目录用于移植项目自带的 `curl + libcurl`。
+本目录用于按 `extraLib/mosquitto` 风格移植项目自带的 `curl + libcurl`。
 
 入口文档：
 
 ```text
-BUILD_CURL_ARM.md
+BUILD_CROSS.md
 ```
 
 常用命令：
 
 ```sh
-scripts/build_curl.sh imx6ul
-scripts/package_runtime.sh imx6ul
+build imx6ul Makefile.cross
 ```

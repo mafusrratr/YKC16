@@ -62,6 +62,7 @@ logger.saveFeeModel(model);
 ✅ **计费模型** - 数据库存储 + 共享内存同步  
 ✅ **实时更新** - 新计费模型立即同步到共享内存  
 ✅ **定期备份** - 自动备份 `tcu.db`，可配置目录与间隔  
+✅ **运行遥测** - meter/BMS 分钟采样写入 `telemetry.db`，固定保留最近7日  
 
 ## 目录说明
 
@@ -98,6 +99,7 @@ core/logger/
 | tcu.db | /usr/app/data/ | 运行日志 |
 | chargerecords.db | /usr/app/data/ | 充电交易记录 |
 | feemodel.db | /usr/app/data/ | 计费模型 |
+| telemetry.db | /usr/app/data/ | meter/BMS 运行遥测分钟点 |
 
 ## 配置文件
 
@@ -110,6 +112,7 @@ log_level=1
 main_db_path=/usr/app/data/tcu.db
 charge_db_path=/usr/app/data/chargerecords.db
 fee_db_path=/usr/app/data/feemodel.db
+telemetry_db_path=/usr/app/data/telemetry.db
 
 [Backup]
 backup_dir=/usr/app/data/backup

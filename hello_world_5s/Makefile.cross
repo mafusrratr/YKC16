@@ -1,0 +1,28 @@
+# hello_world_5s 交叉编译 Makefile
+# BY ZF
+
+CXX = $(CROSS_COMPILE)g++
+CXXFLAGS = -pipe -O2 -Wall
+TARGET = hello_world_5s
+SOURCES = main.cpp
+OBJECTS = $(SOURCES:.cpp=.o)
+
+all: $(TARGET)
+
+$(TARGET): $(OBJECTS)
+	$(CXX) $(OBJECTS) -o $(TARGET)
+	@echo "Build completed: $(TARGET)"
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+clean:
+	rm -f $(OBJECTS) $(TARGET)
+	@echo "Clean completed"
+
+info:
+	@echo "Cross-compiler: $(CXX)"
+	@echo "CXXFLAGS: $(CXXFLAGS)"
+	@echo "CROSS_COMPILE: $(CROSS_COMPILE)"
+
+.PHONY: all clean info

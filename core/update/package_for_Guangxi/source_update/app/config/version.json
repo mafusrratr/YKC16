@@ -1,0 +1,26 @@
+{
+  "logic": {
+    "version": "V1.0.0",
+    "date": "20260527"
+  },
+  "meter": {
+    "version": "V1.0.0_rc1",
+    "date": "20260512"
+  },
+  "mon": {
+    "version": "V1.0.2",
+    "date": "20260601"
+  },
+  "comm": {
+    "version": "V1.0.0",
+    "date": "20260526"
+  },
+  "daemon": {
+    "version": "V1.0.1",
+    "date": "20260512"
+  },
+  "hmi": {
+    "version": "V1.0.0",
+    "date": "20260526"
+  }
+}

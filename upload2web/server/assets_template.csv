@@ -1,0 +1,2 @@
+station_code,station_name,station_address,pile_code,pile_name,pile_model,enabled
+ST001,测试充电站,国电南瑞科技园,46010003275590,1号桩,DC-120KW,1

@@ -1,0 +1,11 @@
+# curl/libcurl cross build entry
+# BY ZF
+#
+# 用法：
+#   build imx6ul Makefile.cross
+#   build jzq Makefile.cross
+#   build nuc980 Makefile.cross
+#
+# 该文件只作为 build 命令入口，实际规则复用同目录 Makefile。
+
+include Makefile

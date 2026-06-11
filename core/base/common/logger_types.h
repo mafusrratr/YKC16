@@ -38,7 +38,7 @@ struct LogEntry {
 struct TradeRecord {
     int gunNo = 0;                  // 充电枪编号
     std::string preTradeNo;         // 平台交易流水号
-    std::string tradeNo;            // 设备交易流水号（唯一）
+    std::string tradeNo;            // 设备交易流水号
     std::string vinCode;            // VIN
     int timeDivType = 0;            // 计量计费类型（0/1/2...）
     int startType = 0;              // 启动方式（刷卡/远程等）

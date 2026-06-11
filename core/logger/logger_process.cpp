@@ -11,6 +11,8 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <cstdlib>
+#include <ctime>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -83,6 +85,69 @@ std::chrono::system_clock::time_point getLatestBackupTime(const std::string& bac
     return latest;
 }
 
+uint64_t nowMs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+uint64_t minuteStartMs(uint64_t tsMs) {
+    return (tsMs / 60000ULL) * 60000ULL;
+}
+
+std::string localTimeStringFromMs(uint64_t tsMs) {
+    std::time_t sec = static_cast<std::time_t>(tsMs / 1000ULL);
+    std::tm* tm = std::localtime(&sec);
+    char buf[32] = {0};
+    if (!tm || std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm) == 0) {
+        return "";
+    }
+    return std::string(buf);
+}
+
+int parseTopicGunNo(const std::string& topic, const std::string& prefix, const std::string& category) {
+    const std::string head = prefix + "/" + category + "/";
+    if (topic.compare(0, head.size(), head) != 0) {
+        return -1;
+    }
+    const size_t start = head.size();
+    const size_t end = topic.find('/', start);
+    if (end == std::string::npos || end == start) {
+        return -1;
+    }
+    return std::atoi(topic.substr(start, end - start).c_str());
+}
+
+uint64_t jsonNumberU64(cJSON* obj, const char* key, uint64_t defaultValue) {
+    cJSON* item = cJSON_GetObjectItem(obj, key);
+    if (!cJSON_IsNumber(item)) {
+        return defaultValue;
+    }
+    return static_cast<uint64_t>(item->valuedouble);
+}
+
+double jsonNumberDouble(cJSON* obj, const char* key, double defaultValue) {
+    cJSON* item = cJSON_GetObjectItem(obj, key);
+    if (!cJSON_IsNumber(item)) {
+        return defaultValue;
+    }
+    return item->valuedouble;
+}
+
+bool jsonNumberInt(cJSON* obj, const char* key, int& value) {
+    cJSON* item = cJSON_GetObjectItem(obj, key);
+    if (!cJSON_IsNumber(item)) {
+        return false;
+    }
+    value = item->valueint;
+    return true;
+}
+
+bool jsonWorkStatus(cJSON* data, int& workStatus) {
+    // BY ZF: 兼容协议文档中的 workStatus 和现场可能出现的 workstatus。
+    return jsonNumberInt(data, "workStatus", workStatus) ||
+           jsonNumberInt(data, "workstatus", workStatus);
+}
+
 } // namespace
 
 LoggerProcess::LoggerProcess()
@@ -111,6 +176,7 @@ LoggerProcess::LoggerProcess()
     , m_backupMaxSizeBytes(0)  // BY ZF: 默认无限制
     , m_nextBackupTime(std::chrono::system_clock::now())
     , m_nextBackupCheckTime(std::chrono::system_clock::now())
+    , m_nextTelemetryCleanupTime(std::chrono::steady_clock::now())
 {
     // BY ZF: 减少无关控制台输出
 }
@@ -143,6 +209,7 @@ bool LoggerProcess::initialize(const char* config)
     m_chargeDbPath = m_config.getString("Database", "charge_db_path", "/usr/app/data/chargerecords.db");
     m_feeDbPath = m_config.getString("Database", "fee_db_path", "/usr/app/data/feemodel.db");
     m_errorDbPath = m_config.getString("Database", "error_db_path", "/usr/app/data/error.db");
+    m_telemetryDbPath = m_config.getString("Database", "telemetry_db_path", "/usr/app/data/telemetry.db");
     
     // BY ZF: 备份配置
     m_backupDir = m_config.getString("Backup", "backup_dir", "");
@@ -164,10 +231,11 @@ bool LoggerProcess::initialize(const char* config)
         }
     }
     
-    if (!m_dbManager->initialize(m_mainDbPath, m_chargeDbPath, m_feeDbPath, m_errorDbPath)) {
+    if (!m_dbManager->initialize(m_mainDbPath, m_chargeDbPath, m_feeDbPath, m_errorDbPath, m_telemetryDbPath)) {
         std::cerr << "Failed to initialize database manager" << std::endl;
         return false;
     }
+    maybeCleanupTelemetry();
     if (!initMqttPublisher()) {
         std::cerr << "Failed to initialize logger mqtt publisher" << std::endl;
     }
@@ -262,6 +330,7 @@ void LoggerProcess::stop()
         delete m_watchdogQueue;
         m_watchdogQueue = nullptr;
     }
+    flushAllTelemetryCaches();
     if (m_dbManager) {
         m_dbManager->cleanup();
     }
@@ -394,6 +463,8 @@ void LoggerProcess::mainLoop()
             lastFlushTime = now;
         }
         maybePerformBackup();
+        flushExpiredTelemetryCaches();
+        maybeCleanupTelemetry();
         
         // BY ZF: 动态调整sleep时间：如果队列快满了，不sleep或减少sleep时间
         unsigned long currentMsgs = 0, maxMsgs = 0;
@@ -416,6 +487,7 @@ void LoggerProcess::mainLoop()
         }
     }
     flushLogBufferInternal();
+    flushAllTelemetryCaches();
 }
 
 /*
@@ -1053,7 +1125,30 @@ void LoggerProcess::parseAndLogMessage(const std::string& jsonData)
 
 void LoggerProcess::handleMqttMessage(const std::string& topic, const std::string& payload)
 {
-    if (!parseAndSaveErrorEvent(topic, payload)) {
+    const std::string savePrefix = m_mqttTopicPrefix + "/save/";
+    const std::string meterPrefix = m_mqttTopicPrefix + "/meter/";
+    const std::string pilePrefix = m_mqttTopicPrefix + "/pile/";
+
+    if (topic.compare(0, savePrefix.size(), savePrefix) == 0) {
+        if (!parseAndSaveErrorEvent(topic, payload)) {
+            std::cerr << "[Logger][MQTT] Ignore unsupported payload, topic=" << topic << std::endl;
+        }
+        return;
+    }
+    if (topic.compare(0, meterPrefix.size(), meterPrefix) == 0) {
+        if (!parseAndCacheMeterData(topic, payload)) {
+            std::cerr << "[Logger][Telemetry] Ignore meter payload, topic=" << topic << std::endl;
+        }
+        return;
+    }
+    if (topic.compare(0, pilePrefix.size(), pilePrefix) == 0) {
+        if (!parseAndCacheBmsData(topic, payload)) {
+            std::cerr << "[Logger][Telemetry] Ignore pile payload, topic=" << topic << std::endl;
+        }
+        return;
+    }
+
+    {
         std::cerr << "[Logger][MQTT] Ignore unsupported payload, topic=" << topic << std::endl;
     }
 }
@@ -1106,6 +1201,251 @@ bool LoggerProcess::parseAndSaveErrorEvent(const std::string& topic, const std::
 
     cJSON_Delete(root);
     return ok;
+}
+
+bool LoggerProcess::parseAndCacheMeterData(const std::string& topic, const std::string& payload)
+{
+    cJSON* root = cJSON_Parse(payload.c_str());
+    if (!root) {
+        return false;
+    }
+
+    bool ok = false;
+    MeterTelemetryPoint oldPoint{};
+    bool hasOldPoint = false;
+    do {
+        cJSON* data = cJSON_GetObjectItem(root, "data");
+        if (!cJSON_IsObject(data)) {
+            break;
+        }
+
+        const uint64_t recvMs = nowMs();
+        const uint64_t sourceTs = jsonNumberU64(root, "ts", recvMs);
+        const int topicGunNo = parseTopicGunNo(topic, m_mqttTopicPrefix, "meter");
+        cJSON* gunItem = cJSON_GetObjectItem(root, "gun");
+        const int gunNo = cJSON_IsNumber(gunItem) ? gunItem->valueint : topicGunNo;
+        if (gunNo < 0) {
+            break;
+        }
+
+        MeterTelemetryPoint point{};
+        point.gunNo = gunNo;
+        point.minuteStartMs = minuteStartMs(sourceTs);
+        point.createdAt = localTimeStringFromMs(point.minuteStartMs);
+        point.totalEnergy = jsonNumberDouble(data, "totalEnergy", 0.0);
+        point.reverseEnergy = jsonNumberDouble(data, "ReverseEnergy", 0.0);
+        point.voltage = jsonNumberDouble(data, "voltage", 0.0);
+        point.current = jsonNumberDouble(data, "current", 0.0);
+
+        {
+            std::lock_guard<std::mutex> lock(m_telemetryMutex);
+            auto it = m_meterTelemetryCache.find(gunNo);
+            if (it != m_meterTelemetryCache.end() && it->second.minuteStartMs != point.minuteStartMs) {
+                oldPoint = it->second;
+                hasOldPoint = true;
+            }
+            m_meterTelemetryCache[gunNo] = point; // BY ZF: 同一分钟后到数据覆盖前值。
+        }
+        ok = true;
+    } while (false);
+
+    cJSON_Delete(root);
+    if (hasOldPoint && m_dbManager) {
+        m_dbManager->saveMeterMinutePoint(oldPoint.gunNo, oldPoint.createdAt,
+                                          oldPoint.totalEnergy,
+                                          oldPoint.reverseEnergy, oldPoint.voltage,
+                                          oldPoint.current);
+    }
+    return ok;
+}
+
+bool LoggerProcess::parseAndCacheBmsData(const std::string& topic, const std::string& payload)
+{
+    cJSON* root = cJSON_Parse(payload.c_str());
+    if (!root) {
+        return false;
+    }
+
+    bool ok = false;
+    BmsTelemetryPoint oldPoint{};
+    bool hasOldPoint = false;
+    do {
+        cJSON* typeItem = cJSON_GetObjectItem(root, "type");
+        if (!cJSON_IsString(typeItem) || !typeItem->valuestring) {
+            ok = true; // BY ZF: 非标准 pile data 不属于遥测采样错误。
+            break;
+        }
+
+        const std::string type(typeItem->valuestring);
+        cJSON* data = cJSON_GetObjectItem(root, "data");
+        if (!cJSON_IsObject(data)) {
+            break;
+        }
+
+        const int topicGunNo = parseTopicGunNo(topic, m_mqttTopicPrefix, "pile");
+        cJSON* gunItem = cJSON_GetObjectItem(root, "gun");
+        const int gunNo = cJSON_IsNumber(gunItem) ? gunItem->valueint : topicGunNo;
+        if (gunNo < 0) {
+            break;
+        }
+
+        if (type == "yx") {
+            int workStatus = 0;
+            if (jsonWorkStatus(data, workStatus)) {
+                std::lock_guard<std::mutex> lock(m_telemetryMutex);
+                m_pileWorkStatusCache[gunNo] = workStatus; // BY ZF: 后续 yc 写库时用最近 yx 判断是否充电中。
+            }
+            ok = true;
+            break;
+        }
+
+        if (type != "yc") {
+            ok = true; // BY ZF: pile data 中非 yc 不是错误，按设计静默忽略。
+            break;
+        }
+
+        const uint64_t recvMs = nowMs();
+        const uint64_t sourceTs = jsonNumberU64(root, "ts", recvMs);
+        bool charging = false;
+        {
+            std::lock_guard<std::mutex> lock(m_telemetryMutex);
+            auto statusIt = m_pileWorkStatusCache.find(gunNo);
+            charging = (statusIt != m_pileWorkStatusCache.end() && statusIt->second != 0);
+        }
+
+        BmsTelemetryPoint point{};
+        point.gunNo = gunNo;
+        point.minuteStartMs = minuteStartMs(sourceTs);
+        point.createdAt = localTimeStringFromMs(point.minuteStartMs);
+        point.bmsReqVoltage = jsonNumberDouble(data, "bmsReqVoltage", 0.0);
+        point.bmsReqCurrent = jsonNumberDouble(data, "bmsReqCurrent", 0.0);
+        if (!charging) {
+            point.bmsReqVoltage = 0.0; // BY ZF: 非充电状态下清零 BMS 需求，避免停机未拔枪残留需求污染分析。
+            point.bmsReqCurrent = 0.0; // BY ZF
+        }
+        point.bmsMeasuredVoltage = jsonNumberDouble(data, "bmsMeasuredVoltage", 0.0);
+        point.bmsMeasuredCurrent = jsonNumberDouble(data, "bmsMeasuredCurrent", 0.0);
+        point.outputVoltage = jsonNumberDouble(data, "outputVoltage", 0.0);
+        point.outputCurrent = jsonNumberDouble(data, "outputCurrent", 0.0);
+
+        {
+            std::lock_guard<std::mutex> lock(m_telemetryMutex);
+            auto it = m_bmsTelemetryCache.find(gunNo);
+            if (it != m_bmsTelemetryCache.end() && it->second.minuteStartMs != point.minuteStartMs) {
+                oldPoint = it->second;
+                hasOldPoint = true;
+            }
+            m_bmsTelemetryCache[gunNo] = point; // BY ZF: 同一分钟后到数据覆盖前值。
+        }
+        ok = true;
+    } while (false);
+
+    cJSON_Delete(root);
+    if (hasOldPoint && m_dbManager) {
+        m_dbManager->saveBmsMinutePoint(oldPoint.gunNo, oldPoint.createdAt,
+                                        oldPoint.bmsReqVoltage,
+                                        oldPoint.bmsReqCurrent, oldPoint.bmsMeasuredVoltage,
+                                        oldPoint.bmsMeasuredCurrent, oldPoint.outputVoltage,
+                                        oldPoint.outputCurrent);
+    }
+    return ok;
+}
+
+void LoggerProcess::flushExpiredTelemetryCaches()
+{
+    if (!m_dbManager) {
+        return;
+    }
+
+    const uint64_t currentMinute = minuteStartMs(nowMs());
+    std::vector<MeterTelemetryPoint> meterPoints;
+    std::vector<BmsTelemetryPoint> bmsPoints;
+    {
+        std::lock_guard<std::mutex> lock(m_telemetryMutex);
+        for (auto it = m_meterTelemetryCache.begin(); it != m_meterTelemetryCache.end(); ) {
+            if (it->second.minuteStartMs < currentMinute) {
+                meterPoints.push_back(it->second);
+                m_meterTelemetryCache.erase(it++);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = m_bmsTelemetryCache.begin(); it != m_bmsTelemetryCache.end(); ) {
+            if (it->second.minuteStartMs < currentMinute) {
+                bmsPoints.push_back(it->second);
+                m_bmsTelemetryCache.erase(it++);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    for (const auto& p : meterPoints) {
+        m_dbManager->saveMeterMinutePoint(p.gunNo, p.createdAt, p.totalEnergy,
+                                          p.reverseEnergy, p.voltage, p.current);
+    }
+    for (const auto& p : bmsPoints) {
+        m_dbManager->saveBmsMinutePoint(p.gunNo, p.createdAt, p.bmsReqVoltage,
+                                        p.bmsReqCurrent, p.bmsMeasuredVoltage,
+                                        p.bmsMeasuredCurrent, p.outputVoltage,
+                                        p.outputCurrent);
+    }
+}
+
+void LoggerProcess::flushAllTelemetryCaches()
+{
+    if (!m_dbManager) {
+        return;
+    }
+
+    std::vector<MeterTelemetryPoint> meterPoints;
+    std::vector<BmsTelemetryPoint> bmsPoints;
+    {
+        std::lock_guard<std::mutex> lock(m_telemetryMutex);
+        for (const auto& pair : m_meterTelemetryCache) {
+            meterPoints.push_back(pair.second);
+        }
+        for (const auto& pair : m_bmsTelemetryCache) {
+            bmsPoints.push_back(pair.second);
+        }
+        m_meterTelemetryCache.clear();
+        m_bmsTelemetryCache.clear();
+    }
+
+    for (const auto& p : meterPoints) {
+        m_dbManager->saveMeterMinutePoint(p.gunNo, p.createdAt, p.totalEnergy,
+                                          p.reverseEnergy, p.voltage, p.current);
+    }
+    for (const auto& p : bmsPoints) {
+        m_dbManager->saveBmsMinutePoint(p.gunNo, p.createdAt, p.bmsReqVoltage,
+                                        p.bmsReqCurrent, p.bmsMeasuredVoltage,
+                                        p.bmsMeasuredCurrent, p.outputVoltage,
+                                        p.outputCurrent);
+    }
+}
+
+void LoggerProcess::maybeCleanupTelemetry()
+{
+    if (!m_dbManager) {
+        return;
+    }
+
+    auto nowSteady = std::chrono::steady_clock::now();
+    if (nowSteady < m_nextTelemetryCleanupTime) {
+        return;
+    }
+    m_nextTelemetryCleanupTime = nowSteady + std::chrono::minutes(LOGGER_TELEMETRY_CLEANUP_INTERVAL_MINUTES);
+
+    const uint64_t retentionMs = static_cast<uint64_t>(LOGGER_TELEMETRY_RETENTION_DAYS) * 24ULL * 60ULL * 60ULL * 1000ULL;
+    const uint64_t currentMs = nowMs();
+    if (currentMs <= retentionMs) {
+        return;
+    }
+    const uint64_t cutoffMs = currentMs - retentionMs;
+    const std::string cutoffTime = localTimeStringFromMs(cutoffMs);
+    if (!m_dbManager->cleanupTelemetryBefore(cutoffTime)) {
+        std::cerr << "[Logger][Telemetry] cleanup failed, cutoffMs=" << cutoffMs << std::endl;
+    }
 }
 
 // BY ZF: 直接接收业务层传入的 TradeRecord，完成长度校验并入库（不经过 MQ）
@@ -1189,12 +1529,24 @@ bool LoggerProcess::initMqttPublisher()
             std::cerr << "[Logger][MQTT] connect rc=" << rc << std::endl;
             return;
         }
-        const std::string topic = m_mqttTopicPrefix + "/save/+/event";
-        if (!m_mqtt.subscribe(topic, 2)) {
-            std::cerr << "[Logger][MQTT] subscribe failed: " << topic << std::endl;
+        const std::string saveTopic = m_mqttTopicPrefix + "/save/+/event";
+        const std::string meterTopic = m_mqttTopicPrefix + "/meter/+/data";
+        const std::string pileTopic = m_mqttTopicPrefix + "/pile/+/data";
+        if (!m_mqtt.subscribe(saveTopic, 2)) {
+            std::cerr << "[Logger][MQTT] subscribe failed: " << saveTopic << std::endl;
             return;
         }
-        std::cout << "[Logger][MQTT] subscribed: " << topic << std::endl;
+        if (!m_mqtt.subscribe(meterTopic, 0)) {
+            std::cerr << "[Logger][MQTT] subscribe failed: " << meterTopic << std::endl;
+            return;
+        }
+        if (!m_mqtt.subscribe(pileTopic, 0)) {
+            std::cerr << "[Logger][MQTT] subscribe failed: " << pileTopic << std::endl;
+            return;
+        }
+        std::cout << "[Logger][MQTT] subscribed: " << saveTopic << std::endl;
+        std::cout << "[Logger][MQTT] subscribed: " << meterTopic << std::endl;
+        std::cout << "[Logger][MQTT] subscribed: " << pileTopic << std::endl;
     });
     m_mqtt.setMessageHandler([this](const std::string& topic, const std::string& payload) {
         handleMqttMessage(topic, payload);

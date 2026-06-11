@@ -346,7 +346,7 @@ private:
     std::vector<uint8_t> buildBsmBody(uint8_t gun) const; // 0x25 BSM充电中止BMS信息体
     std::vector<uint8_t> buildVinStartApplyBody(uint8_t gun, cJSON* data);
     std::vector<uint8_t> buildMergeVinStartApplyBody(uint8_t gun, cJSON* data);
-    std::vector<uint8_t> buildRemoteMergeStartAckBody(uint8_t gun, uint8_t result, uint8_t failReason, const std::string& mergeSeq) const;
+    std::vector<uint8_t> buildRemoteMergeStartAckBody(uint8_t gun, const std::string& orderNo, uint8_t result, uint8_t failReason, const std::string& mergeSeq) const;
     std::vector<uint8_t> buildRemoteStartAckBody(uint8_t gun, uint8_t result) const; // 0xA7 远程启动应答体
     std::vector<uint8_t> buildQrCodeSetAckBody(uint8_t gunNoBcd, uint8_t result) const; // 0x5B 二维码设置应答体
     std::vector<uint8_t> buildFeeModelSetAckBody(uint8_t gunNoBcd, uint8_t result) const; // 0x57 计费模型设置应答体

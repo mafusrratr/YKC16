@@ -30,6 +30,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+!extraLib/curl/Makefile
 
 # Coverage
 *.gcda
