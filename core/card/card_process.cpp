@@ -255,6 +255,8 @@ bool CardProcess::parseCommandJson(const std::string& payload, CardBusinessComma
         out.op = CARD_BIZ_CLOSE_RF;
     } else if (op == "card_read") {
         out.op = CARD_BIZ_READ;
+        // BY LZW: readMode=key 用于本地白名单钥匙卡，只读取卡号，余额区异常不拒绝。
+        out.keyReadMode = (getJsonString(root, "readMode") == "key");
     } else if (op == "card_write") {
         out.op = CARD_BIZ_WRITE;
 
@@ -349,7 +351,8 @@ void CardProcess::processAutoRead()
     debugLog("auto card_read poll begin");
     CardBusinessInfo info;
     std::string err;
-    if (!readCardInfo(info, err)) {
+    // BY LZW: 自动轮询服务刷卡启停，只需要 cardNoHex，避免余额区无效导致钥匙卡不可用。
+    if (!readCardKeyInfo(info, err)) {
         debugLog(std::string("auto card_read poll no result: ") + err);
         return;
     }
@@ -371,7 +374,7 @@ bool CardProcess::handleBusinessCommand(const CardBusinessCommand& cmd, std::str
         case CARD_BIZ_CLOSE_RF:
             return handleCloseRf(err);
         case CARD_BIZ_READ:
-            return handleCardRead(err);
+            return handleCardRead(cmd, err);
         case CARD_BIZ_WRITE:
             return handleCardWrite(cmd, err);
         case CARD_BIZ_LOCK:
@@ -418,11 +421,12 @@ bool CardProcess::handleCloseRf(std::string& err)
     return true;
 }
 
-bool CardProcess::handleCardRead(std::string& err)
+bool CardProcess::handleCardRead(const CardBusinessCommand& cmd, std::string& err)
 {
     debugLog("handle card_read begin");
     CardBusinessInfo info;
-    if (!readCardInfo(info, err)) {
+    // BY LZW: HMI/logic 可显式传 readMode=key，完整读写卡调试仍走原 readCardInfo。
+    if (!(cmd.keyReadMode ? readCardKeyInfo(info, err) : readCardInfo(info, err))) {
         debugLog(std::string("handle card_read failed: ") + err);
         return false;
     }
@@ -681,6 +685,33 @@ bool CardProcess::readCardInfo(CardBusinessInfo& info, std::string& err)
         return false;
     }
     return readCardInfoByUid(uid, info, err);
+}
+
+bool CardProcess::readCardKeyInfo(CardBusinessInfo& info, std::string& err)
+{
+    debugLog("read card_key_info begin");
+    std::vector<uint8_t> uid;
+    if (!activateCard(uid, err)) {
+        return false;
+    }
+
+    std::vector<uint8_t> block1;
+    if (!authBlock(kSector0BlockNo, uid, false, err)) {
+        return false;
+    }
+    if (!readBlock(kSector0BlockNo, block1, err)) {
+        return false;
+    }
+
+    info.uid = uid;
+    info.cardNo = block1;
+    info.cardBalance = 0;
+    info.locked = false;
+    // BY LZW: 钥匙卡模式不访问余额/锁卡扇区，余额与锁状态仅填默认值供旧 MQTT 字段兼容。
+    debugLog(std::string("read card_key_info parsed uid=")
+             + CardReaderProtocol::hexDump(info.uid)
+             + " cardNo=" + CardReaderProtocol::hexDump(info.cardNo));
+    return true;
 }
 
 bool CardProcess::readCardInfoByUid(const std::vector<uint8_t>& uid, CardBusinessInfo& info, std::string& err)

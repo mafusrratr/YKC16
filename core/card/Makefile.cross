@@ -1,7 +1,7 @@
-# Card process cross Makefile (iMX6UL)
+# Card process cross Makefile
 # BY ZF
 
-CROSS_COMPILE = arm-linux-gnueabihf-
+CROSS_COMPILE ?= arm-linux-gnueabihf-
 CXX = $(CROSS_COMPILE)g++
 CXXFLAGS = -Wall -O2 -std=c++11
 
@@ -30,7 +30,20 @@ OBJECTS = $(OBJ_DIR)/main.o \
           $(OBJ_DIR)/log_sender.o \
           $(OBJ_DIR)/base_process.o
 
-LIBDIRS = -L../../extraLib
+# BY ZF: Link platform libraries selected by build target, for example extraLib/nuc980.
+EXTRA_LIB_PATH ?= ../../extraLib
+PLATFORM ?=
+ifeq ($(PLATFORM),)
+ifeq ($(CROSS_COMPILE),arm-none-linux-gnueabi-)
+PLATFORM := jzq
+else ifeq ($(CROSS_COMPILE),arm-linux-gnueabihf-)
+PLATFORM := imx6ul
+else ifeq ($(CROSS_COMPILE),arm-nuvoton-linux-uclibceabi-)
+PLATFORM := nuc980
+endif
+endif
+PLATFORM_LIB_PATH = $(if $(PLATFORM),$(EXTRA_LIB_PATH)/$(PLATFORM),$(EXTRA_LIB_PATH))
+LIBDIRS = -L$(PLATFORM_LIB_PATH) -L$(EXTRA_LIB_PATH)
 LIBS = -lpthread -lmosquitto -lcjson
 
 all: directories $(TARGET)

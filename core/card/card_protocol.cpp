@@ -230,7 +230,7 @@ uint16_t CardReaderProtocol::mapSuccessResult(const ReaderCommand& cmd)
             if (cmd.blockNo == 32) {
                 return READER_RESULT_BLOCK32_DATA_READED;
             }
-            return READER_RESULT_UNKNOWN
+            return READER_RESULT_UNKNOWN;
         case READER_OP_WRITE_BLOCK:
             if (cmd.blockNo == 16) {
                 return READER_RESULT_BLOCK16_DATA_WRITED;

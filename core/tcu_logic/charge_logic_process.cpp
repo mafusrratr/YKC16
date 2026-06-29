@@ -12,6 +12,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <ctime>
 #include <cstdio>
@@ -38,7 +39,7 @@ namespace {
 
     void feedDaemonWatchdog()
     {
-        // BY ZF: 通过守护进程看门狗消息队列上报 tcu_logic 存活状态。
+        // BY ZF: feed daemon watchdog for tcu_logic.
         static MessageQueue watchdogQueue(MSG_KEY_WATCHDOG);
         static int queueReady = -1;
         if (queueReady == -1) {
@@ -78,6 +79,30 @@ namespace {
         return "";
     }
 
+    std::string normalizeCardNoHexForKey(const std::string& text, bool* valid = NULL)
+    {
+        std::string out;
+        bool ok = true;
+        for (size_t i = 0; i < text.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            if (c == ' ' || c == ':' || c == '-') {
+                continue;
+            }
+            if (!std::isxdigit(c)) {
+                ok = false;
+                continue;
+            }
+            out.push_back(static_cast<char>(std::toupper(c)));
+        }
+        if (out.empty()) {
+            ok = false;
+        }
+        if (valid) {
+            *valid = ok;
+        }
+        return ok ? out : std::string();
+    }
+
     bool getNumber(cJSON* obj, const char* key, double& out) {
         cJSON* v = cJSON_GetObjectItem(obj, key);
         if (v && cJSON_IsNumber(v)) {
@@ -94,6 +119,78 @@ namespace {
             return true;
         }
         return false;
+    }
+
+    void replaceJsonNumber(cJSON* obj, const char* key, double value)
+    {
+        if (!obj || !key) {
+            return;
+        }
+        cJSON_DeleteItemFromObject(obj, key);
+        cJSON_AddNumberToObject(obj, key, value);
+    }
+
+    void replaceJsonString(cJSON* obj, const char* key, const std::string& value)
+    {
+        if (!obj || !key) {
+            return;
+        }
+        cJSON_DeleteItemFromObject(obj, key);
+        cJSON_AddStringToObject(obj, key, value.c_str());
+    }
+
+    void replaceJsonItem(cJSON* obj, const char* key, cJSON* item)
+    {
+        if (!obj || !key || !item) {
+            if (item) {
+                cJSON_Delete(item);
+            }
+            return;
+        }
+        cJSON_DeleteItemFromObject(obj, key);
+        cJSON_AddItemToObject(obj, key, item);
+    }
+
+    void splitUnsignedText(const char* text, std::vector<unsigned int>& arr)
+    {
+        arr.clear();
+        if (!text) {
+            return;
+        }
+        std::string s(text);
+        std::istringstream iss(s);
+        std::string token;
+        while (std::getline(iss, token, ';')) {
+            if (token.empty()) {
+                continue;
+            }
+            try {
+                arr.push_back(static_cast<unsigned int>(std::stoul(token)));
+            } catch (...) {
+                // BY LZW: DB中单个非法费率字段忽略，最终由数量校验决定是否可用�?
+            }
+        }
+    }
+
+    void splitTimeSegText(const char* text, std::vector<std::string>& arr)
+    {
+        arr.clear();
+        if (!text) {
+            return;
+        }
+        std::string s(text);
+        std::istringstream iss(s);
+        std::string token;
+        while (std::getline(iss, token, ';')) {
+            if (token.empty()) {
+                continue;
+            }
+            std::string seg = token.substr(0, 4);
+            while (seg.size() < 4) {
+                seg = "0" + seg;
+            }
+            arr.push_back(seg);
+        }
     }
 
     uint8_t getPlugAndChargeFlag(cJSON* obj) {
@@ -221,7 +318,7 @@ namespace {
         return out.found;
     }
 
-    // BY ZF: Unix 秒时间戳转 YYYYMMDDHHMMSS 数字，便于交易表直接检索
+    // BY ZF: Unix 秒时间戳�?YYYYMMDDHHMMSS 数字，便于交易表直接检�?
     uint64_t toYmdHmsNumber(std::time_t tsSec) {
         std::tm tmv;
         localtime_r(&tsSec, &tmv);
@@ -232,7 +329,7 @@ namespace {
         return static_cast<uint64_t>(std::strtoull(buf, nullptr, 10));
     }
 
-    // BY ZF: Unix 秒时间戳转 YYYYMMDDHHMMSS 字符串，用于本地故障持久化事件。
+    // BY ZF: Unix 秒时间戳�?YYYYMMDDHHMMSS 字符串，用于本地故障持久化事件�?
     std::string toYmdHmsString(std::time_t tsSec) {
         std::tm tmv;
         localtime_r(&tsSec, &tmv);
@@ -283,15 +380,15 @@ namespace {
         return -1;
     }
 
-    // BY ZF: 将上层启动数据映射为桩侧启动帧参数
+    // BY ZF: 将上层启动数据映射为桩侧启动帧参�?
     cJSON* buildPileStartData(cJSON* src)
     {
         cJSON* out = cJSON_CreateObject();
-        // BY ZF: 默认值与 CAN 启动帧保持一致
+        // BY ZF: 默认值与 CAN 启动帧保持一�?
         uint8_t loadControlSwitch = 0x02;
         uint8_t plugAndChargeFlag = 0x01;
         uint8_t auxPowerVoltage = 0x0C;
-        uint8_t mergeChargeFlag = 0x00; // 0: 非合并充电, 1: 合并充电（后续由 pile 侧实现）
+        uint8_t mergeChargeFlag = 0x00; // 0: 非合并充�? 1: 合并充电（后续由 pile 侧实现）
         uint8_t v2g = 0x00; // BY ZF: 0=充电模式,1=放电模式
 
         if (src) {
@@ -309,7 +406,7 @@ namespace {
             if (!cJSON_IsNumber(v)) v = cJSON_GetObjectItem(src, "combineChargeFlag");
             if (cJSON_IsNumber(v)) mergeChargeFlag = static_cast<uint8_t>(v->valueint);
 
-            // BY ZF: V2G 放电标志，透传给 pile_controller。
+            // BY ZF: V2G 放电标志，透传�?pile_controller�?
             v = cJSON_GetObjectItem(src, "v2g");
             if (cJSON_IsNumber(v) && v->valueint != 0) {
                 v2g = 0x01;
@@ -370,11 +467,11 @@ bool ChargeLogicProcess::doInitialize()
     m_unconfirmedRecordBuffer.resize(m_config.gunCount);
     m_lastReplayTime = std::chrono::steady_clock::now();
     m_lastUnconfirmedQueryTime = m_lastReplayTime;
-    // BY ZF: 初始化时向 logger 请求未确认交易记录，由 logger 通过 MQTT 回放。
+    // BY ZF: 初始化时�?logger 请求未确认交易记录，�?logger 通过 MQTT 回放�?
     m_logSender.requestUnconfirmedTradeRecords(100);
-    // BY ZF: 初始化完成后写入一条 info 日志，便于联调确认进程已就绪
+    // BY ZF: 初始化完成后写入一�?info 日志，便于联调确认进程已就绪
     m_logSender.info("init_completed", std::string("gun_count=") + std::to_string(m_config.gunCount));
-    // BY ZF: 初始化完成后主动上报一次当前枪状态，避免订阅方在未发生状态迁移前无法获知 logic 当前处于 IDLE。
+    // BY ZF: 初始化完成后主动上报一次当前枪状态，避免订阅方在未发生状态迁移前无法获知 logic 当前处于 IDLE�?
     for (size_t gun = 0; gun < m_gunStates.size(); ++gun) {
         cJSON* data = cJSON_CreateObject();
         cJSON_AddStringToObject(data, "from", "NULL");
@@ -388,7 +485,7 @@ bool ChargeLogicProcess::doInitialize()
 
 void ChargeLogicProcess::doRun()
 {
-    // BY ZF: doRun 只执行一次循环迭代，避免在信号 stop() 时被 join 阻塞导致需要二次 Ctrl+C。
+    // BY ZF: doRun 只执行一次循环迭代，避免在信�?stop() 时被 join 阻塞导致需要二�?Ctrl+C�?
     static std::chrono::steady_clock::time_point lastFeedTime = std::chrono::steady_clock::now()
         - std::chrono::seconds(5);
     auto now = std::chrono::steady_clock::now();
@@ -397,7 +494,7 @@ void ChargeLogicProcess::doRun()
         feedDaemonWatchdog();
         lastFeedTime = now;
     }
-    // BY ZF: 运行期间每小时主动向 logger 再查询一次未确认交易记录，补偿 comm/平台侧漏确认场景。
+    // BY ZF: 运行期间每小时主动向 logger 再查询一次未确认交易记录，补�?comm/平台侧漏确认场景�?
     if (now - m_lastUnconfirmedQueryTime >= std::chrono::hours(1)) {
         m_logSender.requestUnconfirmedTradeRecords(100);
         m_lastUnconfirmedQueryTime = now;
@@ -421,7 +518,7 @@ void ChargeLogicProcess::doRun()
             if (maybeTriggerMeteringAbnormalByLowVoltage(static_cast<uint8_t>(i), now)) {
                 continue;
             }
-            // BY ZF: feeData 保底机制，充电中即便电量未变化也至少 15 秒发布一次。
+            // BY ZF: feeData 保底机制，充电中即便电量未变化也至少 15 秒发布一次�?
             if (gs.lastFeeDataPublishTime.time_since_epoch().count() == 0 ||
                 (now - gs.lastFeeDataPublishTime) >= std::chrono::seconds(15)) {
                 publishFeeData(static_cast<uint8_t>(i));
@@ -433,7 +530,7 @@ void ChargeLogicProcess::doRun()
         if (gs.state == STATE_STARTING) {
             if (gs.startingEnterTime.time_since_epoch().count() != 0) {
                 const auto elapsed = now - gs.startingEnterTime;
-                // BY ZF: STARTING 持续 30s 未完成，重发一次启动命令
+                // BY ZF: STARTING 持续 30s 未完成，重发一次启动命�?
                 if (!gs.plugAndChargeActive &&
                     !gs.startingRetrySent &&
                     elapsed >= std::chrono::seconds(30)) {
@@ -463,7 +560,7 @@ void ChargeLogicProcess::doRun()
             }
         }
         if (gs.state == STATE_STOPPING) {
-            // BY ZF: 收到 stop_complete 后停止重发 stop_charge
+            // BY ZF: 收到 stop_complete 后停止重�?stop_charge
             if (!gs.stopCompleteSeen) {
                 if (gs.lastStopCmdTime.time_since_epoch().count() == 0 ||
                     now - gs.lastStopCmdTime >= std::chrono::seconds(2)) {
@@ -471,20 +568,21 @@ void ChargeLogicProcess::doRun()
                     gs.lastStopCmdTime = now;
                 }
             }
-            // BY ZF: 进入 STOPPING 后固定等待 15s，或电表连续3次无变化提前收敛
+            // BY ZF: 进入 STOPPING 后固定等�?15s，或电表连续3次无变化提前收敛
             if (gs.hasMeterValue && gs.meterStableCount >= 3) {
                 handleEvent(static_cast<uint8_t>(i), EVT_METER_STALE, "meter_stable_3x");
                 continue;
             }
-            // BY ZF: 兜底保护，避免 STOPPING 长时间滞留
+            // BY ZF: 兜底保护，避�?STOPPING 长时间滞�?
             if (gs.stoppingEnterTime.time_since_epoch().count() != 0 &&
                 now - gs.stoppingEnterTime >= std::chrono::seconds(30)) {
                 handleEvent(static_cast<uint8_t>(i), EVT_METER_STALE, "stopping_force_timeout_30s");
             }
         }
     }
+    reconcileAutoCardWaiting("periodic");
     replayBufferedUnconfirmedRecords();
-    // BY ZF: doRun 主循环节流 10ms
+    // BY ZF: doRun 主循环节�?10ms
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 }
 
@@ -509,6 +607,33 @@ bool ChargeLogicProcess::loadConfig()
     m_config.prechargeStopMargin = std::atof(
         cfg.getString("ChargeLogic", "precharge_stop_margin", "1.0").c_str());
     m_config.cardLockEnabled = (cfg.getInt("ChargeLogic", "card_lock_enabled", 0) != 0);
+    m_config.cardAutoWaitEnabled = (cfg.getInt("ChargeLogic", "card_auto_wait_enabled", 0) != 0);
+    m_config.cardFeeModelFallbackEnabled =
+        (cfg.getInt("ChargeLogic", "card_fee_model_fallback_enabled", 0) != 0);
+    m_config.feeDbPath = cfg.getString("ChargeLogic", "fee_db_path", "/mnt/nandflash/data/feemodel.db");
+    m_config.cardWhitelist.clear();
+    {
+        const std::string whitelist = cfg.getString("ChargeLogic", "card_whitelist", "");
+        size_t start = 0;
+        while (start <= whitelist.size()) {
+            const size_t comma = whitelist.find(',', start);
+            const std::string item = whitelist.substr(start,
+                comma == std::string::npos ? std::string::npos : comma - start);
+            bool valid = false;
+            const std::string normalized = normalizeCardNoHexForKey(item, &valid);
+            if (valid && !normalized.empty() &&
+                std::find(m_config.cardWhitelist.begin(), m_config.cardWhitelist.end(), normalized) == m_config.cardWhitelist.end()) {
+                m_config.cardWhitelist.push_back(normalized);
+            } else if (!item.empty()) {
+                // BY LZW: 白名单配置只接受十六进制卡号，忽略空�?冒号/短横线；非法项不参与本地鉴权�?
+                m_logSender.warn("card_whitelist_invalid", item);
+            }
+            if (comma == std::string::npos) {
+                break;
+            }
+            start = comma + 1;
+        }
+    }
 
     if (!m_config.pileConfigPath.empty()) {
         int configuredGunCount = readGunCountFromIni(m_config.pileConfigPath);
@@ -609,7 +734,7 @@ void ChargeLogicProcess::onMqttMessage(const std::string& topic, const std::stri
             if (parseTradeRecordFromJson(data, rec)) {
                 std::lock_guard<std::mutex> lock(m_unconfirmedMutex);
                 if (gun < m_unconfirmedRecordBuffer.size()) {
-                    // BY ZF: 限制缓冲上限，避免异常消息导致内存膨胀。
+                    // BY ZF: 限制缓冲上限，避免异常消息导致内存膨胀�?
                     if (m_unconfirmedRecordBuffer[gun].size() >= 200) {
                         m_unconfirmedRecordBuffer[gun].pop_front();
                     }
@@ -642,7 +767,7 @@ void ChargeLogicProcess::handleLogicCmd(uint8_t gun, const std::string& cmd, cJS
     }
 
     if (cmd == "vin_req" || cmd == "start_charge") {
-        // BY ZF: HMI 即插即充入口兼容 vin_req；保留 start_charge 兼容旧流程。
+        // BY ZF: HMI 即插即充入口兼容 vin_req；保�?start_charge 兼容旧流程�?
         GunState& gs = m_gunStates[gun];
         if (gs.state == STATE_PREPARE) {
             const bool mergePlugAndCharge = (getPlugAndChargeFlag(data) == 0x02 && getMergeChargeFlag(data) != 0x00);
@@ -738,7 +863,7 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
     GunState& gs = m_gunStates[gun];
 
     if (cmd == "power_ctrl") {
-        // BY ZF: 平台功率控制命令直接透传给 pile_controller 执行。
+        // BY ZF: 平台功率控制命令直接透传�?pile_controller 执行�?
         double maxChargePowerKw = 0.0;
         bool hasPower = false;
         if (cJSON_IsNumber(data)) {
@@ -823,7 +948,7 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
                 updateAuthBasis(gun, data, "platform");
                 gs.pendingStart = true;
                 gs.pendingStartData.clear();
-                // BY ZF: 缓存“桩侧启动帧参数”，避免透传上层业务字段到 pile
+                // BY ZF: 缓存“桩侧启动帧参数”，避免透传上层业务字段�?pile
                 cJSON* pileStartData = buildPileStartData(data);
                 if (pileStartData) {
                     char* out = cJSON_PrintUnformatted(pileStartData);
@@ -859,9 +984,9 @@ void ChargeLogicProcess::handlePlatCmd(uint8_t gun, const std::string& cmd, cJSO
                 result = v->valueint;
             }
         }
-        // BY ZF: 鉴权结果约定：1=通过，其他=失败
+        // BY ZF: 鉴权结果约定�?=通过，其�?失败
         if (result == 1) {
-            // BY ZF: 使用鉴权回参覆盖启动参数，确保以下发到 pile 的参数为准
+            // BY ZF: 使用鉴权回参覆盖启动参数，确保以下发�?pile 的参数为�?
             if (data && gs.pendingStart) {
                 cJSON* pileStartData = buildPileStartData(data);
                 if (pileStartData) {
@@ -939,7 +1064,7 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
             if (r && cJSON_IsNumber(r) && r->valueint >= 0) {
                 stopReasonRaw = static_cast<unsigned int>(r->valueint) & 0xFFFFU;
                 const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(stopReasonRaw));
-                // BY ZF: 已进入充电中后才允许 stop_complete 更新原因；若当前已存在非0故障原因，则正常停机原因不能覆盖它。
+                // BY ZF: 已进入充电中后才允许 stop_complete 更新原因；若当前已存在非0故障原因，则正常停机原因不能覆盖它�?
                 if (m_gunStates[gun].startSuccessFlag && result.valid) {
                     if (result.reason != 0U || m_gunStates[gun].stopReason == 0U) {
                         m_gunStates[gun].stopReason = result.reason;
@@ -948,7 +1073,7 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
             }
             cJSON* soc = cJSON_GetObjectItem(data, "stopSoc");
             if (soc && cJSON_IsNumber(soc)) {
-                // BY ZF: stop_complete.stopSoc 协议量纲为 %，直接使用
+                // BY ZF: stop_complete.stopSoc 协议量纲�?%，直接使�?
                 m_gunStates[gun].endSoc = soc->valuedouble;
             }
         }
@@ -1008,7 +1133,7 @@ void ChargeLogicProcess::handlePileEvent(uint8_t gun, const std::string& type, c
         return;
     }
     if (type == "pile_offline") {
-        // BY ZF: 主控离线同样走 30 秒待确认窗口，避免短时抖动立即触发停机。
+        // BY ZF: 主控离线同样�?30 秒待确认窗口，避免短时抖动立即触发停机�?
         if (!gs.pileOfflineEventLatched && gs.pileOfflinePendingTime.time_since_epoch().count() == 0) {
             gs.pileOfflinePendingTime = std::chrono::steady_clock::now();
         }
@@ -1058,7 +1183,7 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
             if (!gs.hasOtherFault || gs.lastOtherFault != otherFault) {
                 gs.hasOtherFault = true;
                 gs.lastOtherFault = otherFault;
-                // BY ZF: 常态故障仅按状态阶段判断，不能再附加 workStatus==0 过滤，否则双枪公共故障可能漏记右枪。
+                // BY ZF: 常态故障仅按状态阶段判断，不能再附�?workStatus==0 过滤，否则双枪公共故障可能漏记右枪�?
                 if (otherFault != 0U &&
                     (gs.state == STATE_IDLE || gs.state == STATE_PREPARE || gs.state == STATE_ERROR || gs.state == STATE_STOPPED)) {
                     const FaultJudgeResult result = JudgeStandbyFaultPoint(MakeStandbyPointKey(otherFault));
@@ -1073,7 +1198,7 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
             !gs.meterOfflineFaultActive &&
             !gs.platformOfflineFaultActive &&
             !pileFaultActive) {
-            // BY ZF: 必须用本包最新遥信确认总故障/详细故障均已清零，避免同一包先恢复又立即 total_fault。
+            // BY ZF: 必须用本包最新遥信确认总故�?详细故障均已清零，避免同一包先恢复又立�?total_fault�?
             if (gs.hasVehicleConnectStatus && gs.lastVehicleConnectStatus != 0) {
                 transitionTo(gun, STATE_PREPARE, "pile_yx_recovered");
             } else {
@@ -1091,7 +1216,7 @@ void ChargeLogicProcess::handlePileData(uint8_t gun, const std::string& type, cJ
             } else if (gs.state == STATE_PREPARE && gs.lastVehicleConnectStatus == 0) {
                 handleEvent(gun, EVT_VEHICLE_DISCONNECTED, "vehicle_disconnected");
             } else if (gs.state == STATE_STOPPING && gs.lastVehicleConnectStatus == 0) {
-                // BY ZF: STOPPING 阶段若已断枪，记录标志，待进入 STOPPED 后直接回到 IDLE。
+                // BY ZF: STOPPING 阶段若已断枪，记录标志，待进�?STOPPED 后直接回�?IDLE�?
                 gs.vehicleDisconnectedDuringStopping = true;
             } else if (gs.state == STATE_STOPPED && gs.lastVehicleConnectStatus == 0) {
                 handleEvent(gun, EVT_VEHICLE_DISCONNECTED, "vehicle_disconnected");
@@ -1150,7 +1275,7 @@ void ChargeLogicProcess::handleMeterData(uint8_t gun, cJSON* data)
         }
     }
 
-    // BY ZF: meter 模块仅提供电量/电压/电流，金额由计费逻辑独立产生
+    // BY ZF: meter 模块仅提供电�?电压/电流，金额由计费逻辑独立产生
 
     // BY ZF: 电表电压兼容字段解析
     double voltage = 0.0;
@@ -1173,7 +1298,7 @@ void ChargeLogicProcess::handleMeterData(uint8_t gun, cJSON* data)
         gs.hasMeterCurrent = true;
     }
 
-    // BY ZF: 充电中/停止中按电量增量计算计费
+    // BY ZF: 充电�?停止中按电量增量计算计费
     if (hasEnergy && (gs.state == STATE_CHARGING || gs.state == STATE_STOPPING) && gs.feeInitialized) {
         if (!gs.feeHasEnergyBase) {
             gs.feeEnergyBaseKwh = meterEnergyKwh;
@@ -1187,7 +1312,7 @@ void ChargeLogicProcess::handleMeterData(uint8_t gun, cJSON* data)
             gs.feeLastEnergyKwh = meterEnergyKwh;
         }
 
-        // BY ZF: 计费数据变化即送（对比最近一次已发布快照）。
+        // BY ZF: 计费数据变化即送（对比最近一次已发布快照）�?
         const double currEnergy = roundTo5(gs.feeTotalEnergyKwh);
         const double currElectric = roundTo5(gs.feeTotalElectricAmount);
         const double currService = roundTo5(gs.feeTotalServiceAmount);
@@ -1207,7 +1332,7 @@ void ChargeLogicProcess::handleMeterEvent(uint8_t gun, const std::string& event,
     }
     GunState& gs = m_gunStates[gun];
     if (event == "meter_online") {
-        // BY ZF: 电表恢复在线后清除离线故障态；若当前处于 ERROR，则按插枪状态恢复到 IDLE/PREPARE。
+        // BY ZF: 电表恢复在线后清除离线故障态；若当前处�?ERROR，则按插枪状态恢复到 IDLE/PREPARE�?
         gs.meterOfflineFaultActive = false;
         gs.meterOfflineEventLatched = false;
         gs.meterOfflinePendingTime = std::chrono::steady_clock::time_point();
@@ -1224,7 +1349,7 @@ void ChargeLogicProcess::handleMeterEvent(uint8_t gun, const std::string& event,
         return;
     }
 
-    // BY ZF: 电表离线增加 30 秒待确认窗口，避免串口瞬断误报码。
+    // BY ZF: 电表离线增加 30 秒待确认窗口，避免串口瞬断误报码�?
     if (!gs.meterOfflineEventLatched && gs.meterOfflinePendingTime.time_since_epoch().count() == 0) {
         gs.meterOfflinePendingTime = std::chrono::steady_clock::now();
     }
@@ -1239,7 +1364,7 @@ void ChargeLogicProcess::handlePlatEvent(uint8_t gun, const std::string& event, 
     (void)data;
     GunState& gs = m_gunStates[gun];
     if (event == "platform_online") {
-        // BY ZF: 平台恢复在线后清除平台离线故障态；若当前处于 ERROR，则按链路状态恢复到 IDLE/PREPARE。
+        // BY ZF: 平台恢复在线后清除平台离线故障态；若当前处�?ERROR，则按链路状态恢复到 IDLE/PREPARE�?
         gs.platformOfflineFaultActive = false;
         gs.platformOfflineEventLatched = false;
         gs.platformOfflinePendingTime = std::chrono::steady_clock::time_point();
@@ -1256,13 +1381,21 @@ void ChargeLogicProcess::handlePlatEvent(uint8_t gun, const std::string& event, 
         return;
     }
 
-    // BY ZF: 平台离线增加 30 秒待确认窗口，避免链路短抖误报码。
+    if (isLocalCardSessionActive(gun)) {
+        // BY LZW: 刷卡钥匙流程在线/离线都本地校验，平台离线不进入待确认故障窗口�?
+        gs.platformOfflineFaultActive = false;
+        gs.platformOfflineEventLatched = false;
+        gs.platformOfflinePendingTime = std::chrono::steady_clock::time_point();
+        return;
+    }
+
+    // BY ZF: 平台离线增加 30 秒待确认窗口，避免链路短抖误报码�?
     if (!gs.platformOfflineEventLatched && gs.platformOfflinePendingTime.time_since_epoch().count() == 0) {
         gs.platformOfflinePendingTime = std::chrono::steady_clock::now();
     }
 }
 
-void ChargeLogicProcess::startOfflineCardFlow(uint8_t gun, cJSON* data)
+void ChargeLogicProcess::startOfflineCardFlow(uint8_t gun, cJSON* data, bool autoTriggered)
 {
     if (gun >= m_gunStates.size()) {
         return;
@@ -1278,7 +1411,7 @@ void ChargeLogicProcess::startOfflineCardFlow(uint8_t gun, cJSON* data)
         return;
     }
     if (isCardReaderBusy()) {
-        // BY ZF: 记录刷卡启动被占用拒绝，便于排查多枪共享读卡器时序问题。
+        // BY ZF: 记录刷卡启动被占用拒绝，便于排查多枪共享读卡器时序问题�?
         std::ostringstream oss;
         oss << "gun=" << static_cast<int>(gun)
             << ",phase=" << static_cast<int>(m_cardReaderState.phase)
@@ -1303,23 +1436,110 @@ void ChargeLogicProcess::startOfflineCardFlow(uint8_t gun, cJSON* data)
     }
     m_cardReaderState.gun = gun;
     m_cardReaderState.phase = CARD_PHASE_WAIT_START_CARD;
+    m_cardReaderState.autoWaiting = autoTriggered;
+    const bool wasRfOpened = m_cardReaderState.rfOpened;
     {
         std::ostringstream oss;
         oss << "gun=" << static_cast<int>(gun)
-            << ",rfOpened=" << (m_cardReaderState.rfOpened ? 1 : 0);
+            << ",rfOpened=" << (m_cardReaderState.rfOpened ? 1 : 0)
+            << ",autoWaiting=" << (m_cardReaderState.autoWaiting ? 1 : 0);
         m_logSender.info("card_flow_start", oss.str());
     }
     if (!m_cardReaderState.rfOpened) {
-        // BY ZF: 共享读卡器首次进入离线刷卡时打开射频，后续存在刷卡会话时保持开启。
+        // BY ZF: 共享读卡器首次进入离线刷卡时打开射频，后续存在刷卡会话时保持开启�?
         m_cardReaderState.rfOpened = true;
         publishCardCmd("open_rf", NULL, false, 0U);
+    } else if (wasRfOpened) {
+        // BY LZW: 射频已开时主动触发一次钥匙读卡，避免等待自动轮询周期�?
+        publishCardCmd("card_read", NULL, false, 0U);
     }
 
     cJSON* evt = cJSON_CreateObject();
     cJSON_AddStringToObject(evt, "mode", "offline");
+    cJSON_AddNumberToObject(evt, "autoWaiting", m_cardReaderState.autoWaiting ? 1 : 0);
     cJSON_AddNumberToObject(evt, "rfOpened", m_cardReaderState.rfOpened ? 1 : 0);
     publishLogicEvent(gun, "card_waiting", evt);
     cJSON_Delete(evt);
+}
+
+void ChargeLogicProcess::reconcileAutoCardWaiting(const char* reason)
+{
+    if (!m_config.cardAutoWaitEnabled) {
+        return;
+    }
+
+    int prepareCount = 0;
+    uint8_t prepareGun = 0;
+    for (size_t i = 0; i < m_gunStates.size(); ++i) {
+        if (m_gunStates[i].state == STATE_PREPARE) {
+            prepareGun = static_cast<uint8_t>(i);
+            ++prepareCount;
+        }
+    }
+
+    const bool autoWaiting =
+        (m_cardReaderState.phase == CARD_PHASE_WAIT_START_CARD && m_cardReaderState.autoWaiting);
+    if (autoWaiting) {
+        const bool activeGunPrepare =
+            (m_cardReaderState.gun < m_gunStates.size() &&
+             m_gunStates[m_cardReaderState.gun].state == STATE_PREPARE);
+        if (prepareCount != 1 || !activeGunPrepare || prepareGun != m_cardReaderState.gun) {
+            const char* cancelReason = (prepareCount > 1)
+                ? "multi_prepare_auto_cancel"
+                : (reason ? reason : "auto_wait_reconcile");
+            cancelAutoCardWaiting(cancelReason, prepareCount);
+        }
+        return;
+    }
+
+    if (isCardReaderBusy()) {
+        return;
+    }
+    if (hasOfflineCardChargingSession()) {
+        // BY LZW: 刷卡充电中的同卡停机优先级高于另一枪自动待卡，避免停机刷卡被误当作新启动�?
+        return;
+    }
+    if (prepareCount == 1) {
+        // BY LZW: Only one gun is in PREPARE, so the shared reader can safely wait for a local key card.
+        startOfflineCardFlow(prepareGun, NULL, true);
+    }
+}
+
+bool ChargeLogicProcess::cancelAutoCardWaiting(const char* reason, int prepareCount)
+{
+    if (m_cardReaderState.phase != CARD_PHASE_WAIT_START_CARD || !m_cardReaderState.autoWaiting) {
+        return false;
+    }
+
+    const uint8_t gun = m_cardReaderState.gun;
+    {
+        std::ostringstream oss;
+        oss << "gun=" << static_cast<int>(gun)
+            << ",reason=" << (reason ? reason : "")
+            << ",prepareCount=" << prepareCount
+            << ",rfOpened=" << (m_cardReaderState.rfOpened ? 1 : 0);
+        m_logSender.info("card_auto_wait_cancel", oss.str());
+    }
+
+    if (gun < m_gunStates.size()) {
+        cJSON* evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "mode", "offline");
+        cJSON_AddStringToObject(evt, "reason", reason ? reason : "auto_wait_cancel");
+        cJSON_AddNumberToObject(evt, "autoWaiting", 1);
+        cJSON_AddNumberToObject(evt, "prepareCount", prepareCount);
+        publishLogicEvent(gun, "card_waiting_cancelled", evt);
+        cJSON_Delete(evt);
+    }
+
+    m_cardReaderState.autoWaiting = false;
+    if (m_cardReaderState.rfOpened) {
+        // BY LZW: Close RF after cancelling auto wait; rf_closed will reset the reader state.
+        m_cardReaderState.phase = CARD_PHASE_WAIT_AUTO_RF_CLOSE;
+        publishCardCmd("close_rf", NULL, false, 0U);
+    } else {
+        resetCardReaderState();
+    }
+    return true;
 }
 
 void ChargeLogicProcess::beginOfflineCardCharge(uint8_t gun)
@@ -1350,29 +1570,39 @@ void ChargeLogicProcess::beginOfflineCardCharge(uint8_t gun)
     cJSON_ReplaceItemInObject(data, "prechargeAmount",
                               cJSON_CreateNumber(static_cast<double>(gs.offlineCardStartBalance) / 100.0));
 
-    // BY ZF: HMI 若未携带计费模型，则沿用当前枪已同步的本地计费模型。
-    const bool hasFeeModelPayload = cJSON_GetObjectItem(data, "timeNum") &&
-                                    cJSON_GetObjectItem(data, "timeSeg") &&
-                                    cJSON_GetObjectItem(data, "chargeFee") &&
-                                    cJSON_GetObjectItem(data, "serviceFee");
-    if (!hasFeeModelPayload && gs.feeInitialized) {
-        cJSON_ReplaceItemInObject(data, "feeModelNo", cJSON_CreateNumber(gs.feeModelNo));
-        cJSON_ReplaceItemInObject(data, "feeModelId", cJSON_CreateString(gs.feeModelId.c_str()));
-        cJSON_ReplaceItemInObject(data, "timeNum", cJSON_CreateNumber(static_cast<double>(gs.feeTimeNum)));
-        cJSON* timeSegArr = cJSON_CreateArray();
-        cJSON* chargeFeeArr = cJSON_CreateArray();
-        cJSON* serviceFeeArr = cJSON_CreateArray();
-        for (size_t i = 0; i < gs.feeTimeSegMinutes.size(); ++i) {
-            cJSON_AddItemToArray(timeSegArr, cJSON_CreateString(minuteToHHMM(gs.feeTimeSegMinutes[i]).c_str()));
-            cJSON_AddItemToArray(chargeFeeArr, cJSON_CreateNumber(gs.feeChargePricePerKwh[i]));
-            cJSON_AddItemToArray(serviceFeeArr, cJSON_CreateNumber(gs.feeServicePricePerKwh[i]));
+    // BY ZF: HMI 若未携带计费模型，则沿用当前枪已同步的本地计费模型�?
+    auto hasFeeModelPayload = [data]() {
+        return cJSON_GetObjectItem(data, "timeNum") &&
+               cJSON_GetObjectItem(data, "timeSeg") &&
+               cJSON_GetObjectItem(data, "chargeFee") &&
+               cJSON_GetObjectItem(data, "serviceFee");
+    };
+    if (m_config.cardFeeModelFallbackEnabled) {
+        // BY ZF: Card charging uses the latest valid database fee model when fallback is enabled.
+        const char* hmiFeeModelIdText = getString(data, "feeModelId");
+        const std::string hmiFeeModelId =
+            (hmiFeeModelIdText && hmiFeeModelIdText[0]) ? hmiFeeModelIdText : "";
+        if (loadLatestFeeModelPayloadFromDb(data)) {
+            const char* dbFeeModelIdText = getString(data, "feeModelId");
+            const std::string dbFeeModelId =
+                (dbFeeModelIdText && dbFeeModelIdText[0]) ? dbFeeModelIdText : "";
+            std::ostringstream oss;
+            oss << "gun=" << static_cast<int>(gun)
+                << ",hmiFeeModelId=" << hmiFeeModelId
+                << ",dbFeeModelId=" << dbFeeModelId;
+            if (!hmiFeeModelId.empty() && hmiFeeModelId == dbFeeModelId) {
+                m_logSender.info("card_fee_model_override_same", oss.str());
+            } else {
+                m_logSender.info("card_fee_model_override_ok", oss.str());
+            }
         }
-        cJSON_ReplaceItemInObject(data, "timeSeg", timeSegArr);
-        cJSON_ReplaceItemInObject(data, "chargeFee", chargeFeeArr);
-        cJSON_ReplaceItemInObject(data, "serviceFee", serviceFeeArr);
     }
 
-    if (!hasFeeModelPayload && !gs.feeInitialized) {
+    if (!hasFeeModelPayload() && gs.feeInitialized) {
+        (void)appendCurrentFeeModelToJson(gun, data);
+    }
+
+    if (!hasFeeModelPayload() && !gs.feeInitialized) {
         std::ostringstream oss;
         oss << "gun=" << static_cast<int>(gun)
             << ",feeModelNo=" << gs.feeModelNo
@@ -1380,11 +1610,12 @@ void ChargeLogicProcess::beginOfflineCardCharge(uint8_t gun)
         m_logSender.warn("card_flow_fee_model_missing", oss.str());
     }
 
-    updateAuthBasis(gun, data, "card_offline");
+    // BY ZF: When fallback is enabled, card fee models are session-only and never saved back.
+    updateAuthBasis(gun, data, "card_offline", !m_config.cardFeeModelFallbackEnabled);
     gs.offlineCardSettlementTradeNo = gs.tradeNo;
     gs.pendingStart = true;
     gs.pendingStartData.clear();
-    // BY ZF: 刷卡启动也要继承 HMI 下发的 v2g/合并充/即插即充等启动参数，不能退回默认启动帧。
+    // BY ZF: 刷卡启动也要继承 HMI 下发�?v2g/合并�?即插即充等启动参数，不能退回默认启动帧�?
     cJSON* pileStartData = buildPileStartData(data);
     if (pileStartData) {
         cJSON_ReplaceItemInObject(pileStartData, "v2g", cJSON_CreateNumber(gs.v2gMode ? 1 : 0));
@@ -1421,21 +1652,26 @@ void ChargeLogicProcess::prepareOfflineCardSettlement(uint8_t gun)
         return;
     }
 
-    const long long totalFeeCent = roundNearestLongLong(std::max(0.0, gs.feeTotalElectricAmount + gs.feeTotalServiceAmount) * 100.0);
-    const long long remain = static_cast<long long>(gs.offlineCardStartBalance) - totalFeeCent;
-    gs.offlineCardFinalBalance = static_cast<uint32_t>(remain > 0 ? remain : 0);
+    // BY LZW: 白名单钥匙卡不做卡侧余额扣减/回写，订单保持未确认直到平台 0x40 确认�?    // const long long totalFeeCent = roundNearestLongLong(std::max(0.0, gs.feeTotalElectricAmount + gs.feeTotalServiceAmount) * 100.0);
+    // const long long remain = static_cast<long long>(gs.offlineCardStartBalance) - totalFeeCent;
+    // gs.offlineCardFinalBalance = static_cast<uint32_t>(remain > 0 ? remain : 0);
     gs.offlineCardChargeActive = false;
-    gs.offlineCardSettlementPending = true;
+    gs.offlineCardSettlementPending = false;
     {
         std::ostringstream oss;
         oss << "gun=" << static_cast<int>(gun)
-            << ",startBalance=" << gs.offlineCardStartBalance
-            << ",totalFeeCent=" << totalFeeCent
-            << ",finalBalance=" << gs.offlineCardFinalBalance;
+            << ",cardNoHex=" << gs.offlineCardNoHex
+            << ",tradeNo=" << gs.offlineCardSettlementTradeNo;
         m_logSender.info("card_flow_prepare_settlement", oss.str());
     }
 
-    maybeStartPendingOfflineCardSettlement();
+    cJSON* evt = cJSON_CreateObject();
+    cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
+    cJSON_AddStringToObject(evt, "tradeNo", gs.offlineCardSettlementTradeNo.c_str());
+    publishLogicEvent(gun, "card_session_closed", evt);
+    cJSON_Delete(evt);
+    resetGunOfflineCardState(gun);
+    // maybeStartPendingOfflineCardSettlement();
 }
 
 void ChargeLogicProcess::beginOfflineCardSettlement(uint8_t gun)
@@ -1449,6 +1685,17 @@ void ChargeLogicProcess::beginOfflineCardSettlement(uint8_t gun)
         return;
     }
 
+    // BY LZW: 钥匙卡不做卡侧写余额结算，保留旧函数入口但不下发 card_write�?
+    gs.offlineCardSettlementPending = false;
+    cJSON* evtNoWrite = cJSON_CreateObject();
+    cJSON_AddStringToObject(evtNoWrite, "cardNoHex", gs.offlineCardNoHex.c_str());
+    cJSON_AddStringToObject(evtNoWrite, "tradeNo", gs.offlineCardSettlementTradeNo.c_str());
+    cJSON_AddStringToObject(evtNoWrite, "reason", "local_key_no_card_write");
+    publishLogicEvent(gun, "card_session_closed", evtNoWrite);
+    cJSON_Delete(evtNoWrite);
+    resetGunOfflineCardState(gun);
+    return;
+
     m_cardReaderState.gun = gun;
     m_cardReaderState.phase = CARD_PHASE_WAIT_SETTLEMENT_WRITE;
     {
@@ -1458,7 +1705,7 @@ void ChargeLogicProcess::beginOfflineCardSettlement(uint8_t gun)
             << ",finalBalance=" << gs.offlineCardFinalBalance;
         m_logSender.info("card_flow_begin_settlement", oss.str());
     }
-    publishCardCmd("card_write", gs.offlineCardNoHex.c_str(), true, gs.offlineCardFinalBalance);
+    // publishCardCmd("card_write", gs.offlineCardNoHex.c_str(), true, gs.offlineCardFinalBalance);
 
     cJSON* evt = cJSON_CreateObject();
     cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
@@ -1513,7 +1760,7 @@ bool ChargeLogicProcess::tryResumeOfflineCardSettlement(const std::string& cardN
     if ((targetGun < 0 || static_cast<size_t>(targetGun) >= m_gunStates.size()) &&
         pendingRecord.gunNo > 0 &&
         static_cast<size_t>(pendingRecord.gunNo - 1) < m_gunStates.size()) {
-        // BY ZF: 兼容历史库中 gun_no 可能按 1-based 保存的情况。
+        // BY ZF: 兼容历史库中 gun_no 可能�?1-based 保存的情况�?
         targetGun = pendingRecord.gunNo - 1;
     }
     if (targetGun < 0 || static_cast<size_t>(targetGun) >= m_gunStates.size()) {
@@ -1597,6 +1844,28 @@ bool ChargeLogicProcess::isCardReaderBusy() const
     return m_cardReaderState.phase != CARD_PHASE_IDLE;
 }
 
+bool ChargeLogicProcess::isCardWhitelisted(const std::string& cardNoHex) const
+{
+    const std::string normalized = normalizeCardNoHexForKey(cardNoHex);
+    if (normalized.empty()) {
+        return false;
+    }
+    return std::find(m_config.cardWhitelist.begin(), m_config.cardWhitelist.end(), normalized) != m_config.cardWhitelist.end();
+}
+
+bool ChargeLogicProcess::isLocalCardSessionActive(uint8_t gun) const
+{
+    if (gun >= m_gunStates.size()) {
+        return false;
+    }
+    const GunState& gs = m_gunStates[gun];
+    if (gs.offlineCardChargeActive || gs.offlineCardSettlementPending) {
+        return true;
+    }
+    // BY LZW: 等待刷卡阶段也属于本地刷卡会话，平台离线不应把它打成故障�?
+    return m_cardReaderState.gun == gun && m_cardReaderState.phase == CARD_PHASE_WAIT_START_CARD;
+}
+
 void ChargeLogicProcess::maybeStartPendingOfflineCardSettlement()
 {
     if (isCardReaderBusy()) {
@@ -1627,6 +1896,9 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
     if (event == "rf_closed") {
         if (m_cardReaderState.phase == CARD_PHASE_WAIT_RF_CLOSE) {
             finishOfflineCardSettlement(m_cardReaderState.gun, true);
+        } else if (m_cardReaderState.phase == CARD_PHASE_WAIT_AUTO_RF_CLOSE) {
+            m_cardReaderState.rfOpened = false;
+            resetCardReaderState();
         } else {
             m_cardReaderState.rfOpened = false;
         }
@@ -1638,69 +1910,57 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
         int cardBalance = 0;
         jsonGetInt(data, "cardBalance", cardBalance);
         const bool locked = cJSON_IsTrue(cJSON_GetObjectItem(data, "locked"));
-        const std::string cardNo = (cardNoHex && cardNoHex[0] != '\0') ? std::string(cardNoHex) : std::string();
+        (void)locked;
+        const std::string cardNo = (cardNoHex && cardNoHex[0] != '\0')
+            ? normalizeCardNoHexForKey(cardNoHex)
+            : std::string();
 
         if (m_cardReaderState.phase == CARD_PHASE_WAIT_START_CARD &&
             m_cardReaderState.gun < m_gunStates.size()) {
             GunState& gs = m_gunStates[m_cardReaderState.gun];
-            if (!cardNo.empty()) {
-                gs.offlineCardNoHex = cardNo;
-            }
+            gs.offlineCardNoHex = cardNo;
             if (cardBalance >= 0) {
                 gs.offlineCardLatestBalance = static_cast<uint32_t>(cardBalance);
             }
-            // BY ZF: 若刷到的卡对应未确认订单，则优先进入补扣费/解锁流程，不走新的刷卡鉴权。
-            if (tryResumeOfflineCardSettlement(cardNo, cardBalance)) {
-                return;
-            }
-            if (m_config.cardLockEnabled && locked) {
+            // BY LZW: 钥匙卡模式不做旧的未结算补扣�?解锁流程，离线订单仅等待平台 0x40 确认�?            // if (tryResumeOfflineCardSettlement(cardNo, cardBalance)) {
+            //
+            // return; // BY LZW: skip legacy unsettled-record resume and continue whitelist validation.
+            // }
+            if (!isCardWhitelisted(cardNo)) {
                 {
                     std::ostringstream oss;
                     oss << "gun=" << static_cast<int>(m_cardReaderState.gun)
                         << ",cardNoHex=" << gs.offlineCardNoHex
-                        << ",cardBalance=" << gs.offlineCardLatestBalance;
-                    m_logSender.warn("card_auth_locked_reject", oss.str());
-                }
-                cJSON* evt = cJSON_CreateObject();
-                cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
-                cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardLatestBalance));
-                cJSON_AddStringToObject(evt, "reason", "card_locked");
-                publishLogicEvent(m_cardReaderState.gun, "card_auth_reject", evt);
-                cJSON_Delete(evt);
-            } else if (cardBalance > 100) {
-                gs.offlineCardStartBalance = static_cast<uint32_t>(cardBalance);
-                {
-                    std::ostringstream oss;
-                    oss << "gun=" << static_cast<int>(m_cardReaderState.gun)
-                        << ",cardNoHex=" << gs.offlineCardNoHex
-                        << ",cardBalance=" << gs.offlineCardStartBalance;
-                    m_logSender.info("card_auth_pass", oss.str());
-                }
-                cJSON* evt = cJSON_CreateObject();
-                cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
-                cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardStartBalance));
-                publishLogicEvent(m_cardReaderState.gun, "card_auth_ok", evt);
-                cJSON_Delete(evt);
-                if (m_config.cardLockEnabled) {
-                    m_cardReaderState.phase = CARD_PHASE_WAIT_START_LOCK;
-                    publishCardCmd("card_lock", gs.offlineCardNoHex.c_str(), false, 0U);
-                } else {
-                    beginOfflineCardCharge(m_cardReaderState.gun);
-                }
-            } else {
-                {
-                    std::ostringstream oss;
-                    oss << "gun=" << static_cast<int>(m_cardReaderState.gun)
-                        << ",cardNoHex=" << gs.offlineCardNoHex
-                        << ",cardBalance=" << gs.offlineCardLatestBalance;
+                        << ",whitelistSize=" << m_config.cardWhitelist.size();
                     m_logSender.info("card_auth_reject", oss.str());
                 }
                 cJSON* evt = cJSON_CreateObject();
                 cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
-                cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardLatestBalance));
-                cJSON_AddStringToObject(evt, "reason", "card_balance_not_enough");
+                cJSON_AddStringToObject(evt, "reason", "card_not_in_whitelist");
                 publishLogicEvent(m_cardReaderState.gun, "card_auth_reject", evt);
                 cJSON_Delete(evt);
+            } else {
+                // BY LZW: 白名单卡作为本地超级钥匙，不检查余额、不锁卡、不扣余额�?
+                gs.offlineCardStartBalance = 0;
+                {
+                    std::ostringstream oss;
+                    oss << "gun=" << static_cast<int>(m_cardReaderState.gun)
+                        << ",cardNoHex=" << gs.offlineCardNoHex
+                        << ",mode=local_key";
+                    m_logSender.info("card_auth_pass", oss.str());
+                }
+                cJSON* evt = cJSON_CreateObject();
+                cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
+                publishLogicEvent(m_cardReaderState.gun, "card_auth_ok", evt);
+                cJSON_Delete(evt);
+                // if (m_config.cardLockEnabled) {
+                //
+                // m_cardReaderState.phase = CARD_PHASE_WAIT_START_LOCK; // BY LZW
+                //
+                // publishCardCmd("card_lock", gs.offlineCardNoHex.c_str(), false, 0U); // BY LZW
+                // } else {
+                beginOfflineCardCharge(m_cardReaderState.gun);
+                // }
             }
             return;
         }
@@ -1720,7 +1980,7 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
                 }
                 bool needCloseRf = !hasOtherOfflineSession;
                 const ChargeState gunState = m_gunStates[m_cardReaderState.gun].state;
-                // BY ZF: 处于 PREPARE 说明还需继续等待刷卡，不关闭射频；IDLE/STOPPED 允许关闭射频。
+                // BY ZF: 处于 PREPARE 说明还需继续等待刷卡，不关闭射频；IDLE/STOPPED 允许关闭射频�?
                 if (gunState == STATE_PREPARE) {
                     needCloseRf = false;
                 } else if (gunState == STATE_IDLE || gunState == STATE_STOPPED) {
@@ -1736,9 +1996,10 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
             return;
         }
 
-        if (m_cardReaderState.phase == CARD_PHASE_IDLE && tryResumeOfflineCardSettlement(cardNo, cardBalance)) {
-            return;
-        }
+        // BY LZW: 钥匙卡模式不再通过刷卡恢复旧的余额补扣/写卡结算流程�?        // if (m_cardReaderState.phase == CARD_PHASE_IDLE && tryResumeOfflineCardSettlement(cardNo, cardBalance)) {
+        //
+        // return; // BY LZW: continue matching the same card for local charge stop.
+        // }
 
         for (uint8_t gun = 0; gun < m_gunStates.size(); ++gun) {
             GunState& gs = m_gunStates[gun];
@@ -1748,9 +2009,10 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
             if (!cardNo.empty() && !gs.offlineCardNoHex.empty() && gs.offlineCardNoHex != cardNo) {
                 continue;
             }
-            if (cardBalance >= 0) {
-                gs.offlineCardLatestBalance = static_cast<uint32_t>(cardBalance);
-            }
+            // BY LZW: 停机刷卡只校验同一 cardNoHex，不更新/扣减卡余额�?            // if (cardBalance >= 0) {
+            //
+            // gs.offlineCardLatestBalance = static_cast<uint32_t>(cardBalance); // BY LZW
+            // }
             const FaultJudgeResult result = JudgeChargingFailPoint(MakeChargingPointKey(0x0105U));
             if (result.valid) {
                 gs.stopReason = result.reason;
@@ -1759,13 +2021,11 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
             {
                 std::ostringstream oss;
                 oss << "gun=" << static_cast<int>(gun)
-                    << ",cardNoHex=" << gs.offlineCardNoHex
-                    << ",cardBalance=" << gs.offlineCardLatestBalance;
+                    << ",cardNoHex=" << gs.offlineCardNoHex;
                 m_logSender.info("card_stop_trigger", oss.str());
             }
             cJSON* evt = cJSON_CreateObject();
             cJSON_AddStringToObject(evt, "cardNoHex", gs.offlineCardNoHex.c_str());
-            cJSON_AddNumberToObject(evt, "cardBalance", static_cast<double>(gs.offlineCardLatestBalance));
             publishLogicEvent(gun, "card_stop_request", evt);
             cJSON_Delete(evt);
             handleEvent(gun, EVT_STOP_CMD, "card_swipe_stop");
@@ -1785,8 +2045,10 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
     if (event == "card_written") {
         if (m_cardReaderState.phase == CARD_PHASE_WAIT_SETTLEMENT_WRITE &&
             m_cardReaderState.gun < m_gunStates.size()) {
-            m_cardReaderState.phase = CARD_PHASE_WAIT_SETTLEMENT_UNLOCK;
-            publishCardCmd("card_unlock", m_gunStates[m_cardReaderState.gun].offlineCardNoHex.c_str(), false, 0U);
+            // BY LZW: 钥匙卡流程不写卡，因此也不再进入写卡后的解锁链�?
+            resetCardReaderState();
+            // m_cardReaderState.phase = CARD_PHASE_WAIT_SETTLEMENT_UNLOCK;
+            // publishCardCmd("card_unlock", m_gunStates[m_cardReaderState.gun].offlineCardNoHex.c_str(), false, 0U);
         }
         return;
     }
@@ -1795,9 +2057,11 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
         if (m_cardReaderState.phase == CARD_PHASE_WAIT_SETTLEMENT_UNLOCK) {
             if (m_cardReaderState.gun < m_gunStates.size()) {
                 GunState& gs = m_gunStates[m_cardReaderState.gun];
-                if (!gs.offlineCardSettlementTradeNo.empty()) {
-                    m_logSender.confirmTradeRecord(gs.offlineCardSettlementTradeNo, 1);
-                }
+                (void)gs;
+                // BY LZW: 钥匙卡订单只能由平台 0x40 确认，不再因本地解锁/写卡成功 confirm�?                // if (!gs.offlineCardSettlementTradeNo.empty()) {
+                //
+     //m_logSender.confirmTradeRecord(gs.offlineCardSettlementTradeNo, 1);
+                // }
             }
             m_cardReaderState.phase = CARD_PHASE_WAIT_SETTLEMENT_VERIFY;
         }
@@ -1834,6 +2098,9 @@ void ChargeLogicProcess::handleCardEvent(const std::string& event, cJSON* data)
         } else if (op && std::strcmp(op, "card_unlock") == 0) {
             resetCardReaderState();
         } else if (op && std::strcmp(op, "close_rf") == 0) {
+            if (m_cardReaderState.phase == CARD_PHASE_WAIT_AUTO_RF_CLOSE) {
+                m_cardReaderState.rfOpened = false;
+            }
             resetCardReaderState();
         }
         return;
@@ -1893,6 +2160,13 @@ bool ChargeLogicProcess::maybeConfirmPlatformOfflineFault(uint8_t gun, const std
     }
 
     GunState& gs = m_gunStates[gun];
+    if (isLocalCardSessionActive(gun)) {
+        // BY LZW: 本地白名单刷卡会话不因平台离线进�?ERROR，订单由未确认记录恢复在线后补送�?
+        gs.platformOfflineFaultActive = false;
+        gs.platformOfflineEventLatched = false;
+        gs.platformOfflinePendingTime = std::chrono::steady_clock::time_point();
+        return false;
+    }
     if (gs.platformOfflineEventLatched ||
         gs.platformOfflinePendingTime.time_since_epoch().count() == 0 ||
         now - gs.platformOfflinePendingTime < std::chrono::seconds(30)) {
@@ -2064,6 +2338,10 @@ void ChargeLogicProcess::publishCardCmd(const std::string& op,
     cJSON_AddNumberToObject(root, "seq", static_cast<double>(++m_seq));
     cJSON_AddStringToObject(root, "source", "tcu_logic");
     cJSON_AddStringToObject(root, "op", op.c_str());
+    if (op == "card_read") {
+        // BY LZW: 刷卡钥匙模式只读�?cardNoHex，不访问余额/锁卡扇区�?
+        cJSON_AddStringToObject(root, "readMode", "key");
+    }
     if (cardNoHex && cardNoHex[0] != '\0') {
         cJSON_AddStringToObject(root, "cardNoHex", cardNoHex);
     }
@@ -2163,7 +2441,7 @@ void ChargeLogicProcess::publishFeeData(uint8_t gun)
     cJSON_AddNumberToObject(data, "totalAmount", roundTo5(gs.feeTotalElectricAmount + gs.feeTotalServiceAmount));
     cJSON_AddNumberToObject(data, "electicAmount", roundTo5(gs.feeTotalElectricAmount));
     cJSON_AddNumberToObject(data, "serviceAmount", roundTo5(gs.feeTotalServiceAmount));
-    // BY ZF: 充电时长（秒），按“进入 CHARGING 到当前发送时刻”计算。
+    // BY ZF: 充电时长（秒），按“进�?CHARGING 到当前发送时刻”计算�?
     double chargedTimeSec = 0.0;
     if (gs.chargingEnterTime.time_since_epoch().count() > 0) {
         const auto nowSteady = std::chrono::steady_clock::now();
@@ -2200,7 +2478,7 @@ void ChargeLogicProcess::publishFeeData(uint8_t gun)
     }
     cJSON_Delete(root);
 
-    // BY ZF: 记录已发布快照，用于“变化即送”判定。
+    // BY ZF: 记录已发布快照，用于“变化即送”判定�?
     GunState& mgs = m_gunStates[gun];
     mgs.feeLastPublishedTotalEnergy = roundTo5(mgs.feeTotalEnergyKwh);
     mgs.feeLastPublishedElectricAmount = roundTo5(mgs.feeTotalElectricAmount);
@@ -2247,7 +2525,7 @@ void ChargeLogicProcess::publishSaveErrorEvent(uint8_t gun, const FaultJudgeResu
 
 void ChargeLogicProcess::publishStateChange(uint8_t gun, ChargeState from, ChargeState to, const char* reason)
 {
-    // BY ZF: 统一状态变更事件
+    // BY ZF: 统一状态变更事�?
     cJSON* data = cJSON_CreateObject();
     cJSON_AddStringToObject(data, "from", stateToString(from));
     cJSON_AddStringToObject(data, "to", stateToString(to));
@@ -2274,6 +2552,10 @@ void ChargeLogicProcess::publishUpdateRecordEvent(uint8_t gun, const TradeRecord
     cJSON_AddStringToObject(data, "vinCode", rec.vinCode.c_str());
     cJSON_AddNumberToObject(data, "timeDivType", rec.timeDivType);
     cJSON_AddNumberToObject(data, "startType", rec.startType);
+    // BY LZW: discharge record carries startType=101/102 explicitly so YLC will not route it as 0x3B by stale cache.
+    const bool isDischargeRecord = (rec.startType == 101 || rec.startType == 102);
+    cJSON_AddNumberToObject(data, "v2g", isDischargeRecord ? 1 : 0);
+    cJSON_AddBoolToObject(data, "isDischarge", isDischargeRecord ? 1 : 0);
     cJSON_AddNumberToObject(data, "chargeStartTime", static_cast<double>(rec.chargeStartTime));
     cJSON_AddNumberToObject(data, "chargeEndTime", static_cast<double>(rec.chargeEndTime));
     cJSON_AddNumberToObject(data, "startSoc", roundTo5(rec.startSoc));
@@ -2291,7 +2573,7 @@ void ChargeLogicProcess::publishUpdateRecordEvent(uint8_t gun, const TradeRecord
     cJSON_AddNumberToObject(data, "crossPoints", rec.crossPoints);
     cJSON_AddStringToObject(data, "cardNumber", rec.cardNumber.c_str());
 
-    // BY ZF: 上送分时段明细，便于平台侧直接生成账单。
+    // BY ZF: 上送分时段明细，便于平台侧直接生成账单�?
     cJSON* partElectArr = cJSON_CreateArray();
     for (size_t i = 0; i < rec.partElect.size(); ++i) {
         cJSON_AddItemToArray(partElectArr, cJSON_CreateNumber(roundTo5(rec.partElect[i])));
@@ -2429,6 +2711,146 @@ void ChargeLogicProcess::replayBufferedUnconfirmedRecords()
     }
 }
 
+bool ChargeLogicProcess::appendCurrentFeeModelToJson(uint8_t gun, cJSON* data) const
+{
+    if (gun >= m_gunStates.size() || !data) {
+        return false;
+    }
+    const GunState& gs = m_gunStates[gun];
+    if (!gs.feeInitialized || gs.feeTimeNum == 0 ||
+        gs.feeTimeSegMinutes.empty() ||
+        gs.feeChargePricePerKwh.empty() ||
+        gs.feeServicePricePerKwh.empty()) {
+        return false;
+    }
+
+    replaceJsonNumber(data, "feeModelNo", static_cast<double>(gs.feeModelNo));
+    replaceJsonString(data, "feeModelId", gs.feeModelId);
+    replaceJsonNumber(data, "timeNum", static_cast<double>(gs.feeTimeNum));
+
+    cJSON* timeSegArr = cJSON_CreateArray();
+    cJSON* segFlagArr = cJSON_CreateArray();
+    cJSON* chargeFeeArr = cJSON_CreateArray();
+    cJSON* serviceFeeArr = cJSON_CreateArray();
+    if (!timeSegArr || !segFlagArr || !chargeFeeArr || !serviceFeeArr) {
+        cJSON_Delete(timeSegArr);
+        cJSON_Delete(segFlagArr);
+        cJSON_Delete(chargeFeeArr);
+        cJSON_Delete(serviceFeeArr);
+        return false;
+    }
+
+    for (size_t i = 0; i < gs.feeTimeSegMinutes.size(); ++i) {
+        cJSON_AddItemToArray(timeSegArr, cJSON_CreateString(minuteToHHMM(gs.feeTimeSegMinutes[i]).c_str()));
+        cJSON_AddItemToArray(segFlagArr, cJSON_CreateNumber(
+            (i < gs.feeSegFlag.size() && gs.feeSegFlag[i] >= 1U && gs.feeSegFlag[i] <= 4U) ? gs.feeSegFlag[i] : 3U));
+        cJSON_AddItemToArray(chargeFeeArr, cJSON_CreateNumber(
+            i < gs.feeChargePricePerKwh.size() ? gs.feeChargePricePerKwh[i] : 0.0));
+        cJSON_AddItemToArray(serviceFeeArr, cJSON_CreateNumber(
+            i < gs.feeServicePricePerKwh.size() ? gs.feeServicePricePerKwh[i] : 0.0));
+    }
+
+    replaceJsonItem(data, "timeSeg", timeSegArr);
+    replaceJsonItem(data, "segFlag", segFlagArr);
+    replaceJsonItem(data, "chargeFee", chargeFeeArr);
+    replaceJsonItem(data, "serviceFee", serviceFeeArr);
+    return true;
+}
+
+bool ChargeLogicProcess::loadLatestFeeModelPayloadFromDb(cJSON* data)
+{
+    if (!data) {
+        return false;
+    }
+
+    const std::string dbPath = m_config.feeDbPath.empty()
+        ? "/mnt/nandflash/data/feemodel.db"
+        : m_config.feeDbPath;
+
+    sqlite3* db = NULL;
+    if (sqlite3_open_v2(dbPath.c_str(), &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK || !db) {
+        m_logSender.warn("card_fee_model_override_fail", std::string("open_fail@") + dbPath);
+        if (db) {
+            sqlite3_close(db);
+        }
+        return false;
+    }
+
+    const char* sql =
+        "SELECT feeModelId,timeNum,timeSeg,segFlag,chargeFee,serviceFee "
+        "FROM tbFeeModel ORDER BY timeStamp DESC,id DESC";
+    sqlite3_stmt* stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK || !stmt) {
+        m_logSender.warn("card_fee_model_override_fail", "prepare_latest_fail");
+        if (stmt) {
+            sqlite3_finalize(stmt);
+        }
+        sqlite3_close(db);
+        return false;
+    }
+
+    bool ok = false;
+    while (!ok && sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* modelId = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const int timeNum = sqlite3_column_int(stmt, 1);
+        std::vector<std::string> timeSeg;
+        std::vector<unsigned int> segFlag;
+        std::vector<unsigned int> chargeFee;
+        std::vector<unsigned int> serviceFee;
+        splitTimeSegText(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)), timeSeg);
+        splitUnsignedText(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)), segFlag);
+        splitUnsignedText(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)), chargeFee);
+        splitUnsignedText(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5)), serviceFee);
+
+        const size_t count = static_cast<size_t>(timeNum > 0 ? timeNum : 0);
+        bool validSegFlag = segFlag.size() >= count;
+        for (size_t i = 0; validSegFlag && i < count; ++i) {
+            if (segFlag[i] < 1U || segFlag[i] > 4U) {
+                validSegFlag = false;
+            }
+        }
+        if (modelId && modelId[0] &&
+            count > 0U &&
+            timeSeg.size() >= count &&
+            validSegFlag &&
+            chargeFee.size() >= count &&
+            serviceFee.size() >= count) {
+            cJSON* timeSegArr = cJSON_CreateArray();
+            cJSON* segFlagArr = cJSON_CreateArray();
+            cJSON* chargeFeeArr = cJSON_CreateArray();
+            cJSON* serviceFeeArr = cJSON_CreateArray();
+            if (timeSegArr && segFlagArr && chargeFeeArr && serviceFeeArr) {
+                for (size_t i = 0; i < count; ++i) {
+                    cJSON_AddItemToArray(timeSegArr, cJSON_CreateString(timeSeg[i].c_str()));
+                    cJSON_AddItemToArray(segFlagArr, cJSON_CreateNumber(segFlag[i]));
+                    cJSON_AddItemToArray(chargeFeeArr, cJSON_CreateNumber(static_cast<double>(chargeFee[i]) / 100000.0));
+                    cJSON_AddItemToArray(serviceFeeArr, cJSON_CreateNumber(static_cast<double>(serviceFee[i]) / 100000.0));
+                }
+                replaceJsonString(data, "feeModelId", modelId);
+                replaceJsonNumber(data, "timeNum", static_cast<double>(timeNum));
+                replaceJsonItem(data, "timeSeg", timeSegArr);
+                replaceJsonItem(data, "segFlag", segFlagArr);
+                replaceJsonItem(data, "chargeFee", chargeFeeArr);
+                replaceJsonItem(data, "serviceFee", serviceFeeArr);
+                ok = true;
+            } else {
+                cJSON_Delete(timeSegArr);
+                cJSON_Delete(segFlagArr);
+                cJSON_Delete(chargeFeeArr);
+                cJSON_Delete(serviceFeeArr);
+            }
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    if (!ok) {
+        m_logSender.warn("card_fee_model_override_miss", dbPath);
+    }
+    return ok;
+}
+
 int ChargeLogicProcess::getMergePeerGun(uint8_t gun) const
 {
     if (m_gunStates.size() < 2) {
@@ -2525,7 +2947,7 @@ void ChargeLogicProcess::syncMergePrechargeAmount(uint8_t gun)
         return;
     }
 
-    // BY ZF: 合并充总预充值金额应保持一致；若平台分枪下发不一致，统一取最小值。
+    // BY ZF: 合并充总预充值金额应保持一致；若平台分枪下发不一致，统一取最小值�?
     const double effective = std::min(gs.prechargeAmount, peerGs.prechargeAmount);
     gs.prechargeAmount = effective;
     peerGs.prechargeAmount = effective;
@@ -2581,14 +3003,14 @@ double ChargeLogicProcess::getEffectiveTotalAmount(uint8_t gun) const
     return total;
 }
 
-void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* source)
+void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* source, bool saveFeeModel)
 {
     if (gun >= m_gunStates.size()) {
         return;
     }
     GunState& gs = m_gunStates[gun];
 
-    // BY ZF: 充电开始时间统一以 logic 接收到启动命令的本机时间为准，不使用平台透传 startTime。
+    // BY ZF: 充电开始时间统一�?logic 接收到启动命令的本机时间为准，不使用平台透传 startTime�?
     uint64_t startTs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
     std::string userNo;
@@ -2636,7 +3058,7 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     gs.chargeUserNo = userNo;
     gs.orderNo = orderNo;
     gs.preTradeNo = preTradeNo.empty() ? orderNo : preTradeNo;
-    // BY ZF: tradeNo 与 preTradeNo/orderNo 对齐，不再添加前缀。
+    // BY ZF: tradeNo �?preTradeNo/orderNo 对齐，不再添加前缀�?
     const std::string baseTradeNo = gs.preTradeNo.empty() ? gs.orderNo : gs.preTradeNo;
     gs.tradeNo = baseTradeNo.empty()
         ? ("T" + std::to_string(gun) + "_" + std::to_string(gs.chargeStartTime))
@@ -2648,13 +3070,21 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     }
     const bool isVinStart = (plugAndChargeFlag == 0x02) || (vin && vin[0]);
 
-    if (isVinStart) {
-        // BY ZF: VIN/即插即充启动即使由平台回参触发，交易标识仍应按VIN启动上送。
+    const bool isCardOfflineStart = (source && std::string(source) == "card_offline");
+    const bool isDischargeStart = (v2g != 0);
+    if (isDischargeStart && isCardOfflineStart) {
+        // BY LZW: Card discharge uses dedicated startType so YLC routes record to 0xE9.
+        gs.startType = 102;
+    } else if (isDischargeStart) {
+        // BY LZW: Platform discharge uses dedicated startType so YLC routes record to 0xE9.
+        gs.startType = 101;
+    } else if (isVinStart) {
+        // BY ZF: VIN/���弴��������ʹ��ƽ̨�زδ��������ױ�ʶ��Ӧ��VIN�������͡�
         gs.startType = 5;
-    } else if (source && std::string(source) == "card_offline") {
+    } else if (isCardOfflineStart) {
         gs.startType = 4;
     } else {
-        // BY ZF: 普通平台远程启动按普通启动口径记录，不再误记为卡启动。
+        // BY ZF: ��ͨƽ̨Զ����������ͨ�����ھ���¼���������Ϊ��������
         gs.startType = 1;
     }
     gs.startSoc = 0;
@@ -2696,8 +3126,8 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     gs.feeTotalServiceAmount = 0.0;
     gs.meterStableCount = 0;
 
-    // BY ZF: 从启动命令解析计费模型（HHMM时段 + 分段电费/服务费）。
-    parseFeeModel(gun, data);
+    // BY ZF: 从启动命令解析计费模型（HHMM时段 + 分段电费/服务费）�?
+    parseFeeModel(gun, data, saveFeeModel);
     syncMergePrechargeAmount(gun);
 
     cJSON* evt = cJSON_CreateObject();
@@ -2705,26 +3135,37 @@ void ChargeLogicProcess::updateAuthBasis(uint8_t gun, cJSON* data, const char* s
     cJSON_AddNumberToObject(evt, "startTime", static_cast<double>(gs.startTimeMs));
     cJSON_AddStringToObject(evt, "chargeUserNo", gs.chargeUserNo.c_str());
     cJSON_AddStringToObject(evt, "orderNo", gs.orderNo.c_str());
+    cJSON_AddStringToObject(evt, "preTradeNo", gs.preTradeNo.c_str());
+    cJSON_AddStringToObject(evt, "tradeNo", gs.tradeNo.c_str());
     cJSON_AddNumberToObject(evt, "chargeMode", gs.chargeMode);
     cJSON_AddNumberToObject(evt, "prechargeAmount", gs.prechargeAmount);
     cJSON_AddNumberToObject(evt, "feeModelNo", gs.feeModelNo);
+    // BY LZW: auth_basis carries startType/isDischarge as the YLC session boundary.
+    cJSON_AddNumberToObject(evt, "startType", gs.startType);
     cJSON_AddNumberToObject(evt, "plugAndChargeFlag", gs.plugAndChargeFlag);
     cJSON_AddNumberToObject(evt, "mergeChargeFlag", gs.mergeChargeFlag);
-    cJSON_AddNumberToObject(evt, "v2g", (v2g != 0) ? 1 : 0);
+    cJSON_AddNumberToObject(evt, "v2g", isDischargeStart ? 1 : 0);
+    cJSON_AddBoolToObject(evt, "isDischarge", isDischargeStart ? 1 : 0);
     publishLogicEvent(gun, "auth_basis", evt);
     cJSON_Delete(evt);
 }
 
-bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
+bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data, bool saveFeeModel)
 {
     if (gun >= m_gunStates.size()) {
         return false;
     }
     GunState& gs = m_gunStates[gun];
+    const std::string prevFeeModelId = gs.feeModelId;
+    const std::vector<unsigned int> prevFeeSegFlag = gs.feeSegFlag;
+    const std::vector<int> prevFeeTimeSegMinutes = gs.feeTimeSegMinutes;
+    const std::vector<double> prevFeeChargePricePerKwh = gs.feeChargePricePerKwh;
+    const std::vector<double> prevFeeServicePricePerKwh = gs.feeServicePricePerKwh;
     gs.feeInitialized = false;
     gs.feeModelId.clear();
     gs.feeTimeNum = 0;
     gs.feeTimeSegMinutes.clear();
+    gs.feeSegFlag.clear();
     gs.feeChargePricePerKwh.clear();
     gs.feeServicePricePerKwh.clear();
     gs.feeSegEnergyKwh.clear();
@@ -2745,6 +3186,7 @@ bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
 
     cJSON* timeNumJson = cJSON_GetObjectItem(data, "timeNum");
     cJSON* timeSegJson = cJSON_GetObjectItem(data, "timeSeg");
+    cJSON* segFlagJson = cJSON_GetObjectItem(data, "segFlag");
     cJSON* chargeFeeJson = cJSON_GetObjectItem(data, "chargeFee");
     cJSON* serviceFeeJson = cJSON_GetObjectItem(data, "serviceFee");
     if (!timeNumJson || !cJSON_IsNumber(timeNumJson) || !timeSegJson || !chargeFeeJson || !serviceFeeJson) {
@@ -2764,6 +3206,7 @@ bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
 
     gs.feeTimeNum = static_cast<uint8_t>(segCount);
     gs.feeTimeSegMinutes.resize(segCount);
+    gs.feeSegFlag.assign(segCount, 0U);
     gs.feeChargePricePerKwh.resize(segCount);
     gs.feeServicePricePerKwh.resize(segCount);
     gs.feeSegEnergyKwh.assign(segCount, 0.0);
@@ -2772,6 +3215,7 @@ bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
 
     for (int i = 0; i < segCount; i++) {
         cJSON* ts = cJSON_GetArrayItem(timeSegJson, i);
+        cJSON* flag = cJSON_IsArray(segFlagJson) ? cJSON_GetArrayItem(segFlagJson, i) : nullptr;
         cJSON* cf = cJSON_GetArrayItem(chargeFeeJson, i);
         cJSON* sf = cJSON_GetArrayItem(serviceFeeJson, i);
         int minute = 0;
@@ -2786,32 +3230,93 @@ bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
             minute = hh * 60 + mm;
         }
         gs.feeTimeSegMinutes[i] = minute;
-        // BY ZF: chargeFee/serviceFee 输入按“浮点元/度”直接使用
+        // BY LZW: 保留YLC下发的尖峰平谷类别；非法/缺失先置0，后续再兜底�?
+        if (flag && cJSON_IsNumber(flag) && flag->valueint >= 1 && flag->valueint <= 4) {
+            gs.feeSegFlag[i] = static_cast<unsigned int>(flag->valueint);
+        }
+        // BY ZF: chargeFee/serviceFee 输入按“浮点元/度”直接使�?
         gs.feeChargePricePerKwh[i] = (cf && cJSON_IsNumber(cf)) ? cf->valuedouble : 0.0;
         gs.feeServicePricePerKwh[i] = (sf && cJSON_IsNumber(sf)) ? sf->valuedouble : 0.0;
     }
 
-    // 保证分段按起始分钟升序
+    // 保证分段按起始分钟升�?
     std::vector<int> idx(segCount);
     for (int i = 0; i < segCount; i++) idx[i] = i;
     std::sort(idx.begin(), idx.end(), [&gs](int a, int b) {
         return gs.feeTimeSegMinutes[a] < gs.feeTimeSegMinutes[b];
     });
     std::vector<int> sortedSeg(segCount);
+    std::vector<unsigned int> sortedFlag(segCount);
     std::vector<double> sortedCharge(segCount), sortedService(segCount);
     for (int i = 0; i < segCount; i++) {
         sortedSeg[i] = gs.feeTimeSegMinutes[idx[i]];
+        sortedFlag[i] = gs.feeSegFlag[idx[i]];
         sortedCharge[i] = gs.feeChargePricePerKwh[idx[i]];
         sortedService[i] = gs.feeServicePricePerKwh[idx[i]];
     }
     gs.feeTimeSegMinutes.swap(sortedSeg);
+    gs.feeSegFlag.swap(sortedFlag);
     gs.feeChargePricePerKwh.swap(sortedCharge);
     gs.feeServicePricePerKwh.swap(sortedService);
 
+    bool hasValidSegFlag = true;
+    for (size_t i = 0; i < gs.feeSegFlag.size(); ++i) {
+        if (gs.feeSegFlag[i] < 1U || gs.feeSegFlag[i] > 4U) {
+            hasValidSegFlag = false;
+            break;
+        }
+    }
+    if (!hasValidSegFlag &&
+        !prevFeeModelId.empty() &&
+        prevFeeModelId == gs.feeModelId &&
+        prevFeeSegFlag.size() == gs.feeSegFlag.size() &&
+        prevFeeTimeSegMinutes.size() == gs.feeTimeSegMinutes.size() &&
+        prevFeeChargePricePerKwh.size() == gs.feeChargePricePerKwh.size() &&
+        prevFeeServicePricePerKwh.size() == gs.feeServicePricePerKwh.size()) {
+        bool cacheMatches = true;
+        for (size_t i = 0; i < gs.feeSegFlag.size(); ++i) {
+            const long long prevCharge = static_cast<long long>(
+                roundNearest(std::max(0.0, prevFeeChargePricePerKwh[i]) * 100000.0));
+            const long long currentCharge = static_cast<long long>(
+                roundNearest(std::max(0.0, gs.feeChargePricePerKwh[i]) * 100000.0));
+            const long long prevService = static_cast<long long>(
+                roundNearest(std::max(0.0, prevFeeServicePricePerKwh[i]) * 100000.0));
+            const long long currentService = static_cast<long long>(
+                roundNearest(std::max(0.0, gs.feeServicePricePerKwh[i]) * 100000.0));
+            if (prevFeeSegFlag[i] < 1U || prevFeeSegFlag[i] > 4U ||
+                prevFeeTimeSegMinutes[i] != gs.feeTimeSegMinutes[i] ||
+                prevCharge != currentCharge ||
+                prevService != currentService) {
+                cacheMatches = false;
+                break;
+            }
+        }
+        if (cacheMatches) {
+            gs.feeSegFlag = prevFeeSegFlag;
+            hasValidSegFlag = true;
+        }
+    }
+    if (!hasValidSegFlag) {
+        const int restoreResult = restoreFeeSegFlagsFromDb(
+            gs.feeModelId,
+            gs.feeTimeSegMinutes,
+            gs.feeChargePricePerKwh,
+            gs.feeServicePricePerKwh,
+            gs.feeSegFlag);
+        if (restoreResult > 0) {
+            hasValidSegFlag = true;
+            m_logSender.info("fee_segflag_db_restore_ok", gs.feeModelId);
+        } else if (restoreResult < 0) {
+            m_logSender.warn("fee_segflag_db_restore_ambiguous", gs.feeModelId);
+        } else {
+            m_logSender.warn("fee_segflag_db_restore_miss", gs.feeModelId);
+        }
+    }
+
     gs.feeInitialized = true;
 
-    // BY ZF: 解析成功后直接保存计费模型到 logger/本地数据库。
-    if (!gs.feeModelId.empty()) {
+    // BY ZF: 解析成功后直接保存计费模型到 logger/本地数据库�?
+    if (!gs.feeModelId.empty() && hasValidSegFlag && saveFeeModel) {
         FeeModel feeModel;
         feeModel.feeModelId = gs.feeModelId;
         feeModel.timeNum = gs.feeTimeNum;
@@ -2822,9 +3327,10 @@ bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
 
         for (size_t i = 0; i < gs.feeTimeSegMinutes.size(); ++i) {
             feeModel.timeSeg.push_back(minuteToHHMM(gs.feeTimeSegMinutes[i]));
-            // BY ZF: 启动命令下发的是按时段展开的价格数组，这里按段号(1-based)落库。
-            feeModel.segFlag.push_back(static_cast<unsigned int>(i + 1));
-            // BY ZF: 统一按 10^-5 元保存单价，避免平台下发 5 位小数时丢精度。
+            // BY LZW: 保存平台/YLC下发的尖峰平谷类别，禁止按时段序�?..48落库�?
+            feeModel.segFlag.push_back((i < gs.feeSegFlag.size() && gs.feeSegFlag[i] >= 1U && gs.feeSegFlag[i] <= 4U)
+                ? gs.feeSegFlag[i] : 3U);
+            // BY ZF: 统一�?10^-5 元保存单价，避免平台下发 5 位小数时丢精度�?
             feeModel.chargeFee.push_back(static_cast<unsigned int>(
                 roundNearest(std::max(0.0, gs.feeChargePricePerKwh[i]) * 100000.0)));
             feeModel.serviceFee.push_back(static_cast<unsigned int>(
@@ -2832,8 +3338,139 @@ bool ChargeLogicProcess::parseFeeModel(uint8_t gun, cJSON* data)
         }
 
         m_logSender.saveFeeModel(feeModel);
+    } else if (!gs.feeModelId.empty() && hasValidSegFlag && !saveFeeModel) {
+        // BY ZF: A fallback-enabled card model is session-only and must not be saved again.
+        m_logSender.info("card_fee_model_skip_resave", gs.feeModelId);
+    } else if (!gs.feeModelId.empty()) {
+        m_logSender.warn("fee_model_skip_save_invalid_segflag", gs.feeModelId);
     }
     return true;
+}
+
+int ChargeLogicProcess::restoreFeeSegFlagsFromDb(
+    const std::string& feeModelId,
+    const std::vector<int>& timeSegMinutes,
+    const std::vector<double>& chargeFee,
+    const std::vector<double>& serviceFee,
+    std::vector<unsigned int>& segFlag)
+{
+    if (feeModelId.empty() ||
+        timeSegMinutes.empty() ||
+        timeSegMinutes.size() != chargeFee.size() ||
+        timeSegMinutes.size() != serviceFee.size()) {
+        return 0;
+    }
+
+    const std::string dbPath = m_config.feeDbPath.empty()
+        ? "/mnt/nandflash/data/feemodel.db"
+        : m_config.feeDbPath;
+    sqlite3* db = NULL;
+    if (sqlite3_open_v2(dbPath.c_str(), &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK || !db) {
+        if (db) {
+            sqlite3_close(db);
+        }
+        return 0;
+    }
+
+    const char* sql =
+        "SELECT timeNum,timeSeg,segFlag,chargeFee,serviceFee "
+        "FROM tbFeeModel WHERE feeModelId=? ORDER BY id DESC LIMIT 1";
+    sqlite3_stmt* stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK || !stmt) {
+        if (stmt) {
+            sqlite3_finalize(stmt);
+        }
+        sqlite3_close(db);
+        return 0;
+    }
+    sqlite3_bind_text(stmt, 1, feeModelId.c_str(), -1, SQLITE_TRANSIENT);
+
+    int result = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const int timeNum = sqlite3_column_int(stmt, 0);
+        std::vector<std::string> dbTimeSeg;
+        std::vector<unsigned int> dbSegFlag;
+        std::vector<unsigned int> dbChargeFee;
+        std::vector<unsigned int> dbServiceFee;
+        splitTimeSegText(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)), dbTimeSeg);
+        splitUnsignedText(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2)), dbSegFlag);
+        splitUnsignedText(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3)), dbChargeFee);
+        splitUnsignedText(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)), dbServiceFee);
+
+        const size_t count = static_cast<size_t>(timeNum > 0 ? timeNum : 0);
+        if (count > 0U &&
+            dbTimeSeg.size() >= count &&
+            dbSegFlag.size() >= count &&
+            dbChargeFee.size() >= count &&
+            dbServiceFee.size() >= count) {
+            std::vector<unsigned int> restored(timeSegMinutes.size(), 0U);
+            bool allMatched = true;
+            bool ambiguous = false;
+            for (size_t i = 0; i < timeSegMinutes.size(); ++i) {
+                const std::string targetTime = minuteToHHMM(timeSegMinutes[i]);
+                const unsigned int targetCharge = static_cast<unsigned int>(
+                    roundNearest(std::max(0.0, chargeFee[i]) * 100000.0));
+                const unsigned int targetService = static_cast<unsigned int>(
+                    roundNearest(std::max(0.0, serviceFee[i]) * 100000.0));
+
+                unsigned int directFlag = 0U;
+                int directCount = 0;
+                for (size_t j = 0; j < count; ++j) {
+                    if (dbTimeSeg[j] == targetTime &&
+                        dbChargeFee[j] == targetCharge &&
+                        dbServiceFee[j] == targetService &&
+                        dbSegFlag[j] >= 1U && dbSegFlag[j] <= 4U) {
+                        directFlag = dbSegFlag[j];
+                        ++directCount;
+                    }
+                }
+                if (directCount == 1) {
+                    restored[i] = directFlag;
+                    continue;
+                }
+                if (directCount > 1) {
+                    ambiguous = true;
+                    allMatched = false;
+                    break;
+                }
+
+                unsigned int priceFlag = 0U;
+                bool priceFound = false;
+                bool priceAmbiguous = false;
+                for (size_t j = 0; j < count; ++j) {
+                    if (dbChargeFee[j] != targetCharge ||
+                        dbServiceFee[j] != targetService ||
+                        dbSegFlag[j] < 1U || dbSegFlag[j] > 4U) {
+                        continue;
+                    }
+                    if (!priceFound) {
+                        priceFlag = dbSegFlag[j];
+                        priceFound = true;
+                    } else if (priceFlag != dbSegFlag[j]) {
+                        priceAmbiguous = true;
+                        break;
+                    }
+                }
+                if (!priceFound || priceAmbiguous) {
+                    ambiguous = priceAmbiguous;
+                    allMatched = false;
+                    break;
+                }
+                restored[i] = priceFlag;
+            }
+
+            if (allMatched) {
+                segFlag.swap(restored);
+                result = 1;
+            } else if (ambiguous) {
+                result = -1;
+            }
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return result;
 }
 
 int ChargeLogicProcess::getCurrentMinuteOfDay() const
@@ -2897,7 +3534,7 @@ void ChargeLogicProcess::applyEnergyDeltaToFee(uint8_t gun, double deltaKwh)
     gs.hasTotalAmount = true;
 }
 
-// BY ZF: 预充金额接近阈值时，触发停机
+// BY ZF: precharge amount close to threshold triggers stop.
 void ChargeLogicProcess::maybeTriggerTcuStopByPrecharge(uint8_t gun)
 {
     if (gun >= m_gunStates.size()) {
@@ -2907,7 +3544,7 @@ void ChargeLogicProcess::maybeTriggerTcuStopByPrecharge(uint8_t gun)
     const bool mergeCharge = (gs.mergeChargeFlag != 0x00);
     const int peer = mergeCharge ? getMergePeerGun(gun) : -1;
     if (mergeCharge && peer >= 0) {
-        // BY ZF: 合并充余额停机只由主枪统一判定，避免双枪重复触发。
+        // BY ZF: 合并充余额停机只由主枪统一判定，避免双枪重复触发�?
         const uint8_t primaryGun = (gun < static_cast<uint8_t>(peer)) ? gun : static_cast<uint8_t>(peer);
         if (gun != primaryGun) {
             return;
@@ -3000,7 +3637,7 @@ bool ChargeLogicProcess::maybeHandlePlugAndChargeAuthTimeout(
     const bool mergePlugAndCharge = (gs.plugAndChargeActive && gs.mergeChargeFlag != 0x00);
     const int peer = mergePlugAndCharge ? getMergePeerGun(gun) : -1;
     if (mergePlugAndCharge && peer >= 0) {
-        // BY ZF: 合并充电只由主枪执行一次平台鉴权超时收口，避免双枪重复下发 0x19 失败。
+        // BY ZF: 合并充电只由主枪执行一次平台鉴权超时收口，避免双枪重复下发 0x19 失败�?
         const uint8_t primaryGun = (gun < static_cast<uint8_t>(peer)) ? gun : static_cast<uint8_t>(peer);
         if (gun != primaryGun) {
             return false;
@@ -3060,7 +3697,7 @@ void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
     if (gun >= m_gunStates.size()) {
         return;
     }
-    //TODO:流程仍需优化，有点太复杂了
+    //TODO:流程仍需优化，有点太复杂�?
     GunState& gs = m_gunStates[gun];
     std::string vin = sanitizeVinString(data ? getString(data, "vin") : "");
     if (!vin.empty()) {
@@ -3122,8 +3759,7 @@ void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
     }
 
     GunState& peerGs = m_gunStates[peer];
-    // BY ZF: 合并充即插即充场景下，若一侧已经因其他原因退出 STARTING，
-    // 之后迟到的 vehicle_id 不应再按 invalid_vin 覆盖原始启动失败原因。
+    // BY ZF: 合并充即插即充场景下，若一侧已经因其他原因退�?STARTING�?    // 之后迟到�?vehicle_id 不应再按 invalid_vin 覆盖原始启动失败原因�?
     if (!gs.plugAndChargeActive ||
         gs.state != STATE_STARTING ||
         !peerGs.plugAndChargeActive ||
@@ -3186,7 +3822,7 @@ void ChargeLogicProcess::handlePlugAndChargeVehicleId(uint8_t gun, cJSON* data)
         for (size_t idx = 0; idx < 2; ++idx) {
             const uint8_t targetGun = (idx == 0) ? gun : static_cast<uint8_t>(peer);
             GunState& targetGs = m_gunStates[targetGun];
-            // BY ZF: 双枪 VIN 不一致属于合并充即插即充鉴权失败，不按非法 VIN 回 0x18 失败。
+            // BY ZF: 双枪 VIN 不一致属于合并充即插即充鉴权失败，不按非�?VIN �?0x18 失败�?
             cJSON* confirmData = cJSON_CreateObject();
             cJSON_AddNumberToObject(confirmData, "successFlag", 0x00);
             cJSON_AddNumberToObject(confirmData, "failReason", 0x00);
@@ -3332,7 +3968,7 @@ void ChargeLogicProcess::handlePlugAndChargeAuthResult(uint8_t gun, cJSON* data,
         failReason = 0x02;
     }
 
-    // BY ZF: 当前枪先缓存各自的鉴权结果；合并充即插即充需等待对枪结果也到齐后再双枪同时继续。
+    // BY ZF: 当前枪先缓存各自的鉴权结果；合并充即插即充需等待对枪结果也到齐后再双枪同时继续�?
     gs.plugAndChargeAuthResultReady = true;
     gs.plugAndChargeAuthCachedSuccess = authSuccess;
     gs.plugAndChargeAuthCachedFailReason = failReason;
@@ -3502,8 +4138,7 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
     switch (gs.state) {
     case STATE_IDLE:
         if (evt == EVT_VEHICLE_CONNECTED) {
-            // BY ZF: 电表、平台、主控离线故障是持续状态，未恢复在线前插枪应直接进入故障态，不能进入 PREPARE。
-            // if (gs.meterOfflineFaultActive || gs.platformOfflineFaultActive || gs.pileOfflineFaultActive) {
+            // BY ZF: 电表、平台、主控离线故障是持续状态，未恢复在线前插枪应直接进入故障态，不能进入 PREPARE�?            // if (gs.meterOfflineFaultActive || gs.platformOfflineFaultActive || gs.pileOfflineFaultActive) {
                 if (gs.meterOfflineFaultActive || gs.pileOfflineFaultActive) {
                 transitionTo(gun, STATE_ERROR, "link_fault_active");
             } else {
@@ -3517,7 +4152,7 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
         break;
     case STATE_PREPARE:
         if (evt == EVT_AUTH_OK) {
-            // BY ZF: 鉴权通过后下发启动命令
+            // BY ZF: 鉴权通过后下发启动命�?
             if (gs.pendingStart) {
                 if (!gs.pendingStartData.empty()) {
                     cJSON* startData = cJSON_Parse(gs.pendingStartData.c_str());
@@ -3603,7 +4238,7 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
         if (evt == EVT_STOP_COMPLETE) {
             gs.stopCompleteSeen = true;
         } else if (evt == EVT_METER_STALE) {
-            // BY ZF: 电表稳定/超时只是 STOPPING->STOPPED 的内部收敛条件，不能覆盖真实停机原因。
+            // BY ZF: 电表稳定/超时只是 STOPPING->STOPPED 的内部收敛条件，不能覆盖真实停机原因�?
             transitionTo(gun, STATE_STOPPED, "");
         }
         break;
@@ -3628,7 +4263,7 @@ void ChargeLogicProcess::handleEvent(uint8_t gun, EventType evt, const char* rea
 
 void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* reason)
 {
-    // BY ZF: 集中状态切换
+    // BY ZF: 集中状态切�?
     GunState& gs = m_gunStates[gun];
     if (gs.state == to) {
         return;
@@ -3644,7 +4279,7 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
         gs.startingRetrySent = false;
     }
     if (to == STATE_CHARGING) {
-        // BY ZF: 进入 CHARGING 时锁定计时起点，feeData.chargedTime 仅使用该起点计算。
+        // BY ZF: 进入 CHARGING 时锁定计时起点，feeData.chargedTime 仅使用该起点计算�?
         gs.chargingEnterTime = std::chrono::steady_clock::now();
         gs.startSuccessFlag = true;
         gs.chargingMeterVoltageNormalSeen = false;
@@ -3656,7 +4291,7 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
         gs.chargingMeterVoltageNormalSeen = false;
         gs.meteringAbnormalTriggered = false;
     }
-    // BY ZF: 状态切换同时写 logger，便于后续排查状态机流转。
+    // BY ZF: 状态切换同时写 logger，便于后续排查状态机流转�?
     {
         std::ostringstream details;
         details << "gun=" << static_cast<int>(gun)
@@ -3678,12 +4313,13 @@ void ChargeLogicProcess::transitionTo(uint8_t gun, ChargeState to, const char* r
         }
     }
     if (to == STATE_IDLE) {
-        // BY ZF: 回到空闲态时清理本次充电流程上下文
+        // BY ZF: 回到空闲态时清理本次充电流程上下�?
         resetChargeSessionState(gun);
-        // BY ZF: 进入 IDLE 时补发一条清零 feeData。
+        // BY ZF: 进入 IDLE 时补发一条清�?feeData�?
         publishFeeData(gun);
         maybeStartPendingOfflineCardSettlement();
     }
+    reconcileAutoCardWaiting("state_change");
 }
 
 void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
@@ -3754,6 +4390,7 @@ void ChargeLogicProcess::resetChargeSessionState(uint8_t gun)
     gs.feeModelId.clear();
     gs.feeTimeNum = 0;
     gs.feeTimeSegMinutes.clear();
+    gs.feeSegFlag.clear();
     gs.feeChargePricePerKwh.clear();
     gs.feeServicePricePerKwh.clear();
     gs.feeSegEnergyKwh.clear();
@@ -3824,7 +4461,7 @@ void ChargeLogicProcess::logTradeRecordOnStopped(uint8_t gun, const char* reason
     rec.startPoint = 0;
     rec.crossPoints = 0;
     rec.pointsElect.clear();
-    // BY ZF: 离线刷卡订单优先记录实际刷到的卡号，避免 userNo 未落到交易记录时丢失卡号。
+    // BY ZF: 离线刷卡订单优先记录实际刷到的卡号，避免 userNo 未落到交易记录时丢失卡号�?
     rec.cardNumber = gs.offlineCardNoHex.empty() ? gs.chargeUserNo : gs.offlineCardNoHex;
 
     m_logSender.logTradeRecord(rec);
@@ -3839,7 +4476,7 @@ void ChargeLogicProcess::logTradeRecordOnStopped(uint8_t gun, const char* reason
 
 void ChargeLogicProcess::enterStopping(uint8_t gun, const char* reason)
 {
-    // BY ZF: 进入 STOPPING 并下发 stop_charge
+    // BY ZF: 进入 STOPPING 并下�?stop_charge
     transitionTo(gun, STATE_STOPPING, reason);
     m_gunStates[gun].vehicleDisconnectedDuringStopping = false;
     m_gunStates[gun].stopCompleteSeen = false;
@@ -3848,7 +4485,7 @@ void ChargeLogicProcess::enterStopping(uint8_t gun, const char* reason)
     publishPileCmd(gun, "stop_charge", nullptr);
     m_gunStates[gun].lastStopCmdTime = std::chrono::steady_clock::now();
 
-    // BY ZF: 合并充电模式下，任一枪收到停止命令后，需要同时给对枪下发停止命令。
+    // BY ZF: 合并充电模式下，任一枪收到停止命令后，需要同时给对枪下发停止命令�?
     if (m_gunStates[gun].mergeChargeFlag != 0x00) {
         const int peer = getMergePeerGun(gun);
         if (peer >= 0 && static_cast<size_t>(peer) < m_gunStates.size()) {

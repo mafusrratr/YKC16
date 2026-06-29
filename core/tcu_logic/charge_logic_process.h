@@ -34,6 +34,10 @@ struct ChargeLogicConfig {
     std::string pileConfigPath;     // pile_controller 配置路径（用于复用枪数）
     double prechargeStopMargin;     // 预充触发停机的剩余金额阈值
     bool cardLockEnabled;           // BY ZF: 是否启用锁卡流程
+    bool cardAutoWaitEnabled;       // BY LZW: 单枪 PREPARE 时是否自动进入刷卡等待
+    bool cardFeeModelFallbackEnabled; // BY LZW: 刷卡启动无计费模型时是否从本地DB兜底加载
+    std::string feeDbPath;          // BY LZW: 计费模型数据库路径
+    std::vector<std::string> cardWhitelist; // BY LZW: 本地钥匙卡白名单，使用归一化后的 cardNoHex。
 
     ChargeLogicConfig()
         : gunCount(1)
@@ -43,6 +47,9 @@ struct ChargeLogicConfig {
         , biasNo(0)
         , prechargeStopMargin(3.0)
         , cardLockEnabled(false)
+        , cardAutoWaitEnabled(false)
+        , cardFeeModelFallbackEnabled(false)
+        , feeDbPath("/mnt/nandflash/data/feemodel.db")
     {}
 };
 
@@ -154,6 +161,7 @@ private:
         std::string feeModelId;                 // 计费模型ID
         uint8_t feeTimeNum;                     // 时段数
         std::vector<int> feeTimeSegMinutes;     // 时段起点(分钟, 0~1439)
+        std::vector<unsigned int> feeSegFlag;   // BY LZW: 计费时段类别，保留平台/YLC下发的尖峰平谷标志(1~4)
         std::vector<double> feeChargePricePerKwh;   // 各时段电价(元/kWh)
         std::vector<double> feeServicePricePerKwh;  // 各时段服务费(元/kWh)
         std::vector<double> feeSegEnergyKwh;         // 各时段累计电量(kWh)
@@ -291,16 +299,19 @@ private:
         CARD_PHASE_WAIT_SETTLEMENT_WRITE,
         CARD_PHASE_WAIT_SETTLEMENT_UNLOCK,
         CARD_PHASE_WAIT_SETTLEMENT_VERIFY,
-        CARD_PHASE_WAIT_RF_CLOSE
+        CARD_PHASE_WAIT_RF_CLOSE,
+        CARD_PHASE_WAIT_AUTO_RF_CLOSE // BY LZW: 自动待卡取消后的射频关闭等待
     };
 
     struct CardReaderState {
         bool rfOpened;
+        bool autoWaiting; // BY LZW: 当前 WAIT_START_CARD 是否由单枪 PREPARE 自动触发
         CardReaderPhase phase;
         uint8_t gun;
 
         CardReaderState()
             : rfOpened(false)
+            , autoWaiting(false)
             , phase(CARD_PHASE_IDLE)
             , gun(0)
         {}
@@ -336,8 +347,15 @@ private:
     bool parseTradeRecordFromJson(cJSON* data, TradeRecord& rec);
     void replayBufferedUnconfirmedRecords();
     // BY ZF: 启动鉴权参数与计费模型解析
-    void updateAuthBasis(uint8_t gun, cJSON* data, const char* source);
-    bool parseFeeModel(uint8_t gun, cJSON* data);
+    void updateAuthBasis(uint8_t gun, cJSON* data, const char* source, bool saveFeeModel = true);
+    bool parseFeeModel(uint8_t gun, cJSON* data, bool saveFeeModel = true);
+    int restoreFeeSegFlagsFromDb(const std::string& feeModelId,
+                                 const std::vector<int>& timeSegMinutes,
+                                 const std::vector<double>& chargeFee,
+                                 const std::vector<double>& serviceFee,
+                                 std::vector<unsigned int>& segFlag);
+    bool loadLatestFeeModelPayloadFromDb(cJSON* data); // BY LZW: 刷卡启动计费模型DB兜底
+    bool appendCurrentFeeModelToJson(uint8_t gun, cJSON* data) const; // BY LZW: 将当前枪计费模型补入启动参数
     int getMergePeerGun(uint8_t gun) const;
     bool armPendingStart(uint8_t gun, cJSON* data, const char* source);
     bool tryDispatchMergePendingStart(uint8_t gun, const char* startReason, const char* authReason);
@@ -365,7 +383,9 @@ private:
     void resetChargeSessionState(uint8_t gun);
     void resetCardReaderState();
     void resetGunOfflineCardState(uint8_t gun);
-    void startOfflineCardFlow(uint8_t gun, cJSON* data);
+    void startOfflineCardFlow(uint8_t gun, cJSON* data, bool autoTriggered = false);
+    void reconcileAutoCardWaiting(const char* reason);
+    bool cancelAutoCardWaiting(const char* reason, int prepareCount);
     void beginOfflineCardCharge(uint8_t gun);
     void prepareOfflineCardSettlement(uint8_t gun);
     void beginOfflineCardSettlement(uint8_t gun);
@@ -375,6 +395,8 @@ private:
     bool hasOfflineCardChargingSession() const;
     bool hasPendingCardSettlement() const;
     bool isCardReaderBusy() const;
+    bool isCardWhitelisted(const std::string& cardNoHex) const;
+    bool isLocalCardSessionActive(uint8_t gun) const;
     std::string getCardCmdTopic() const;
     std::string getCardEventTopic() const;
     static const char* stateToString(ChargeState s);

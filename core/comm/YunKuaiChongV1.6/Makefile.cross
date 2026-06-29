@@ -1,0 +1,104 @@
+# tcu_comm YLC process cross Makefile (iMX6UL)
+# BY LZW
+
+CROSS_COMPILE ?= arm-linux-gnueabihf-
+CXX = $(CROSS_COMPILE)g++
+AR = $(CROSS_COMPILE)ar
+CXXFLAGS = -Wall -O2 -std=c++11
+# BY LZW: 工具链库路径（用于必要时设置运行时搜索路径）。
+TOOLCHAIN_LIB_PATH ?= $(shell dirname $(shell which $(CXX) 2>/dev/null || echo /usr/bin/g++))/../lib
+# BY LZW: 增加 OpenSSL 头文件目录（本模块内置拷贝）。
+INCLUDES = -I../../base -I../../interfaces -I../../base/mqtt -I../../base/mqtt/include -I../../base/cjson/include -I./openssl/include -I../../../extraLib/sql
+
+# BY LZW: 外部库路径允许按平台切换，如 extraLib/jzq、extraLib/imx6ul。
+EXTRA_LIB_PATH ?= ../../../extraLib
+PLATFORM ?=
+ifeq ($(PLATFORM),)
+ifeq ($(CROSS_COMPILE),arm-none-linux-gnueabi-)
+PLATFORM := jzq
+else ifeq ($(CROSS_COMPILE),arm-linux-gnueabihf-)
+PLATFORM := imx6ul
+else ifeq ($(CROSS_COMPILE),arm-nuvoton-linux-uclibceabi-)
+PLATFORM := nuc980
+endif
+endif
+# BY LZW: 仅 jzq 默认静态链接 libstdc++/libgcc，其他平台默认动态链接以控制体积。
+DEFAULT_STATIC_STDCPP = 0
+ifeq ($(PLATFORM),jzq)
+DEFAULT_STATIC_STDCPP = 1
+endif
+STATIC_STDCPP ?= $(DEFAULT_STATIC_STDCPP)
+PLATFORM_LIB_PATH = $(if $(PLATFORM),$(EXTRA_LIB_PATH)/$(PLATFORM),$(EXTRA_LIB_PATH))
+
+OBJ_DIR = obj
+RELEASE_DIR = release
+DOC_DIR = doc
+TARGET = $(RELEASE_DIR)/tcu_comm
+
+SOURCES = main.cpp comm_process.cpp \
+          ../../base/mqtt/mqtt_client.cpp
+BASE_SOURCES = ../../base/common/config_manager_lite.cpp \
+               ../../base/common/message_queue.cpp \
+               ../../base/logger/log_sender.cpp \
+               ../../base/process/base_process.cpp
+
+OBJECTS = $(OBJ_DIR)/main.o \
+          $(OBJ_DIR)/comm_process.o \
+          $(OBJ_DIR)/mqtt/mqtt_client.o \
+          $(addprefix $(OBJ_DIR)/, $(notdir $(BASE_SOURCES:.cpp=.o)))
+
+# BY LZW: 优先从平台对应目录链接交叉编译后的动态库。
+LIBDIRS = -L$(PLATFORM_LIB_PATH) -L$(EXTRA_LIB_PATH)
+RPATH = -Wl,-rpath,$(PLATFORM_LIB_PATH):$(EXTRA_LIB_PATH):$(TOOLCHAIN_LIB_PATH):/usr/lib:/lib
+MOSQUITTO_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libmosquitto.so),-lmosquitto,$(if $(wildcard $(PLATFORM_LIB_PATH)/libmosquitto.so.1),-l:libmosquitto.so.1,$(if $(wildcard $(EXTRA_LIB_PATH)/libmosquitto.so),-lmosquitto,$(if $(wildcard $(EXTRA_LIB_PATH)/libmosquitto.so.1),-l:libmosquitto.so.1,-lmosquitto))))
+CJSON_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libcjson.so),-lcjson,$(if $(wildcard $(PLATFORM_LIB_PATH)/libcjson.so.1.7.17),-l:libcjson.so.1.7.17,$(if $(wildcard $(EXTRA_LIB_PATH)/libcjson.so),-lcjson,$(if $(wildcard $(EXTRA_LIB_PATH)/libcjson.so.1.7.17),-l:libcjson.so.1.7.17,-lcjson))))
+SSL_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libssl.so),-lssl,$(if $(wildcard $(PLATFORM_LIB_PATH)/libssl.so.1.1),-l:libssl.so.1.1,$(if $(wildcard $(EXTRA_LIB_PATH)/libssl.so),-lssl,$(if $(wildcard $(EXTRA_LIB_PATH)/libssl.so.1.1),-l:libssl.so.1.1,-lssl))))
+CRYPTO_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libcrypto.so),-lcrypto,$(if $(wildcard $(PLATFORM_LIB_PATH)/libcrypto.so.1.1),-l:libcrypto.so.1.1,$(if $(wildcard $(EXTRA_LIB_PATH)/libcrypto.so),-lcrypto,$(if $(wildcard $(EXTRA_LIB_PATH)/libcrypto.so.1.1),-l:libcrypto.so.1.1,-lcrypto))))
+SQLITE_LIB = $(if $(wildcard $(PLATFORM_LIB_PATH)/libsqlite3.so),-lsqlite3,$(if $(wildcard $(PLATFORM_LIB_PATH)/libsqlite3.so.0),-l:libsqlite3.so.0,$(if $(wildcard $(EXTRA_LIB_PATH)/libsqlite3.so),-lsqlite3,$(if $(wildcard $(EXTRA_LIB_PATH)/libsqlite3.so.0),-l:libsqlite3.so.0,-lsqlite3))))
+LIBS = -lpthread $(MOSQUITTO_LIB) $(CJSON_LIB) $(SSL_LIB) $(CRYPTO_LIB) $(SQLITE_LIB)
+ifeq ($(STATIC_STDCPP),1)
+LIBS += -static-libstdc++ -static-libgcc
+CXXFLAGS += -static-libstdc++ -static-libgcc
+endif
+
+all: directories $(TARGET)
+
+directories:
+	@mkdir -p $(OBJ_DIR) $(RELEASE_DIR) $(DOC_DIR)
+
+$(TARGET): $(OBJECTS)
+	$(CXX) $(OBJECTS) -o $(TARGET) $(LIBDIRS) $(RPATH) $(LIBS) -s
+	@echo "Build completed: $(TARGET)"
+
+$(OBJ_DIR)/%.o: %.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/mqtt/%.o: ../../base/mqtt/%.cpp
+	@mkdir -p $(OBJ_DIR)/mqtt
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/%.o: ../../base/common/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/%.o: ../../base/logger/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+$(OBJ_DIR)/%.o: ../../base/process/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+clean:
+	rm -rf $(OBJ_DIR) $(RELEASE_DIR)
+
+install: $(TARGET)
+	@echo "Installing to release directory..."
+	@cp $(TARGET) $(RELEASE_DIR)/
+
+info:
+	@echo "CROSS_COMPILE: $(CROSS_COMPILE)"
+	@echo "PLATFORM: $(PLATFORM)"
+	@echo "PLATFORM_LIB_PATH: $(PLATFORM_LIB_PATH)"
+	@echo "TOOLCHAIN_LIB_PATH: $(TOOLCHAIN_LIB_PATH)"
+	@echo "STATIC_STDCPP: $(STATIC_STDCPP)"
+	@echo "LIBS: $(LIBS)"
+
+.PHONY: all clean install directories info

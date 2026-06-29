@@ -55,6 +55,7 @@ enum CardBusinessOp {
 
 struct CardBusinessCommand {
     CardBusinessOp op;
+    bool keyReadMode;               // BY LZW: 钥匙卡只读卡号，不读取/校验余额块。
     bool hasCardNo;
     std::vector<uint8_t> cardNo;
     bool hasCardBalance;
@@ -62,6 +63,7 @@ struct CardBusinessCommand {
 
     CardBusinessCommand()
         : op(CARD_BIZ_NONE)
+        , keyReadMode(false)
         , hasCardNo(false)
         , hasCardBalance(false)
         , cardBalance(0)
@@ -106,7 +108,7 @@ private:
     bool handleBusinessCommand(const CardBusinessCommand& cmd, std::string& err);
     bool handleOpenRf(std::string& err);
     bool handleCloseRf(std::string& err);
-    bool handleCardRead(std::string& err);
+    bool handleCardRead(const CardBusinessCommand& cmd, std::string& err);
     bool handleCardWrite(const CardBusinessCommand& cmd, std::string& err);
     bool handleCardLock(bool locked, std::string& err);
 
@@ -116,6 +118,7 @@ private:
     bool readBlock(uint8_t blockNo, std::vector<uint8_t>& data, std::string& err);
     bool writeBlock(uint8_t blockNo, const std::vector<uint8_t>& data, std::string& err);
     bool readCardInfo(CardBusinessInfo& info, std::string& err);
+    bool readCardKeyInfo(CardBusinessInfo& info, std::string& err);
     bool readCardInfoByUid(const std::vector<uint8_t>& uid, CardBusinessInfo& info, std::string& err);
     void triggerBuzzer();
     void debugLog(const std::string& msg) const;
